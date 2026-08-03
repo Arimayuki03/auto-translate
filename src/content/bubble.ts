@@ -1,6 +1,6 @@
-/** 划词翻译气泡（F-010）：选中文本 → 译文气泡，可复制/关闭/重试 */
+/** 划词翻译气泡（F-010）：选中文本 → 译文气泡，可拖动/复制/关闭/重试 */
 import type { PageEngine } from "./engine";
-import { copyText, isInsideOurUI } from "./ui";
+import { copyText, isInsideOurUI, makeDraggable } from "./ui";
 
 const DEDUP_WINDOW_MS = 3000;
 const MAX_RECENT = 100;
@@ -31,19 +31,25 @@ export function initBubble(engine: PageEngine, translateOnSelect: boolean): void
     recent.set(text, now);
     if (recent.size > MAX_RECENT) recent.delete(recent.keys().next().value as string);
 
-    bubble = translateOnSelect ? buildBubble() : buildTranslateButton();
-    position(bubble, rect);
     if (translateOnSelect) {
+      bubble = buildBubble();
+      position(bubble, rect);
+      makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
       void renderTranslation(bubble, text, engine);
     } else {
-      const btn = bubble.querySelector("button") as HTMLButtonElement;
+      // 先显示一个小「译」按钮，点击才翻译
+      const btn = document.createElement("button");
+      btn.className = "it-translate-sel";
+      btn.textContent = "译";
+      btn.title = "翻译选中内容";
+      bubble = btn;
+      position(btn, rect);
       btn.addEventListener("click", () => {
         btn.remove();
-        bubble!.classList.remove("it-bubble-button");
-        bubble!.classList.add("it-bubble-loading");
-        const body = bubble!.querySelector(".it-bubble-body") as HTMLElement;
-        body.style.display = "";
-        void renderTranslation(bubble!, text, engine);
+        bubble = buildBubble();
+        position(bubble, rect);
+        makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
+        void renderTranslation(bubble, text, engine);
       });
     }
   });
@@ -80,35 +86,28 @@ function buildBubble(): HTMLElement {
   const el = document.createElement("div");
   el.className = "it-bubble it-bubble-loading";
   el.setAttribute("data-it-ui", "");
+
+  const header = document.createElement("div");
+  header.className = "it-bubble-header";
+  const title = document.createElement("span");
+  title.textContent = "译文";
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.title = "关闭";
+  closeBtn.addEventListener("click", () => el.remove());
+  header.append(title, closeBtn);
+
   const body = document.createElement("div");
   body.className = "it-bubble-body";
-  el.appendChild(body);
 
   const actions = document.createElement("div");
   actions.className = "it-bubble-actions";
   const copy = document.createElement("button");
   copy.textContent = "复制";
   copy.addEventListener("click", () => copyText(body.textContent ?? ""));
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "关闭";
-  closeBtn.addEventListener("click", () => el.remove());
-  actions.append(copy, closeBtn);
-  el.appendChild(actions);
-  return el;
-}
+  actions.appendChild(copy);
 
-function buildTranslateButton(): HTMLElement {
-  const el = document.createElement("div");
-  el.className = "it-bubble it-bubble-button";
-  el.setAttribute("data-it-ui", "");
-  const btn = document.createElement("button");
-  btn.className = "it-translate-sel";
-  btn.textContent = "译";
-  btn.title = "翻译选中内容";
-  const body = document.createElement("div");
-  body.className = "it-bubble-body";
-  body.style.display = "none";
-  el.append(btn, body);
+  el.append(header, body, actions);
   return el;
 }
 
@@ -119,15 +118,16 @@ function getSelectionRect(sel: Selection): DOMRect | null {
   return rect;
 }
 
-/** 固定定位气泡，视口内放不下时翻到选区上方 */
+/** 挂载并固定定位到选区旁，视口内放不下时翻到选区上方 */
 function position(el: HTMLElement, rect: DOMRect): void {
   document.body.appendChild(el);
-  const w = el.offsetWidth;
-  const h = el.offsetHeight;
+  const w = el.offsetWidth || 40;
+  const h = el.offsetHeight || 20;
   let left = rect.left;
   let top = rect.bottom + 8;
   if (top + h > innerHeight) top = rect.top - h - 8;
   left = Math.min(Math.max(left, 8), Math.max(8, innerWidth - w - 8));
+  top = Math.min(Math.max(top, 8), innerHeight - h - 8);
   el.style.left = `${left}px`;
-  el.style.top = `${Math.max(8, top)}px`;
+  el.style.top = `${top}px`;
 }

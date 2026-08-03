@@ -1,6 +1,10 @@
 import type { ApiConfig, Settings } from "./types";
 
+/** 设置结构版本：变更默认值（如自动翻译默认关闭）时 +1，老版本读取时迁移 */
+const SETTINGS_VERSION = 2;
+
 export const DEFAULT_SETTINGS: Settings = {
+  version: SETTINGS_VERSION,
   api: {
     format: "openai",
     baseUrl: "",
@@ -13,7 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   translate: {
     targetLang: "zh-CN",
     displayMode: "bilingual",
-    autoTranslate: true,
+    autoTranslate: false,
     autoDetectSource: true,
     minTextLength: 4,
     blockMaxChars: 1200,
@@ -58,6 +62,11 @@ export async function getSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get("settings");
   const saved = stored.settings as Partial<Settings> | undefined;
   const merged = mergeSettings(DEFAULT_SETTINGS, saved ?? {});
+  // v1 → v2：自动翻译默认关闭，老设置里存的 true 归零（下次保存时落盘）
+  if (saved && saved.version !== SETTINGS_VERSION) {
+    merged.translate.autoTranslate = DEFAULT_SETTINGS.translate.autoTranslate;
+    merged.version = SETTINGS_VERSION;
+  }
   merged.api.apiKey = decryptApiKey(merged.api.apiKey);
   if (merged.backupApi) {
     merged.backupApi.apiKey = decryptApiKey(merged.backupApi.apiKey);

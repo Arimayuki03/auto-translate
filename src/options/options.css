@@ -54,6 +54,19 @@ h2 {
   margin-bottom: 6px;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--it-primary);
+}
+
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],

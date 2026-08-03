@@ -43,7 +43,15 @@ async function main(): Promise<void> {
   });
 
   if (settings.translate.autoTranslate) {
-    await engine.translateAll();
+    // 只翻译当前前台标签页；后台标签页等切到前台再译，避免后台抢 API 额度
+    if (document.visibilityState === "visible") {
+      await engine.translateAll();
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        void engine.translateAll(); // translateAll 元素级去重，无新内容时为 no-op
+      }
+    });
   }
 }
 

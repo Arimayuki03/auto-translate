@@ -67,6 +67,7 @@ async function loadForm(): Promise<void> {
     input("backup-api-key").value = s.backupApi.apiKey;
     input("backup-model").value = s.backupApi.model;
   }
+  ($("auto-translate") as HTMLInputElement).checked = s.translate.autoTranslate;
   updateFormatHint();
 }
 
@@ -95,7 +96,15 @@ async function readForm(): Promise<Settings> {
           maxConcurrency: api.maxConcurrency,
         }
       : undefined;
-  return { ...current, api, backupApi };
+  return {
+    ...current,
+    api,
+    backupApi,
+    translate: {
+      ...current.translate,
+      autoTranslate: ($("auto-translate") as HTMLInputElement).checked,
+    },
+  };
 }
 
 function init(): void {

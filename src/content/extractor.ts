@@ -48,7 +48,8 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
   let node: Node | null;
   while ((node = walker.nextNode())) {
     const t = node as Text;
-    const container = nearestBlockContainer(t);
+    // 独立菜单/导航链接 → 锚定到链接自身，避免多个链接合并成一块译文
+    const container = getStandaloneLink(t) ?? nearestBlockContainer(t);
     if (container === document.body) continue;
     let list = grouped.get(container);
     if (!list) grouped.set(container, (list = []));
@@ -69,7 +70,19 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
   return units;
 }
 
-/** 文本节点是否位于排除区域（标签 / 属性 / 可编辑） */
+/** 元素是否视觉隐藏：display:none / visibility:hidden / sr-only 式屏幕阅读器隐藏 */
+function isHiddenElement(el: HTMLElement): boolean {
+  const cs = getComputedStyle(el);
+  if (cs.display === "none" || cs.visibility === "hidden") return true;
+  // sr-only / visually-hidden：绝对定位 + 极小尺寸（如 GitHub 侧栏的 sr-only 标题）
+  if (cs.position === "absolute" || cs.position === "fixed") {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 2 && r.height <= 2) return true;
+  }
+  return false;
+}
+
+/** 文本节点是否位于排除区域（标签 / 属性 / 可编辑 / 站内锚点链接 / 视觉隐藏） */
 function isExcluded(node: Text): boolean {
   for (
     let el: HTMLElement | null = node.parentElement;
@@ -77,6 +90,9 @@ function isExcluded(node: Text): boolean {
     el = el.parentElement
   ) {
     if (EXCLUDED_TAGS.has(el.tagName)) return true;
+    if (isHiddenElement(el)) return true;
+    // 站内锚点/跳转链接（如 GitHub 顶部 "Skip to content"）：无障碍导航，非内容，不翻译
+    if (el.tagName === "A" && el.getAttribute("href")?.startsWith("#")) return true;
     if (el.hasAttribute("data-it-unit") || el.hasAttribute("data-it-ui")) return true;
     if (el.isContentEditable) return true;
     if (el.getAttribute("aria-hidden") === "true") return true;
@@ -98,6 +114,31 @@ function nearestBlockContainer(node: Text): HTMLElement {
     current = parent;
   }
   return current;
+}
+
+/**
+ * 独立菜单/导航链接：文本在 <a> 内，且该 <a> 平铺在导航容器（nav/ul/ol/header/footer）
+ * 或「父级只有 <a> 子元素」的菜单里。这种链接应单独成单元，避免多个链接合并成一块译文
+ * 塞进容器末尾，导致页面中间出现多余的译文。
+ */
+function getStandaloneLink(node: Text): HTMLElement | null {
+  let a: HTMLElement | null = null;
+  for (let el = node.parentElement; el && el !== document.body; el = el.parentElement) {
+    if (el.tagName === "A") {
+      a = el;
+      break;
+    }
+  }
+  if (!a || !a.parentElement) return null;
+  const parent = a.parentElement;
+  if (["NAV", "UL", "OL", "HEADER", "FOOTER"].includes(parent.tagName)) return a;
+  // 父级只含链接（和空白文本）→ 是菜单，拆开每个链接
+  const kids = Array.from(parent.childNodes);
+  const links = kids.filter((c) => c.nodeName === "A");
+  const onlyLinks =
+    links.length >= 2 &&
+    kids.every((c) => c.nodeName === "A" || (c.nodeType === 3 && !c.textContent?.trim()));
+  return onlyLinks ? a : null;
 }
 
 /** 拼接容器内文本节点；相邻换行标签（br / 块级）转成空格 */

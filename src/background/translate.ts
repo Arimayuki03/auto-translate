@@ -61,8 +61,8 @@ export class TranslateService {
     if (joined.length > 1) {
       try {
         const batch = await this.runConcurrent(limit, () => this.callApi(settings, joined, targetLang));
-        const parts = splitBatch(batch);
-        if (parts.length === joined.length) {
+        const parts = splitBatch(batch, joined.length);
+        if (parts) {
           for (let k = 0; k < joined.length; k++) {
             const t = parts[k];
             results[toFetch[k]] = t;
@@ -75,12 +75,20 @@ export class TranslateService {
       }
     }
 
-    for (const idx of toFetch) {
-      const text = await this.runConcurrent(limit, () => this.callApi(settings, [texts[idx]], targetLang));
-      const t = text.trim();
-      results[idx] = t;
-      await this.cache.set(targetLang, texts[idx], t);
-    }
+    // 逐段降级：并发受限（一次最多 limit 个请求在途），显著快于串行
+    await Promise.all(
+      toFetch.map((idx) =>
+        this.runConcurrent(limit, () => this.callApi(settings, [texts[idx]], targetLang))
+          .then(async (text) => {
+            const t = text.trim();
+            results[idx] = t;
+            await this.cache.set(targetLang, texts[idx], t);
+          })
+          .catch(() => {
+            results[idx] = "";
+          })
+      )
+    );
     return results;
   }
 
@@ -93,7 +101,7 @@ export class TranslateService {
         content:
           texts.length === 1
             ? texts[0]
-            : `请逐段翻译以下内容，段与段之间用空行分隔，保持顺序：\n\n${texts.join("\n\n")}`,
+            : `请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\n${texts.join("\n")}`,
       },
     ];
     try {
@@ -132,11 +140,16 @@ export class TranslateService {
   }
 }
 
-/** 按空行拆分批量译文；不足 2 段时按整段返回 */
-function splitBatch(batch: string): string[] {
-  const parts = batch
-    .split(/\n{2,}/)
-    .map((s) => s.trim())
+/**
+ * 拆分批量译文：先按行数匹配；模型加了编号时再按「数字. 译文」抽取。
+ * 都不匹配返回 null，走逐段并发降级。
+ */
+function splitBatch(batch: string, expected: number): string[] | null {
+  const lines = batch.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  if (lines.length === expected) return lines;
+  const numbered = lines
+    .map((l) => l.match(/^\d+[.、．:：]\s*(.+)$/)?.[1]?.trim() ?? "")
     .filter(Boolean);
-  return parts.length >= 2 ? parts : [batch.trim()];
+  if (numbered.length === expected) return numbered;
+  return null;
 }

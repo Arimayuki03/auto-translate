@@ -1,6 +1,7 @@
-/** 顶部悬浮工具条：翻译开关 / 模式 / 目标语言 / 设置 / 状态 / 收起（阶段 4） */
+/** 悬浮翻译按钮：红色小圆圈，点开显示详细设置（可拖动 / 位置记忆） */
 import type { DisplayMode } from "../shared/types";
 import type { EngineState, EngineStats, PageEngine } from "./engine";
+import { makeDraggable } from "./ui";
 
 const MODES: DisplayMode[] = ["bilingual", "translated", "original"];
 const MODE_LABEL: Record<DisplayMode, string> = {
@@ -15,8 +16,18 @@ const LANGUAGES: [string, string][] = [
   ["ko", "한국어"],
 ];
 
+const STORAGE_KEY = "it-toolbar-state";
+
+interface ToolbarState {
+  x?: number;
+  y?: number;
+  expanded?: boolean;
+}
+
 export class Toolbar {
   private el: HTMLElement;
+  private fab: HTMLElement;
+  private panel: HTMLElement;
   private toggleBtn: HTMLButtonElement;
   private modeSelect: HTMLSelectElement;
   private statusEl: HTMLElement;
@@ -25,6 +36,22 @@ export class Toolbar {
     this.el = document.createElement("div");
     this.el.className = "it-toolbar";
     this.el.setAttribute("data-it-ui", "");
+
+    // 红色小圆圈（默认态）：点击展开，拖动移动
+    this.fab = document.createElement("div");
+    this.fab.className = "it-fab";
+    this.fab.textContent = "译";
+    this.fab.title = "打开翻译设置";
+    this.fab.setAttribute("role", "button");
+
+    // 展开后的详细设置面板
+    this.panel = document.createElement("div");
+    this.panel.className = "it-panel";
+
+    const grip = document.createElement("span");
+    grip.className = "it-drag";
+    grip.textContent = "⠿";
+    grip.title = "拖动移动工具条";
 
     this.toggleBtn = document.createElement("button");
     this.toggleBtn.className = "it-toggle";
@@ -63,14 +90,32 @@ export class Toolbar {
     this.statusEl = document.createElement("span");
     this.statusEl.className = "it-status";
 
-    const collapseBtn = document.createElement("button");
-    collapseBtn.className = "it-collapse";
-    collapseBtn.textContent = "收起";
-    collapseBtn.title = "折叠工具条";
-    collapseBtn.addEventListener("click", () => this.el.classList.toggle("it-collapsed"));
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "it-close";
+    closeBtn.textContent = "✕";
+    closeBtn.title = "收起为圆点";
+    closeBtn.addEventListener("click", () => this.setExpanded(false));
 
-    this.el.append(this.toggleBtn, this.modeSelect, langSelect, settingsBtn, this.statusEl, collapseBtn);
+    this.panel.append(
+      grip,
+      this.toggleBtn,
+      this.modeSelect,
+      langSelect,
+      settingsBtn,
+      this.statusEl,
+      closeBtn
+    );
+    this.el.append(this.fab, this.panel);
     document.body.appendChild(this.el);
+
+    // 红点：拖动移动 / 轻点展开（handle 传 undefined，整个红点可拖且可点）
+    makeDraggable(this.el, undefined, {
+      onDragEnd: () => this.saveState(),
+      onTap: () => this.setExpanded(true),
+      threshold: 6,
+    });
+
+    void this.restoreState();
 
     engine.onStateChange = (state, stats) => this.setStatus(state, stats);
     this.setStatus(engine.state, { done: 0, error: 0, total: 0 });
@@ -86,6 +131,11 @@ export class Toolbar {
   destroy(): void {
     this.engine.onStateChange = undefined;
     this.el.remove();
+  }
+
+  private setExpanded(v: boolean): void {
+    this.el.classList.toggle("it-expanded", v);
+    this.saveState();
   }
 
   private onToggle(): void {
@@ -109,5 +159,26 @@ export class Toolbar {
     else if (state === "done") this.statusEl.textContent = `共 ${stats.total} 段完成`;
     else if (state === "partial") this.statusEl.textContent = `共 ${stats.total} 段，${stats.error} 段失败`;
     else this.statusEl.textContent = "未翻译";
+  }
+
+  private saveState(): void {
+    const state: ToolbarState = {
+      x: this.el.offsetLeft,
+      y: this.el.offsetTop,
+      expanded: this.el.classList.contains("it-expanded"),
+    };
+    void chrome.storage.local.set({ [STORAGE_KEY]: state });
+  }
+
+  private async restoreState(): Promise<void> {
+    const res = await chrome.storage.local.get(STORAGE_KEY);
+    const st = res[STORAGE_KEY] as ToolbarState | undefined;
+    if (!st) return;
+    if (typeof st.x === "number" && typeof st.y === "number") {
+      this.el.style.left = `${st.x}px`;
+      this.el.style.top = `${st.y}px`;
+      this.el.style.right = "auto";
+    }
+    if (st.expanded) this.el.classList.add("it-expanded");
   }
 }

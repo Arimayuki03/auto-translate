@@ -17,6 +17,8 @@ export interface ApiConfig {
 
 /** 扩展设置（chrome.storage.local，apiKey 落盘前加密） */
 export interface Settings {
+  /** 设置结构版本（用于迁移默认值变更） */
+  version?: number;
   api: ApiConfig;
   backupApi?: ApiConfig;
   translate: {
