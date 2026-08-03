@@ -24,7 +24,7 @@ async function main(): Promise<void> {
 
   initBubble(engine, settings.translate.translateOnSelect);
   initInput(engine, settings.translate.translateInput);
-  const observer = new PageObserver(engine);
+  new PageObserver(engine); // 构造即开始监听 SPA 动态内容
 
   // 快捷键（background 中继到当前标签页）
   chrome.runtime.onMessage.addListener((msg: ItCommandMessage) => {

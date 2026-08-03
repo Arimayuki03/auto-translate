@@ -92,6 +92,11 @@ export class TranslateService {
     return results;
   }
 
+  /** 清空译文缓存（设置页入口） */
+  async clearCache(): Promise<void> {
+    await this.cache.clear();
+  }
+
   /** 单次 API 调用：主 API 重试 → 可重试错误时切换备用 API */
   private async callApi(settings: Settings, texts: string[], targetLang: string): Promise<string> {
     const messages: ChatMessage[] = [
@@ -141,15 +146,16 @@ export class TranslateService {
 }
 
 /**
- * 拆分批量译文：先按行数匹配；模型加了编号时再按「数字. 译文」抽取。
- * 都不匹配返回 null，走逐段并发降级。
+ * 拆分批量译文：先剥离编号（模型可能输出 "1. 译文"），再按行数匹配。
+ * 都不匹配返回 null，走逐段并发降级。（导出供单元测试）
  */
-function splitBatch(batch: string, expected: number): string[] | null {
+export function splitBatch(batch: string, expected: number): string[] | null {
   const lines = batch.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const numbered = lines.map((l) => l.match(/^\d+[.、．:：]\s*(.+)$/)?.[1]?.trim());
+  // 若全部带编号，用剥离后的内容
+  if (numbered.every((n) => n !== undefined && n !== "")) {
+    if (numbered.length === expected) return numbered as string[];
+  }
   if (lines.length === expected) return lines;
-  const numbered = lines
-    .map((l) => l.match(/^\d+[.、．:：]\s*(.+)$/)?.[1]?.trim() ?? "")
-    .filter(Boolean);
-  if (numbered.length === expected) return numbered;
   return null;
 }

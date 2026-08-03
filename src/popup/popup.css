@@ -62,3 +62,12 @@ body {
 .btn:hover {
   opacity: 0.9;
 }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --it-primary: #3b82f6;
+    --it-bg: #1e293b;
+    --it-text: #e5e7eb;
+    --it-muted: #94a3b8;
+  }
+}

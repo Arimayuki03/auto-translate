@@ -200,7 +200,6 @@ export class PageEngine {
 
     // 顶部优先：请求并发发起（后台统一限流），渲染严格按批次顺序 → 页头先出
     const fetchMap = new Map<number, Promise<Map<string, string[]> | null>>();
-    let errored = 0;
     for (let i = 0; i < batches.length; i++) {
       for (let j = i; j < Math.min(batches.length, i + FETCH_WINDOW); j++) {
         if (!fetchMap.has(j)) fetchMap.set(j, this.fetchBatch(batches[j]));
@@ -211,7 +210,6 @@ export class PageEngine {
         this.renderBatch(batches[i], chunks);
       } else {
         const failed = batches[i].flatMap(([, us]) => us);
-        errored += failed.length;
         this.stats.error += failed.length;
         for (const u of failed) {
           this.renderer.fail(u);

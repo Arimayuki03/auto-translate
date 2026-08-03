@@ -1,7 +1,7 @@
 /** 悬浮翻译按钮：红色小圆圈，点开显示详细设置（可拖动 / 位置记忆） */
 import type { DisplayMode } from "../shared/types";
 import type { EngineState, EngineStats, PageEngine } from "./engine";
-import { makeDraggable } from "./ui";
+import { copyText, makeDraggable } from "./ui";
 
 const MODES: DisplayMode[] = ["bilingual", "translated", "original"];
 const MODE_LABEL: Record<DisplayMode, string> = {
@@ -87,6 +87,12 @@ export class Toolbar {
     settingsBtn.title = "打开设置页";
     settingsBtn.addEventListener("click", () => chrome.runtime.openOptionsPage());
 
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "it-copy-all";
+    copyBtn.textContent = "复制译文";
+    copyBtn.title = "复制整页译文到剪贴板";
+    copyBtn.addEventListener("click", () => this.copyTranslations());
+
     this.statusEl = document.createElement("span");
     this.statusEl.className = "it-status";
 
@@ -102,6 +108,7 @@ export class Toolbar {
       this.modeSelect,
       langSelect,
       settingsBtn,
+      copyBtn,
       this.statusEl,
       closeBtn
     );
@@ -126,6 +133,21 @@ export class Toolbar {
     const next = MODES[(MODES.indexOf(this.engine.renderer.getMode()) + 1) % MODES.length];
     this.engine.renderer.setMode(next);
     this.modeSelect.value = next;
+  }
+
+  /** 复制整页译文（按页面顺序）到剪贴板 */
+  private copyTranslations(): void {
+    const texts = Array.from(
+      document.querySelectorAll(".it-translated:not(.it-pending):not(.it-error)")
+    )
+      .map((el) => (el.textContent ?? "").trim())
+      .filter(Boolean);
+    if (texts.length === 0) {
+      this.statusEl.textContent = "暂无译文";
+      return;
+    }
+    const ok = copyText(texts.join("\n\n"));
+    this.statusEl.textContent = ok ? `已复制 ${texts.length} 段` : "复制失败";
   }
 
   destroy(): void {

@@ -107,6 +107,19 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2>缓存与数据</h2>
+      <div class="form-row">
+        <p class="hint">译文缓存保存在本地并跨会话复用（节省 API 额度）。设置可导出为 JSON 备份/迁移。</p>
+        <div class="actions-row">
+          <button id="btn-clear-cache" class="btn btn-secondary">清空缓存</button>
+          <button id="btn-export" class="btn btn-secondary">导出设置</button>
+          <button id="btn-import" class="btn btn-secondary">导入设置</button>
+          <input type="file" id="import-file" accept="application/json" style="display: none" />
+        </div>
+      </div>
+    </section>
+
     <div class="actions">
       <button id="btn-test" class="btn btn-secondary">测试连接</button>
       <button id="btn-save" class="btn">保存设置</button>

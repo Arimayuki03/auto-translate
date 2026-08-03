@@ -61,6 +61,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "clear-cache") {
+    translateService
+      .clearCache()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) =>
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      );
+    return true;
+  }
+
   return undefined;
 });
 

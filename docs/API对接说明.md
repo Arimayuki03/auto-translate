@@ -23,7 +23,7 @@
 | 模型 | 是 | 服务支持的模型名，如 `gpt-4o-mini`、`claude-sonnet-4-20250514`、`gemini-2.0-flash`、`qwen2.5` |
 | 温度 | 否 | 默认 0.3，翻译建议保持低温度 |
 | 超时 | 否 | 默认 60 秒 |
-| 最大并发 | 否 | 默认 3 |
+| 最大并发 | 否 | 默认 6 |
 
 ## 3. 各格式请求示例
 
@@ -40,7 +40,7 @@ Content-Type: application/json
   "model": "{model}",
   "messages": [
     { "role": "system", "content": "你是专业翻译引擎。将用户输入翻译为目标语言，只输出译文，不要解释、不要添加任何额外内容。" },
-    { "role": "user", "content": "请逐段翻译以下内容，段与段之间用 \"【段】\" 分隔，保持段落顺序：\n\n【段】Hello world\n【段】This is a test." }
+    { "role": "user", "content": "请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\nHello world\nThis is a test." }
   ],
   "temperature": 0.3,
   "stream": false
@@ -64,7 +64,7 @@ Content-Type: application/json
   "max_tokens": 4096,
   "system": "你是专业翻译引擎。将用户输入翻译为目标语言，只输出译文，不要解释、不要添加任何额外内容。",
   "messages": [
-    { "role": "user", "content": "请逐段翻译以下内容，段与段之间用 \"【段】\" 分隔，保持段落顺序：\n\n【段】Hello world\n【段】This is a test." }
+    { "role": "user", "content": "请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\nHello world\nThis is a test." }
   ],
   "temperature": 0.3
 }
@@ -87,7 +87,7 @@ Content-Type: application/json
   "contents": [
     {
       "role": "user",
-      "parts": [{ "text": "请逐段翻译以下内容，段与段之间用 \"【段】\" 分隔，保持段落顺序：\n\n【段】Hello world\n【段】This is a test." }]
+      "parts": [{ "text": "请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\nHello world\nThis is a test." }]
     }
   ],
   "generationConfig": { "temperature": 0.3 }
@@ -109,7 +109,7 @@ Content-Type: application/json
   "stream": false,
   "messages": [
     { "role": "system", "content": "你是专业翻译引擎。将用户输入翻译为目标语言，只输出译文，不要解释、不要添加任何额外内容。" },
-    { "role": "user", "content": "请逐段翻译以下内容，段与段之间用 \"【段】\" 分隔，保持段落顺序：\n\n【段】Hello world\n【段】This is a test." }
+    { "role": "user", "content": "请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\nHello world\nThis is a test." }
   ],
   "options": { "temperature": 0.3 }
 }
@@ -119,9 +119,9 @@ Content-Type: application/json
 
 ## 4. 批量翻译协议（各格式通用）
 
-- 插件会将多个段落合并为一次请求，原文段落用分隔符 `【段】` 连接
-- 响应按相同分隔符拆分，与请求段落一一对应
-- 若单个请求超长（超过模型上下文），自动降级为逐段请求
+- 插件将多个段落合并为一次请求，原文段落**每行一条**（文本已规范为单行），提示词要求「每行一个译文，保持顺序」
+- 响应按换行拆分（模型加编号时自动剥离「数字. 」前缀），与请求段落一一对应
+- 若行数不匹配或请求超长，自动降级为逐段请求（并发受限）
 
 ## 5. 错误处理与重试策略
 
@@ -132,7 +132,7 @@ Content-Type: application/json
 | 400 模型不存在 | 模型名错误 | 不重试，提示检查模型名称 |
 | 429 | 触发限流 | 指数退避重试，最多 3 次 |
 | 5xx | 服务端错误 | 指数退避重试，最多 3 次 |
-| 超时 | 无响应 | 中断并重试 1 次 |
+| 超时 | 无响应 | 中断并指数退避重试，最多 3 次 |
 
 ## 6. 常见问题
 

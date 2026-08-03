@@ -114,6 +114,13 @@ h2 {
   justify-content: flex-end;
 }
 
+.actions-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
 .btn {
   padding: 8px 20px;
   border: none;
@@ -150,4 +157,33 @@ h2 {
 
 .status.err {
   color: #dc2626;
+}
+
+/* ===== 深色主题 ===== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --it-primary: #3b82f6;
+    --it-bg: #0f172a;
+    --it-card: #1e293b;
+    --it-text: #e5e7eb;
+    --it-muted: #94a3b8;
+    --it-border: #334155;
+  }
+
+  .form-row input[type="text"],
+  .form-row input[type="password"],
+  .form-row input[type="number"],
+  .form-row select,
+  .form-row textarea {
+    background: #0f172a;
+  }
+
+  .btn-secondary {
+    background: #334155;
+    color: #e5e7eb;
+  }
+
+  .card {
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.4);
+  }
 }

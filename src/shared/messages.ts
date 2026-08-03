@@ -32,3 +32,8 @@ export interface ItCommandMessage {
   type: "it-command";
   command: "toggle-translate" | "cycle-mode";
 }
+
+/** 清空译文缓存（设置页 → background） */
+export interface ClearCacheMessage {
+  type: "clear-cache";
+}

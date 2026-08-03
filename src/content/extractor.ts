@@ -205,8 +205,8 @@ export function isTargetLanguage(text: string, targetLang: string): boolean {
   return latin / letters.length > 0.7;
 }
 
-/** 超长文本按句子切分，每块控制在 maxChars 以内 */
-function splitBySentences(text: string, maxChars: number): string[] {
+/** 超长文本按句子切分，每块控制在 maxChars 以内（导出供单元测试） */
+export function splitBySentences(text: string, maxChars: number): string[] {
   if (text.length <= maxChars) return [text];
   const sentences = text
     .split(/(?<=[。！？.!?…；;])\s*/)

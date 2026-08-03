@@ -1,4 +1,8 @@
-import type { TestConnectionRequestMessage, TestConnectionResponseMessage } from "../shared/messages";
+import type {
+  ClearCacheMessage,
+  TestConnectionRequestMessage,
+  TestConnectionResponseMessage,
+} from "../shared/messages";
 import { getSettings, saveSettings } from "../shared/storage";
 import type { ApiConfig, ApiFormat, Settings } from "../shared/types";
 
@@ -163,6 +167,45 @@ function init(): void {
       btn.disabled = false;
     }
   });
+  $("btn-clear-cache").addEventListener("click", async () => {
+    const res = (await chrome.runtime.sendMessage({ type: "clear-cache" } as ClearCacheMessage)) as {
+      ok?: boolean;
+      error?: string;
+    };
+    setStatus(res?.ok ? "缓存已清空 ✔" : `清空失败：${res?.error ?? "未知错误"}`, res?.ok ? "ok" : "err");
+  });
+
+  $("btn-export").addEventListener("click", async () => {
+    const stored = await chrome.storage.local.get("settings");
+    const blob = new Blob([JSON.stringify(stored.settings ?? {}, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `auto-translate-settings-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus("设置已导出 ✔", "ok");
+  });
+
+  $("btn-import").addEventListener("click", () => ($("import-file") as HTMLInputElement).click());
+
+  $("import-file").addEventListener("change", async (e) => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      if (!parsed || typeof parsed !== "object") throw new Error("不是有效的设置文件");
+      await chrome.storage.local.set({ settings: parsed });
+      setStatus("设置已导入 ✔（建议重新测试连接）", "ok");
+    } catch (err) {
+      setStatus(`导入失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    }
+  });
+
   void loadForm();
 }
 
