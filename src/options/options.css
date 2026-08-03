@@ -4,6 +4,7 @@
   --it-card: #ffffff;
   --it-text: #1f2937;
   --it-muted: #6b7280;
+  --it-border: #d1d5db;
 }
 
 * {
@@ -31,7 +32,7 @@ h1 {
 
 h2 {
   font-size: 15px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .card {
@@ -42,8 +43,92 @@ h2 {
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
 }
 
-.muted {
-  color: var(--it-muted);
+.form-row {
+  margin-bottom: 14px;
+}
+
+.form-row label {
+  display: block;
   font-size: 13px;
-  line-height: 1.6;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.form-row input[type="text"],
+.form-row input[type="password"],
+.form-row input[type="number"],
+.form-row select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--it-border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  color: var(--it-text);
+}
+
+.form-row input:focus,
+.form-row select:focus {
+  outline: none;
+  border-color: var(--it-primary);
+  box-shadow: 0 0 0 2px rgb(37 99 235 / 0.15);
+}
+
+.form-inline {
+  display: flex;
+  gap: 12px;
+}
+
+.form-inline > div {
+  flex: 1;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--it-muted);
+  margin-top: 4px;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.btn {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  background: var(--it-primary);
+  color: #fff;
+}
+
+.btn:hover {
+  opacity: 0.9;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #e5e7eb;
+  color: var(--it-text);
+}
+
+.status {
+  margin-top: 12px;
+  font-size: 13px;
+  min-height: 18px;
+}
+
+.status.ok {
+  color: #16a34a;
+}
+
+.status.err {
+  color: #dc2626;
 }

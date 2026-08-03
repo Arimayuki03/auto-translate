@@ -1,14 +1,69 @@
+import type {
+  TestConnectionRequestMessage,
+  TestConnectionResponseMessage,
+  TranslateRequestMessage,
+  TranslateResponseMessage,
+} from "../shared/messages";
+import type { ApiConfig } from "../shared/types";
+import { createProvider } from "./providers";
+import { TranslateService } from "./translate";
+
 console.log("[auto-translate] background service worker 已启动");
+
+const translateService = new TranslateService();
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[auto-translate] 安装/更新:", details.reason);
 });
 
-// 消息入口（阶段 2 起承载翻译请求：限流、批量合并、缓存、多格式适配）
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "ping") {
-    sendResponse({ ok: true, name: chrome.runtime.getManifest().name });
+  if (message?.type === "translate") {
+    const req = message as TranslateRequestMessage;
+    translateService
+      .translate(req.texts, req.targetLang)
+      .then(
+        (results) =>
+          sendResponse({ id: req.id, ok: true, results } as TranslateResponseMessage),
+        (err) =>
+          sendResponse({
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          } as TranslateResponseMessage)
+      );
     return true;
   }
+
+  if (message?.type === "test-connection") {
+    const req = message as TestConnectionRequestMessage;
+    testConnection(req.api)
+      .then(
+        (reply) =>
+          sendResponse({ id: req.id, ok: true, message: reply } as TestConnectionResponseMessage),
+        (err) =>
+          sendResponse({
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          } as TestConnectionResponseMessage)
+      );
+    return true;
+  }
+
   return undefined;
 });
+
+async function testConnection(api: ApiConfig): Promise<string> {
+  const provider = createProvider(api);
+  const result = await provider.chat(
+    [{ role: "user", content: "请只回复：连接成功" }],
+    {
+      baseUrl: api.baseUrl,
+      apiKey: api.apiKey,
+      model: api.model,
+      temperature: 0,
+      timeoutMs: api.timeoutMs,
+    }
+  );
+  return result.text.trim();
+}

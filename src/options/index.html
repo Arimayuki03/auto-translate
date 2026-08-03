@@ -9,14 +9,79 @@
 <body>
   <main class="container">
     <h1>设置</h1>
+
     <section class="card">
       <h2>API 配置</h2>
-      <p class="muted">阶段 2 开放：格式选择、BaseURL、API Key、模型、测试连接。</p>
+      <div class="form-row">
+        <label for="api-format">API 格式</label>
+        <select id="api-format">
+          <option value="openai">OpenAI 兼容（DeepSeek / OneAPI / vLLM / 中转）</option>
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="ollama">Ollama 原生</option>
+        </select>
+        <p class="hint" id="format-hint"></p>
+      </div>
+      <div class="form-row">
+        <label for="base-url">BaseURL</label>
+        <input type="text" id="base-url" placeholder="https://api.deepseek.com/v1" />
+        <p class="hint">只需填到域名 / 版本层级，插件会自动拼接接口路径。</p>
+      </div>
+      <div class="form-row">
+        <label for="api-key">API Key</label>
+        <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" />
+        <p class="hint">仅保存在本机浏览器存储（落盘前做混淆处理）。</p>
+      </div>
+      <div class="form-row">
+        <label for="model">模型</label>
+        <input type="text" id="model" placeholder="deepseek-chat" />
+      </div>
+      <div class="form-row form-inline">
+        <div>
+          <label for="temperature">温度</label>
+          <input type="number" id="temperature" min="0" max="2" step="0.1" />
+        </div>
+        <div>
+          <label for="timeout">超时（秒）</label>
+          <input type="number" id="timeout" min="5" max="300" />
+        </div>
+        <div>
+          <label for="concurrency">最大并发</label>
+          <input type="number" id="concurrency" min="1" max="10" />
+        </div>
+      </div>
     </section>
+
     <section class="card">
-      <h2>翻译设置</h2>
-      <p class="muted">阶段 3 开放：目标语言、显示模式、自动翻译、黑白名单等。</p>
+      <h2>备用 API（可选，主 API 失败时自动切换）</h2>
+      <div class="form-row">
+        <label for="backup-format">API 格式</label>
+        <select id="backup-format">
+          <option value="openai">OpenAI 兼容</option>
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="ollama">Ollama 原生</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="backup-base-url">BaseURL</label>
+        <input type="text" id="backup-base-url" placeholder="留空则关闭备用 API" />
+      </div>
+      <div class="form-row">
+        <label for="backup-api-key">API Key</label>
+        <input type="password" id="backup-api-key" placeholder="sk-..." autocomplete="off" />
+      </div>
+      <div class="form-row">
+        <label for="backup-model">模型</label>
+        <input type="text" id="backup-model" />
+      </div>
     </section>
+
+    <div class="actions">
+      <button id="btn-test" class="btn btn-secondary">测试连接</button>
+      <button id="btn-save" class="btn">保存设置</button>
+    </div>
+    <p id="status" class="status"></p>
   </main>
   <script type="module" src="./main.ts"></script>
 </body>

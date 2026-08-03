@@ -4,23 +4,21 @@ export type ApiFormat = "openai" | "anthropic" | "gemini" | "ollama";
 /** 显示模式：双语对照 / 仅译文 / 原文 */
 export type DisplayMode = "bilingual" | "translated" | "original";
 
-/** 扩展设置（chrome.storage.local） */
+/** API 连接配置（主 / 备用共用） */
+export interface ApiConfig {
+  format: ApiFormat;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: number;
+  timeoutMs: number;
+  maxConcurrency: number;
+}
+
+/** 扩展设置（chrome.storage.local，apiKey 落盘前加密） */
 export interface Settings {
-  api: {
-    format: ApiFormat;
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    temperature: number;
-    timeoutMs: number;
-    maxConcurrency: number;
-    backup?: {
-      format: ApiFormat;
-      baseUrl: string;
-      apiKey: string;
-      model: string;
-    };
-  };
+  api: ApiConfig;
+  backupApi?: ApiConfig;
   translate: {
     targetLang: string;
     displayMode: DisplayMode;
