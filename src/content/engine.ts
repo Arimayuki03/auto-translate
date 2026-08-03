@@ -1,6 +1,6 @@
 /** 页面翻译引擎：视口优先 + 滚动懒翻译 / 去重分批 / 顺序渲染 / 段落翻译 / 重试 / 还原 */
 import type { Settings } from "../shared/types";
-import { buildUnitFromContainer, extractUnits } from "./extractor";
+import { extractUnits } from "./extractor";
 import type { ExtractOptions, TranslationUnit } from "./extractor";
 import { Renderer } from "./renderer";
 import { translateTexts } from "./translate";
@@ -30,6 +30,7 @@ export class PageEngine {
   private opts: ExtractOptions;
   private glossary: string[];
   private targetLang: string;
+  private viewportLazy: boolean;
   private doneTexts = new Set<string>();
   private pendingTexts = new Set<string>();
   private allUnits: TranslationUnit[] = [];
@@ -51,6 +52,7 @@ export class PageEngine {
     };
     this.targetLang = settings.translate.targetLang;
     this.glossary = settings.translate.terminology;
+    this.viewportLazy = settings.translate.viewportLazy;
 
     // 失败重试：占位里的“重试”按钮
     document.addEventListener("click", (e) => {
@@ -101,12 +103,6 @@ export class PageEngine {
     this.scheduleUnits(units);
   }
 
-  /** 段落级翻译：单个容器单独翻译 */
-  async translateElement(el: HTMLElement): Promise<void> {
-    const unit = buildUnitFromContainer(el, this.opts);
-    if (unit) this.scheduleUnits([unit]);
-  }
-
   /** 一键还原 */
   restore(): void {
     this.renderer.restore();
@@ -138,9 +134,15 @@ export class PageEngine {
     if (fresh.length === 0) return;
     this.pendingCount += fresh.length;
     this.stats.total += fresh.length;
-    const [visible, hidden] = partition(fresh, (u) => inViewport(u.container));
-    if (visible.length > 0) void this.translateUnits(visible);
-    if (hidden.length > 0) this.observeLazy(hidden);
+    if (this.viewportLazy) {
+      // 视口懒翻译：视口内先译，视口外进入时再译（省 token）
+      const [visible, hidden] = partition(fresh, (u) => inViewport(u.container));
+      if (visible.length > 0) void this.translateUnits(visible);
+      if (hidden.length > 0) this.observeLazy(hidden);
+    } else {
+      // 关闭懒翻译：一次性全部翻译
+      void this.translateUnits(fresh);
+    }
   }
 
   private observeLazy(units: TranslationUnit[]): void {

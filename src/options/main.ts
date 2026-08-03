@@ -68,6 +68,9 @@ async function loadForm(): Promise<void> {
     input("backup-model").value = s.backupApi.model;
   }
   ($("auto-translate") as HTMLInputElement).checked = s.translate.autoTranslate;
+  ($("viewport-lazy") as HTMLInputElement).checked = s.translate.viewportLazy;
+  ($("whitelist") as HTMLTextAreaElement).value = s.sites.whitelist.join("\n");
+  ($("blacklist") as HTMLTextAreaElement).value = s.sites.blacklist.join("\n");
   updateFormatHint();
 }
 
@@ -103,8 +106,28 @@ async function readForm(): Promise<Settings> {
     translate: {
       ...current.translate,
       autoTranslate: ($("auto-translate") as HTMLInputElement).checked,
+      viewportLazy: ($("viewport-lazy") as HTMLInputElement).checked,
+    },
+    sites: {
+      whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
+      blacklist: parseDomainList($("blacklist") as HTMLTextAreaElement),
     },
   };
+}
+
+/** 解析每行一个域名的文本域：规范化为主域名（去协议/www/路径/端口，小写） */
+function parseDomainList(el: HTMLTextAreaElement): string[] {
+  return el.value
+    .split(/\n|,/)
+    .map((s) =>
+      s
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, "")
+        .replace(/^www\./, "")
+        .replace(/[/:].*$/, "")
+    )
+    .filter(Boolean);
 }
 
 function init(): void {

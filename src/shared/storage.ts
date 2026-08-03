@@ -1,7 +1,7 @@
 import type { ApiConfig, Settings } from "./types";
 
-/** 设置结构版本：变更默认值（如自动翻译默认关闭）时 +1，老版本读取时迁移 */
-const SETTINGS_VERSION = 2;
+/** 设置结构版本：变更默认值（如自动翻译默认关闭/并发加大）时 +1，老版本读取时迁移 */
+const SETTINGS_VERSION = 3;
 
 export const DEFAULT_SETTINGS: Settings = {
   version: SETTINGS_VERSION,
@@ -12,7 +12,7 @@ export const DEFAULT_SETTINGS: Settings = {
     model: "",
     temperature: 0.3,
     timeoutMs: 60000,
-    maxConcurrency: 3,
+    maxConcurrency: 6,
   },
   translate: {
     targetLang: "zh-CN",
@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: Settings = {
     blockMaxChars: 1200,
     translateOnSelect: true,
     translateInput: true,
+    viewportLazy: true,
     terminology: [],
   },
   sites: { whitelist: [], blacklist: [] },
@@ -62,9 +63,16 @@ export async function getSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get("settings");
   const saved = stored.settings as Partial<Settings> | undefined;
   const merged = mergeSettings(DEFAULT_SETTINGS, saved ?? {});
-  // v1 → v2：自动翻译默认关闭，老设置里存的 true 归零（下次保存时落盘）
+  // 按版本逐项迁移，避免覆盖用户在设置页改过的偏好
   if (saved && saved.version !== SETTINGS_VERSION) {
-    merged.translate.autoTranslate = DEFAULT_SETTINGS.translate.autoTranslate;
+    // v1 → v2：自动翻译默认关闭（老设置里存的 true 归零）
+    if (!saved.version || saved.version < 2) {
+      merged.translate.autoTranslate = DEFAULT_SETTINGS.translate.autoTranslate;
+    }
+    // v2 → v3：加大默认并发以提速
+    if (!saved.version || saved.version < 3) {
+      merged.api.maxConcurrency = DEFAULT_SETTINGS.api.maxConcurrency;
+    }
     merged.version = SETTINGS_VERSION;
   }
   merged.api.apiKey = decryptApiKey(merged.api.apiKey);

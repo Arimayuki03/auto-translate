@@ -7,7 +7,6 @@ import { PageObserver } from "./observer";
 import { Renderer } from "./renderer";
 import { Toolbar } from "./toolbar";
 import { initBubble } from "./bubble";
-import { initHover } from "./hover";
 import { initInput } from "./input";
 
 /** 敏感页面路径启发式（保守名单，命中即跳过自动翻译） */
@@ -25,7 +24,6 @@ async function main(): Promise<void> {
 
   initBubble(engine, settings.translate.translateOnSelect);
   initInput(engine, settings.translate.translateInput);
-  initHover(engine);
   const observer = new PageObserver(engine);
 
   // 快捷键（background 中继到当前标签页）

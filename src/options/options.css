@@ -70,7 +70,8 @@ h2 {
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],
-.form-row select {
+.form-row select,
+.form-row textarea {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--it-border);
@@ -78,6 +79,11 @@ h2 {
   font-size: 13px;
   background: #fff;
   color: var(--it-text);
+}
+
+.form-row textarea {
+  resize: vertical;
+  font-family: inherit;
 }
 
 .form-row input:focus,

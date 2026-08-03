@@ -24,15 +24,38 @@
   visibility: hidden;
 }
 
+/* ===== 包裹层：块级译文包裹原块，不新增父级布局项，避免挤变形 ===== */
+.it-wrap {
+  display: block;
+  margin: 0;
+  padding: 0;
+}
+
+/* 原文在包裹层内：去掉底部外边距，让译文紧跟原文 */
+.it-wrap > .it-orig {
+  margin-bottom: 0;
+}
+
+/* 译文在包裹层内：小间隔 + 段落间距 */
+.it-wrap > .it-translated {
+  margin: 4px 0 1em;
+}
+
+/* 仅译文：隐藏包裹层里的原文，译文顶替其位置（干净的"替换"，无空白） */
+.it-mode-translated .it-orig {
+  display: none !important;
+}
+
 /* 我们改写的原文容器也不作为滚动锚点 */
 [data-it-src] {
   overflow-anchor: none;
 }
 
-/* 行内译文（导航/页脚短标签）：跟在原文同一行，不换行、不撑高布局 */
+/* 行内译文（导航/页脚/链接标签）：跟在原文同一行，不换行、不撑高布局 */
 .it-translated.it-inline {
   display: inline;
-  margin: 0 0 0 6px;
+  margin: 0 0 0 8px;
+  vertical-align: baseline;
   white-space: nowrap;
 }
 
@@ -83,8 +106,24 @@
 }
 
 /* ===== 显示模式（body 上的类统一控制） ===== */
-.it-mode-translated [data-it-src] {
+/* 仅译文：隐藏非包裹的原文容器（紧凑链接等；兄弟译文顶替其位置） */
+.it-mode-translated [data-it-src]:not([data-it-inside]) {
   display: none !important;
+}
+
+/* 仅译文：译文在容器内部的（flex/表格/列表/链接）不整体隐藏，只隐藏原文子元素 */
+.it-mode-translated [data-it-src][data-it-inside] > :not(.it-translated) {
+  display: none !important;
+}
+
+/* 仅译文：待翻译的预留占位不占空间，避免大片空白 */
+.it-mode-translated .it-pending {
+  display: none !important;
+}
+
+/* 仅译文：行内译文去掉分隔符 */
+.it-mode-translated .it-translated.it-inline::before {
+  content: none;
 }
 
 .it-mode-original [data-it-unit] {
@@ -320,22 +359,4 @@
 .it-input-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-/* ===== 段落悬停「翻译」按钮 ===== */
-.it-hover-btn {
-  position: fixed;
-  z-index: 2147483001;
-  border: 1px solid var(--it-accent);
-  background: var(--it-accent-bg);
-  color: var(--it-accent);
-  border-radius: 4px;
-  padding: 2px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.it-hover-btn:hover {
-  filter: brightness(0.95);
 }

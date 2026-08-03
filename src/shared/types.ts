@@ -30,6 +30,7 @@ export interface Settings {
     blockMaxChars: number;
     translateOnSelect: boolean;
     translateInput: boolean;
+    viewportLazy: boolean;
     terminology: string[];
   };
   sites: {

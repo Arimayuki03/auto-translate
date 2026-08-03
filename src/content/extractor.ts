@@ -17,7 +17,7 @@ export interface ExtractOptions {
   targetLang: string;
 }
 
-/** 不参与翻译的标签（文本在这些标签内一律跳过） */
+/** 不参与翻译的标签（文本在这些标签内一律跳过；按钮是交互控件，翻译会改变其位置） */
 const EXCLUDED_TAGS = new Set([
   "SCRIPT", "STYLE", "NOSCRIPT", "IFRAME", "SVG", "MATH", "CODE", "PRE",
   "KBD", "SAMP", "VAR", "TEXTAREA", "INPUT", "SELECT", "OPTION", "BUTTON",
@@ -59,7 +59,7 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
   const units: TranslationUnit[] = [];
   for (const [container, nodes] of grouped) {
     const text = joinTextNodes(nodes);
-    if (!shouldTranslate(text, opts)) continue;
+    if (!shouldTranslate(text, opts, container)) continue;
     units.push({
       id: `it-${++seq}`,
       container,
@@ -91,8 +91,14 @@ function isExcluded(node: Text): boolean {
   ) {
     if (EXCLUDED_TAGS.has(el.tagName)) return true;
     if (isHiddenElement(el)) return true;
-    // 站内锚点/跳转链接（如 GitHub 顶部 "Skip to content"）：无障碍导航，非内容，不翻译
-    if (el.tagName === "A" && el.getAttribute("href")?.startsWith("#")) return true;
+    // 仅跳过真正的页内跳转锚点（如 "Skip to content"，目标 ID 存在）；
+    // href="#" 触发 JS 的链接（如 Manage cookies）不跳过，正常翻译
+    if (el.tagName === "A") {
+      const href = el.getAttribute("href") ?? "";
+      if (href.length > 1 && href.startsWith("#") && document.getElementById(href.slice(1))) {
+        return true;
+      }
+    }
     if (el.hasAttribute("data-it-unit") || el.hasAttribute("data-it-ui")) return true;
     if (el.isContentEditable) return true;
     if (el.getAttribute("aria-hidden") === "true") return true;
@@ -154,9 +160,24 @@ function joinTextNodes(nodes: Text[]): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** 单元是否为链接：容器是 <a>，或直接包着一个 <a>（如 <li><a>、<div><a>） */
+function isLinkLike(container: HTMLElement): boolean {
+  if (container.tagName === "A") return true;
+  for (const child of Array.from(container.children)) {
+    if (child.tagName === "A") return true;
+  }
+  return false;
+}
+
 /** 单元是否值得翻译：够长、含字母、且不是目标语言 */
-function shouldTranslate(text: string, opts: ExtractOptions): boolean {
-  if (text.length < opts.minTextLength) return false;
+function shouldTranslate(
+  text: string,
+  opts: ExtractOptions,
+  container?: HTMLElement | null
+): boolean {
+  // 链接里的英文短词（FAQ/AI/API 等）门槛放低到 2 字符；正文仍按 minTextLength
+  const minLen = container && isLinkLike(container) ? 2 : opts.minTextLength;
+  if (text.length < minLen) return false;
   if (!LETTER_RE.test(text)) return false;
   if (isTargetLanguage(text, opts.targetLang)) return false;
   return true;
@@ -203,19 +224,4 @@ function splitBySentences(text: string, maxChars: number): string[] {
   }
   if (cur) chunks.push(cur);
   return chunks;
-}
-
-/** 为单个容器现场构造翻译单元（段落级翻译 / SPA 增量复用）；不满足条件返回 null */
-export function buildUnitFromContainer(
-  container: HTMLElement,
-  opts: ExtractOptions
-): TranslationUnit | null {
-  const text = (container.textContent ?? "").replace(/\s+/g, " ").trim();
-  if (!shouldTranslate(text, opts)) return null;
-  return {
-    id: `it-${++seq}`,
-    container,
-    text,
-    chunks: splitBySentences(text, opts.blockMaxChars),
-  };
 }
