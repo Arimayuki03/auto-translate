@@ -26,3 +26,9 @@ export interface TestConnectionResponseMessage {
   message?: string;
   error?: string;
 }
+
+/** 快捷键命令：background → content（chrome.commands 中继） */
+export interface ItCommandMessage {
+  type: "it-command";
+  command: "toggle-translate" | "cycle-mode";
+}

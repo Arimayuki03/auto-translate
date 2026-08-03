@@ -87,8 +87,22 @@
   display: none !important;
 }
 
-/* ===== 最小浮动控制条 ===== */
-.it-control-bar {
+/* ===== 译文淡入（无感「无闪烁」） ===== */
+.it-done {
+  animation: it-fade-in 0.3s ease;
+}
+
+@keyframes it-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ===== 顶部工具条 ===== */
+.it-toolbar {
   position: fixed;
   top: 12px;
   right: 12px;
@@ -107,14 +121,8 @@
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-.it-control-bar select {
-  font-size: 13px;
-  border: 1px solid #d1d5db;
-  border-radius: 4px;
-  padding: 2px 4px;
-}
-
-.it-control-bar button {
+.it-toolbar select,
+.it-toolbar button {
   border: 1px solid #d1d5db;
   background: #ffffff;
   border-radius: 4px;
@@ -123,15 +131,120 @@
   cursor: pointer;
 }
 
-.it-control-bar button:hover {
+.it-toolbar select:hover,
+.it-toolbar button:hover:not(:disabled) {
   background: #f3f4f6;
 }
 
-.it-control-bar .it-status {
+.it-toolbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.it-toolbar .it-toggle {
+  background: var(--it-border);
+  border-color: var(--it-border);
+  font-weight: 600;
+}
+
+.it-toolbar .it-status {
   color: var(--it-muted);
 }
 
 /* 收起：只保留“收起”按钮 */
-.it-control-bar.it-collapsed > :not(.it-collapse) {
+.it-toolbar.it-collapsed > :not(.it-collapse) {
   display: none;
+}
+
+/* ===== 划词气泡 ===== */
+.it-bubble {
+  position: fixed;
+  z-index: 2147483001;
+  max-width: min(420px, 80vw);
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  font-size: 14px;
+  line-height: 1.6;
+  color: #1f2937;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 10px 12px;
+}
+
+.it-bubble-body {
+  word-break: break-word;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.it-bubble-loading .it-bubble-body {
+  color: var(--it-muted);
+}
+
+.it-bubble-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.it-bubble-actions button,
+.it-bubble .it-retry {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.it-bubble-actions button:hover,
+.it-bubble .it-retry:hover {
+  background: #f3f4f6;
+}
+
+.it-bubble-button .it-translate-sel {
+  border: 1px solid var(--it-border);
+  background: var(--it-border);
+  border-radius: 4px;
+  padding: 2px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ===== 输入框「译」按钮 ===== */
+.it-input-btn {
+  position: fixed;
+  z-index: 2147483001;
+  border: 1px solid var(--it-border);
+  background: var(--it-border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.it-input-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ===== 段落悬停「翻译」按钮 ===== */
+.it-hover-btn {
+  position: fixed;
+  z-index: 2147483001;
+  border: 1px solid var(--it-border);
+  background: var(--it-border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.it-hover-btn:hover {
+  filter: brightness(0.95);
 }

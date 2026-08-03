@@ -163,3 +163,18 @@ function splitBySentences(text: string, maxChars: number): string[] {
   if (cur) chunks.push(cur);
   return chunks;
 }
+
+/** 为单个容器现场构造翻译单元（段落级翻译 / SPA 增量复用）；不满足条件返回 null */
+export function buildUnitFromContainer(
+  container: HTMLElement,
+  opts: ExtractOptions
+): TranslationUnit | null {
+  const text = (container.textContent ?? "").replace(/\s+/g, " ").trim();
+  if (!shouldTranslate(text, opts)) return null;
+  return {
+    id: `it-${++seq}`,
+    container,
+    text,
+    chunks: splitBySentences(text, opts.blockMaxChars),
+  };
+}

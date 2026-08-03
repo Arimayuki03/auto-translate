@@ -1,4 +1,5 @@
 import type {
+  ItCommandMessage,
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
   TranslateRequestMessage,
@@ -14,6 +15,16 @@ const translateService = new TranslateService();
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[auto-translate] 安装/更新:", details.reason);
+});
+
+// 快捷键：把 chrome.commands 命令中继到当前标签页的 content script
+chrome.commands.onCommand.addListener((command) => {
+  void (async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return;
+    const msg: ItCommandMessage = { type: "it-command", command: command as ItCommandMessage["command"] };
+    await chrome.tabs.sendMessage(tab.id, msg).catch(() => undefined);
+  })();
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
