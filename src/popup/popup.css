@@ -1,0 +1,64 @@
+:root {
+  --it-primary: #2563eb;
+  --it-bg: #ffffff;
+  --it-text: #1f2937;
+  --it-muted: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 280px;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--it-bg);
+  color: var(--it-text);
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--it-primary);
+  color: #fff;
+}
+
+.popup-header h1 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.version {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.popup-body {
+  padding: 16px;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--it-muted);
+  line-height: 1.6;
+}
+
+.btn {
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--it-primary);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  opacity: 0.9;
+}
