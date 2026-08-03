@@ -5,15 +5,17 @@
 ## 功能特性
 
 - 网页全文翻译：段落级双语对照 / 仅译文 / 原文三种模式
+- 无感自动翻译：不弹提示、不闪烁、平滑插入译文
 - 划词翻译：选中文本弹出译文气泡
 - 输入框翻译：在输入框中快捷翻译已输入内容
 - 段落级局部翻译：每个段落可单独翻译
 - 多格式 AI API：OpenAI 兼容 / Claude / Gemini / Ollama 原生，自定义 BaseURL / Key / 模型
 - 译文缓存、并发限流、失败重试，节省 API 调用
+- 站点黑白名单：只翻译想翻译的站点，避免浪费 API 额度
 
 ## 技术栈
 
-- Chrome / Edge 扩展（Manifest V3）
+- Edge / Chrome 扩展（Manifest V3）
 - TypeScript + Vite（@crxjs/vite-plugin）
 
 ## 快速开始（开发调试）
