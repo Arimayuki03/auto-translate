@@ -17,7 +17,11 @@ export interface ExtractOptions {
   targetLang: string;
 }
 
-/** 不参与翻译的标签（文本在这些标签内一律跳过；按钮是交互控件，翻译会改变其位置） */
+/**
+ * 不参与翻译的标签（文本在这些标签内一律跳过）。
+ * BUTTON / SELECT / OPTION 属于交互控件：翻译会改变其标签文字或 DOM 结构，
+ * 破坏点击展开/收起等原有交互，因此整体排除。
+ */
 const EXCLUDED_TAGS = new Set([
   "SCRIPT", "STYLE", "NOSCRIPT", "IFRAME", "SVG", "MATH", "CODE", "PRE",
   "KBD", "SAMP", "VAR", "TEXTAREA", "INPUT", "SELECT", "OPTION", "BUTTON",
@@ -185,24 +189,30 @@ function shouldTranslate(
 
 const LETTER_RE = /[A-Za-zÀ-ɏ぀-ヿ가-힣一-鿿]/;
 
-/** 目标语言启发式：文本主体是否已是目标语言（避免对中文页翻中文等） */
+/** 目标语言启发式：文本是否不含任何需翻译的字符（纯目标语言文本可跳过）。
+ *  含拉丁字母、假名、韩文等外来字符即视为需要翻译，即使目标语言字符占比较高。
+ *  这样确保「中英混合」段落的英文术语也会被翻译。 */
 export function isTargetLanguage(text: string, targetLang: string): boolean {
   const letters = text.replace(/[^A-Za-zÀ-ɏ぀-ヿ가-힣一-鿿]/g, "");
   if (!letters) return false;
   if (/^zh/i.test(targetLang)) {
-    const cjk = (letters.match(/[一-鿿]/g) ?? []).length;
-    return cjk / letters.length > 0.5;
+    // 含拉丁/假名/韩文等外来字符 → 需要翻译
+    const foreign = (letters.match(/[A-Za-zÀ-ɏ぀-ヿ가-힣]/g) ?? []).length;
+    return foreign === 0;
   }
   if (/^ja/i.test(targetLang)) {
-    const jp = (letters.match(/[぀-ヿ一-鿿]/g) ?? []).length;
-    return jp / letters.length > 0.5;
+    // 含拉丁/韩文等外来字符 → 需要翻译
+    const foreign = (letters.match(/[A-Za-zÀ-ɏ가-힣]/g) ?? []).length;
+    return foreign === 0;
   }
   if (/^ko/i.test(targetLang)) {
-    const ko = (letters.match(/[가-힣]/g) ?? []).length;
-    return ko / letters.length > 0.5;
+    // 含拉丁/假名/汉字等外来字符 → 需要翻译
+    const foreign = (letters.match(/[A-Za-zÀ-ɏ぀-ヿ一-鿿]/g) ?? []).length;
+    return foreign === 0;
   }
-  const latin = (letters.match(/[A-Za-zÀ-ɏ]/g) ?? []).length;
-  return latin / letters.length > 0.7;
+  // 拉丁语系目标语言：含非拉丁字符则需要翻译
+  const nonLatin = (letters.match(/[^A-Za-zÀ-ɏ]/g) ?? []).length;
+  return nonLatin === 0;
 }
 
 /** 超长文本按句子切分，每块控制在 maxChars 以内（导出供单元测试） */

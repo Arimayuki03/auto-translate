@@ -73,6 +73,9 @@ async function loadForm(): Promise<void> {
   }
   ($("auto-translate") as HTMLInputElement).checked = s.translate.autoTranslate;
   ($("viewport-lazy") as HTMLInputElement).checked = s.translate.viewportLazy;
+  ($("translate-on-select") as HTMLInputElement).checked = s.translate.translateOnSelect;
+  ($("translate-input") as HTMLInputElement).checked = s.translate.translateInput;
+  ($("sensitive-pages") as HTMLInputElement).checked = s.security.sensitivePages;
   ($("whitelist") as HTMLTextAreaElement).value = s.sites.whitelist.join("\n");
   ($("blacklist") as HTMLTextAreaElement).value = s.sites.blacklist.join("\n");
   updateFormatHint();
@@ -111,10 +114,16 @@ async function readForm(): Promise<Settings> {
       ...current.translate,
       autoTranslate: ($("auto-translate") as HTMLInputElement).checked,
       viewportLazy: ($("viewport-lazy") as HTMLInputElement).checked,
+      translateOnSelect: ($("translate-on-select") as HTMLInputElement).checked,
+      translateInput: ($("translate-input") as HTMLInputElement).checked,
     },
     sites: {
       whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
       blacklist: parseDomainList($("blacklist") as HTMLTextAreaElement),
+    },
+    security: {
+      ...current.security,
+      sensitivePages: ($("sensitive-pages") as HTMLInputElement).checked,
     },
   };
 }

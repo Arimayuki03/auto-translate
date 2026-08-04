@@ -1,4 +1,5 @@
 import type {
+  CheckCacheMessage,
   ItCommandMessage,
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
@@ -67,6 +68,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .then(() => sendResponse({ ok: true }))
       .catch((err) =>
         sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      );
+    return true;
+  }
+
+  if (message?.type === "check-cache") {
+    const req = message as CheckCacheMessage;
+    translateService
+      .checkCache(req.targetLang, req.texts)
+      .then((cachedCount) => sendResponse({ cachedCount }))
+      .catch((err) =>
+        sendResponse({ cachedCount: 0, error: err instanceof Error ? err.message : String(err) })
       );
     return true;
   }

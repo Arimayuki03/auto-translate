@@ -24,26 +24,22 @@
   visibility: hidden;
 }
 
-/* ===== 包裹层：块级译文包裹原块，不新增父级布局项，避免挤变形 ===== */
+/* ===== 包裹层：display 由 JS 按模式/父级动态设
+   （仅译文 / 块级流父级 → contents：不产生盒子、布局零变化，避免页面跳动；
+    双语 + flex/grid 父级 → block：包裹层作为单一布局项） ===== */
 .it-wrap {
-  display: block;
   margin: 0;
   padding: 0;
 }
 
-/* 原文在包裹层内：去掉底部外边距，让译文紧跟原文 */
-.it-wrap > .it-orig {
+/* 双语/原文：原文去底部外边距，让译文紧跟原文（仅译文不干预，保留原文段落边距 → 只改文字） */
+body:not(.it-mode-translated) .it-wrap > .it-orig {
   margin-bottom: 0;
 }
 
 /* 译文在包裹层内：小间隔 + 段落间距 */
 .it-wrap > .it-translated {
   margin: 4px 0 1em;
-}
-
-/* 仅译文：隐藏包裹层里的原文，译文顶替其位置（干净的"替换"，无空白） */
-.it-mode-translated .it-orig {
-  display: none !important;
 }
 
 /* 我们改写的原文容器也不作为滚动锚点 */
@@ -106,27 +102,18 @@
 }
 
 /* ===== 显示模式（body 上的类统一控制） ===== */
-/* 仅译文：隐藏非包裹的原文容器（紧凑链接等；兄弟译文顶替其位置） */
-.it-mode-translated [data-it-src]:not([data-it-inside]) {
+/* 仅译文：原文文字被原位替换为译文（保留元素结构与链接，样式不变），译文元素隐藏 */
+/* !important：行内译文 .it-inline 的 display:inline 优先级更高，必须强制隐藏 */
+.it-translated-hidden {
   display: none !important;
 }
 
-/* 仅译文：译文在容器内部的（flex/表格/列表/链接）不整体隐藏，只隐藏原文子元素 */
-.it-mode-translated [data-it-src][data-it-inside] > :not(.it-translated) {
-  display: none !important;
-}
-
-/* 仅译文：待翻译的预留占位不占空间，避免大片空白 */
+/* 仅译文：待翻译的预留占位不占空间 */
 .it-mode-translated .it-pending {
   display: none !important;
 }
 
-/* 仅译文：行内译文去掉分隔符 */
-.it-mode-translated .it-translated.it-inline::before {
-  content: none;
-}
-
-.it-mode-original [data-it-unit] {
+.it-mode-original [data-it-unit]:not(.it-wrap) {
   display: none !important;
 }
 
@@ -151,6 +138,11 @@
   right: 12px;
   z-index: 2147483000;
   touch-action: none;
+}
+
+/* 敏感页（登录/密码/2FA/支付等）隐藏工具条，避免诱导翻译敏感内容 */
+.it-toolbar.it-toolbar-sensitive {
+  display: none !important;
 }
 
 .it-fab {

@@ -1,31 +1,105 @@
-/** 输入框翻译（F-011）：聚焦输入框显示「译」按钮，翻译内容并回填 */
+/** 输入框翻译（F-011）：聚焦输入框显示「译」按钮；鼠标一移动即隐藏；可切换翻译/还原 */
 import type { PageEngine } from "./engine";
 import { isInsideOurUI } from "./ui";
 
 export function initInput(engine: PageEngine, enabled: boolean): void {
   if (!enabled) return;
   let btn: HTMLElement | null = null;
+  let field: HTMLElement | null = null;
   let hideTimer: number | undefined;
 
   function hide(): void {
     btn?.remove();
     btn = null;
+    // 保留 field：点击已聚焦的输入框时可重新显示按钮
+  }
+
+  /** 定位按钮到输入框上方/下方（视口坐标） */
+  function positionButton(): void {
+    if (!btn || !field) return;
+    const r = field.getBoundingClientRect();
+    const btnW = btn.offsetWidth || 32;
+    btn.style.top = r.top > 40 ? `${Math.max(8, r.top - 30)}px` : `${r.bottom + 4}px`;
+    btn.style.left = `${Math.min(Math.max(8, r.right - btnW), Math.max(8, innerWidth - btnW - 8))}px`;
+    btn.style.right = "auto";
+  }
+
+  function showButton(f: HTMLElement): void {
+    hide();
+    field = f;
+    const b = document.createElement("button");
+    b.className = "it-input-btn";
+    b.textContent = f.hasAttribute("data-it-input-translated") ? "还原" : "译";
+    b.title = "翻译输入内容 / 还原原文";
+    b.addEventListener("mousedown", (e) => e.preventDefault()); // 保持输入框焦点
+    b.addEventListener("click", () => void onButtonClick(b, f));
+    document.body.appendChild(b);
+    btn = b;
+    positionButton();
+  }
+
+  async function onButtonClick(b: HTMLButtonElement, f: HTMLElement): Promise<void> {
+    // 已翻译 → 还原原文
+    if (f.hasAttribute("data-it-input-translated")) {
+      const orig = f.getAttribute("data-it-input-orig");
+      if (orig !== null) setFieldText(f, orig);
+      f.removeAttribute("data-it-input-translated");
+      f.removeAttribute("data-it-input-orig");
+      b.textContent = "译";
+      return;
+    }
+    const text = getFieldText(f).trim();
+    if (!text) return;
+    b.disabled = true;
+    b.textContent = "…";
+    try {
+      const result = await engine.translateText(text);
+      if (!f.hasAttribute("data-it-input-orig")) {
+        f.setAttribute("data-it-input-orig", getFieldText(f));
+      }
+      setFieldText(f, result);
+      f.setAttribute("data-it-input-translated", "");
+      b.textContent = "还原"; // 按钮保留，可再点还原
+    } catch {
+      b.textContent = "失败";
+      setTimeout(() => (b.textContent = "译"), 1200);
+    } finally {
+      b.disabled = false;
+    }
   }
 
   document.addEventListener("focusin", (e) => {
     clearTimeout(hideTimer);
     const el = e.target as HTMLElement;
     if (!isTranslatableField(el) || isInsideOurUI(el)) return;
-    showButton(el, engine);
+    showButton(el);
   });
 
-  // 延迟隐藏，避免点击「译」按钮时（mousedown 已 preventDefault 保焦点）被误收起
+  // 滚轮 / 滚动页面即隐藏（鼠标移动不影响，方便移动到按钮上点击）
+  const hideOnScroll = (): void => {
+    if (btn) hide();
+  };
+  window.addEventListener("wheel", hideOnScroll, { passive: true });
+  window.addEventListener("scroll", hideOnScroll, true);
+
+  // 点击输入框以外的区域隐藏；点击已聚焦的输入框时重新显示（滚动隐藏后焦点未变，不会触发 focusin）
+  document.addEventListener("mousedown", (e) => {
+    if (!field) return;
+    const target = e.target as Node;
+    const onField = target === field || field.contains(target);
+    const fieldFocused = !!document.activeElement && field.contains(document.activeElement);
+    if (onField && !btn && fieldFocused) {
+      showButton(field); // 重新显示
+      return;
+    }
+    if (!onField && !(btn && btn.contains(target))) hide();
+  });
+
+  // 失焦隐藏（Tab 移开 / 点击别处兜底）
   document.addEventListener("focusout", () => {
     clearTimeout(hideTimer);
     hideTimer = window.setTimeout(hide, 150);
   });
-
-  window.addEventListener("scroll", hide, true);
 }
 
 function isTranslatableField(el: HTMLElement): boolean {
@@ -46,35 +120,4 @@ function setFieldText(el: HTMLElement, text: string): void {
   } else if (el.isContentEditable) {
     el.textContent = text;
   }
-}
-
-function showButton(field: HTMLElement, engine: PageEngine): void {
-  document.querySelector(".it-input-btn")?.remove();
-
-  const btn = document.createElement("button");
-  btn.className = "it-input-btn";
-  btn.textContent = "译";
-  btn.title = "翻译输入内容";
-  btn.addEventListener("mousedown", (e) => e.preventDefault()); // 保持输入框焦点
-
-  btn.addEventListener("click", async () => {
-    const text = getFieldText(field).trim();
-    if (!text) return;
-    btn.disabled = true;
-    btn.textContent = "…";
-    try {
-      const result = await engine.translateText(text);
-      setFieldText(field, result);
-      btn.remove();
-    } catch {
-      btn.textContent = "失败";
-      btn.disabled = false;
-      setTimeout(() => (btn.textContent = "译"), 1200);
-    }
-  });
-
-  const r = field.getBoundingClientRect();
-  btn.style.top = `${Math.max(8, r.top - 28)}px`;
-  btn.style.right = `${Math.max(8, innerWidth - r.right)}px`;
-  document.body.appendChild(btn);
 }

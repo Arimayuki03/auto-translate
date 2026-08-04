@@ -93,6 +93,28 @@
           <span>视口懒翻译（只翻译当前浏览区域，滚动到附近才译新内容，节省额度）</span>
         </label>
       </div>
+      <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" id="translate-on-select" />
+          <span>划词翻译（选中文本自动弹出译文气泡）</span>
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" id="translate-input" />
+          <span>输入框翻译（输入框右上方显示「译」按钮）</span>
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" id="sensitive-pages" />
+          <span>敏感页面不翻译（登录 / 密码 / 2FA / 支付等页面跳过翻译）</span>
+        </label>
+        <p class="hint">
+          开启后，URL 含 login / password / 2fa / pay 等关键词的页面整页不翻译（输入框内的密码值本就永不翻译）。
+          关闭则所有页面都翻译。默认关闭。
+        </p>
+      </div>
     </section>
 
     <section class="card">

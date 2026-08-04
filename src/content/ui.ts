@@ -81,8 +81,20 @@ export function makeDraggable(
       bx = el.offsetLeft;
       by = el.offsetTop;
     }
-    el.style.left = `${Math.max(0, bx + dx)}px`;
-    el.style.top = `${Math.max(0, by + dy)}px`;
+    // 限位：保证至少 minVisible 像素留在视口内，防止拖出窗口后拉不回来
+    const minVisible = 40;
+    const elW = el.offsetWidth || minVisible;
+    const elH = el.offsetHeight || minVisible;
+    const left = Math.min(
+      Math.max(bx + dx, elW <= minVisible ? 0 : -(elW - minVisible)),
+      Math.max(0, innerWidth - minVisible)
+    );
+    const top = Math.min(
+      Math.max(by + dy, elH <= minVisible ? 0 : -(elH - minVisible)),
+      Math.max(0, innerHeight - minVisible)
+    );
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
     el.style.right = "auto";
   });
 

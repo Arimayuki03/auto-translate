@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | `openai`（默认） | OpenAI 官方 / DeepSeek / Kimi / OneAPI / new-api / vLLM / 各类中转 | `POST {baseURL}/chat/completions` | `Authorization: Bearer {key}` |
 | `anthropic` | Anthropic Claude / 兼容系 | `POST {baseURL}/v1/messages` | `x-api-key: {key}` + `anthropic-version: 2023-06-01` |
-| `gemini` | Google Gemini | `POST {baseURL}/v1beta/models/{model}:generateContent` | `x-goog-api-key: {key}`（或 `?key=`） |
+| `gemini` | Google Gemini | `POST {baseURL}/v1beta/models/{model}:generateContent?key={key}` | `?key=` 查询参数（附在 URL） |
 | `ollama` | Ollama 原生 | `POST {baseURL}/api/chat` | 无（本地默认） |
 
 > 提示：Ollama 也可开启 OpenAI 兼容模式（`/v1`），两种方式都支持；OneAPI / new-api / 中转一般建议直接用 `openai` 格式。

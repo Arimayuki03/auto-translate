@@ -2,8 +2,9 @@
 import type { DisplayMode } from "../shared/types";
 import type { EngineState, EngineStats, PageEngine } from "./engine";
 import { copyText, makeDraggable } from "./ui";
+import { currentHost, currentPageKey, savePerSite, setPageDisabled } from "./perSite";
 
-const MODES: DisplayMode[] = ["bilingual", "translated", "original"];
+const MODES: DisplayMode[] = ["bilingual", "translated"];
 const MODE_LABEL: Record<DisplayMode, string> = {
   bilingual: "双语对照",
   translated: "仅译文",
@@ -18,10 +19,10 @@ const LANGUAGES: [string, string][] = [
 
 const STORAGE_KEY = "it-toolbar-state";
 
+/** 只记忆位置，不记忆展开态——红点始终默认收起（点击才展开），避免每次重载/换页都弹开面板 */
 interface ToolbarState {
   x?: number;
   y?: number;
-  expanded?: boolean;
 }
 
 export class Toolbar {
@@ -58,6 +59,7 @@ export class Toolbar {
     this.toggleBtn.textContent = "翻译";
     this.toggleBtn.addEventListener("click", () => this.onToggle());
 
+    // 显示模式：双语对照 / 仅译文（「原文」用「还原」切换，不在此列）
     this.modeSelect = document.createElement("select");
     for (const m of MODES) {
       const opt = document.createElement("option");
@@ -65,10 +67,15 @@ export class Toolbar {
       opt.textContent = MODE_LABEL[m];
       this.modeSelect.appendChild(opt);
     }
-    this.modeSelect.value = engine.renderer.getMode();
-    this.modeSelect.addEventListener("change", () =>
-      engine.renderer.setMode(this.modeSelect.value as DisplayMode)
-    );
+    this.modeSelect.value =
+      engine.renderer.getMode() === "original" ? "bilingual" : engine.renderer.getMode();
+    this.modeSelect.addEventListener("change", () => {
+      engine.renderer.setMode(this.modeSelect.value as DisplayMode);
+      void savePerSite(currentHost(), {
+        targetLang: engine.targetLanguage,
+        displayMode: this.modeSelect.value as DisplayMode,
+      });
+    });
 
     const langSelect = document.createElement("select");
     langSelect.className = "it-lang-select";
@@ -80,12 +87,6 @@ export class Toolbar {
     }
     langSelect.value = engine.targetLanguage;
     langSelect.addEventListener("change", () => this.onLangChange(langSelect.value));
-
-    const settingsBtn = document.createElement("button");
-    settingsBtn.className = "it-settings";
-    settingsBtn.textContent = "设置";
-    settingsBtn.title = "打开设置页";
-    settingsBtn.addEventListener("click", () => chrome.runtime.openOptionsPage());
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "it-copy-all";
@@ -107,7 +108,6 @@ export class Toolbar {
       this.toggleBtn,
       this.modeSelect,
       langSelect,
-      settingsBtn,
       copyBtn,
       this.statusEl,
       closeBtn
@@ -124,15 +124,22 @@ export class Toolbar {
 
     void this.restoreState();
 
+    // 窗口缩放变小可能把工具条挤出视口，重新吸附回来
+    window.addEventListener("resize", () => this.clampToViewport());
+
     engine.onStateChange = (state, stats) => this.setStatus(state, stats);
     this.setStatus(engine.state, { done: 0, error: 0, total: 0 });
   }
 
-  /** 快捷键轮换模式（同步 select） */
+  /** 快捷键轮换显示模式（双语/仅译文，原文用「还原」） */
   cycleMode(): void {
     const next = MODES[(MODES.indexOf(this.engine.renderer.getMode()) + 1) % MODES.length];
     this.engine.renderer.setMode(next);
     this.modeSelect.value = next;
+    void savePerSite(currentHost(), {
+      targetLang: this.engine.targetLanguage,
+      displayMode: next,
+    });
   }
 
   /** 复制整页译文（按页面顺序）到剪贴板 */
@@ -150,6 +157,11 @@ export class Toolbar {
     this.statusEl.textContent = ok ? `已复制 ${texts.length} 段` : "复制失败";
   }
 
+  /** 敏感页（登录/密码/2FA 等）隐藏工具条，避免诱导翻译敏感内容 */
+  setSensitive(v: boolean): void {
+    this.el.classList.toggle("it-toolbar-sensitive", v);
+  }
+
   destroy(): void {
     this.engine.onStateChange = undefined;
     this.el.remove();
@@ -157,14 +169,40 @@ export class Toolbar {
 
   private setExpanded(v: boolean): void {
     this.el.classList.toggle("it-expanded", v);
+    this.clampToViewport();
     this.saveState();
+  }
+
+  /** 把工具条重新吸附回视口内（收起/展开尺寸变化后，防止跑到窗口外） */
+  private clampToViewport(): void {
+    const minVisible = 40;
+    const w = this.el.offsetWidth;
+    const h = this.el.offsetHeight;
+    if (!w || !h) return;
+    const left = Math.min(Math.max(this.el.offsetLeft, 0), Math.max(0, innerWidth - minVisible));
+    const top = Math.min(Math.max(this.el.offsetTop, 0), Math.max(0, innerHeight - minVisible));
+    this.el.style.left = `${left}px`;
+    this.el.style.top = `${top}px`;
+    this.el.style.right = "auto";
   }
 
   private onToggle(): void {
     if (this.engine.state === "off") {
       void this.engine.translateAll();
+      void savePerSite(currentHost(), {
+        targetLang: this.engine.targetLanguage,
+        displayMode: this.engine.renderer.getMode(),
+      });
+      // 手动翻译 → 该子页恢复自动翻译（只影响本子页）
+      void setPageDisabled(currentPageKey(), false);
     } else {
       this.engine.restore();
+      void savePerSite(currentHost(), {
+        targetLang: this.engine.targetLanguage,
+        displayMode: this.engine.renderer.getMode(),
+      });
+      // 手动还原 → 该子页禁用自动翻译（只影响本子页，同站其它子页不受影响）
+      void setPageDisabled(currentPageKey(), true);
     }
   }
 
@@ -172,14 +210,20 @@ export class Toolbar {
     this.engine.setTargetLang(lang);
     this.engine.restore();
     void this.engine.translateAll();
+    void savePerSite(currentHost(), {
+      targetLang: lang,
+      displayMode: this.engine.renderer.getMode(),
+    });
+    // 主动改语言并翻译 → 该子页恢复自动翻译
+    void setPageDisabled(currentPageKey(), false);
   }
 
   private setStatus(state: EngineState, stats: EngineStats): void {
     this.toggleBtn.disabled = state === "translating";
     this.toggleBtn.textContent = state === "off" ? "翻译" : "还原";
     if (state === "translating") this.statusEl.textContent = "翻译中…";
-    else if (state === "done") this.statusEl.textContent = `共 ${stats.total} 段完成`;
-    else if (state === "partial") this.statusEl.textContent = `共 ${stats.total} 段，${stats.error} 段失败`;
+    else if (state === "done") this.statusEl.textContent = `共 ${stats.done} 段完成`;
+    else if (state === "partial") this.statusEl.textContent = `共 ${stats.done} 段完成，${stats.error} 段失败`;
     else this.statusEl.textContent = "未翻译";
   }
 
@@ -187,7 +231,6 @@ export class Toolbar {
     const state: ToolbarState = {
       x: this.el.offsetLeft,
       y: this.el.offsetTop,
-      expanded: this.el.classList.contains("it-expanded"),
     };
     void chrome.storage.local.set({ [STORAGE_KEY]: state });
   }
@@ -201,6 +244,6 @@ export class Toolbar {
       this.el.style.top = `${st.y}px`;
       this.el.style.right = "auto";
     }
-    if (st.expanded) this.el.classList.add("it-expanded");
+    this.clampToViewport(); // 保存的位置可能超出当前窗口，吸附回来
   }
 }

@@ -5,7 +5,11 @@ import { copyText, isInsideOurUI, makeDraggable } from "./ui";
 const DEDUP_WINDOW_MS = 3000;
 const MAX_RECENT = 100;
 
-export function initBubble(engine: PageEngine, translateOnSelect: boolean): void {
+export function initBubble(
+  engine: PageEngine,
+  translateOnSelect: boolean,
+  isSensitive?: () => boolean
+): void {
   let bubble: HTMLElement | null = null;
   const recent = new Map<string, number>();
 
@@ -15,6 +19,7 @@ export function initBubble(engine: PageEngine, translateOnSelect: boolean): void
   }
 
   document.addEventListener("mouseup", (e) => {
+    if (isSensitive?.()) return; // 敏感页（登录/密码/2FA 等）不提供划词翻译
     if (isInsideOurUI(e.target as Element)) return;
     const sel = window.getSelection();
     const text = sel?.toString().trim() ?? "";
@@ -40,6 +45,7 @@ export function initBubble(engine: PageEngine, translateOnSelect: boolean): void
       // 先显示一个小「译」按钮，点击才翻译
       const btn = document.createElement("button");
       btn.className = "it-translate-sel";
+      btn.setAttribute("data-it-ui", "");
       btn.textContent = "译";
       btn.title = "翻译选中内容";
       bubble = btn;

@@ -9,12 +9,43 @@
 <body>
   <header class="popup-header">
     <h1>AI 沉浸式网页翻译</h1>
-    <span class="version" id="version">v0.1.0</span>
+    <span class="version" id="version"></span>
   </header>
   <main class="popup-body">
-    <p class="hint">阶段 2 完成：API 配置已开放，可测试连接。</p>
-    <p class="hint">全文翻译（阶段 3）开发中。</p>
-    <button id="open-options" class="btn">打开设置</button>
+    <div class="field">
+      <label for="p-format">API 格式</label>
+      <select id="p-format">
+        <option value="openai">OpenAI 兼容（DeepSeek/中转等）</option>
+        <option value="anthropic">Anthropic Claude</option>
+        <option value="gemini">Google Gemini</option>
+        <option value="ollama">Ollama 原生</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="p-base-url">BaseURL</label>
+      <input type="text" id="p-base-url" placeholder="https://api.deepseek.com/v1" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="p-api-key">API Key</label>
+      <input type="password" id="p-api-key" placeholder="sk-..." autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="p-model">模型</label>
+      <input type="text" id="p-model" placeholder="deepseek-chat" autocomplete="off" />
+    </div>
+    <div class="popup-actions">
+      <button id="p-test" class="btn btn-secondary">测试连接</button>
+      <button id="p-save" class="btn">保存</button>
+    </div>
+    <p id="p-status" class="status"></p>
+    <div class="site-row">
+      <span class="site-name" id="site-name">当前网站</span>
+      <div class="site-actions">
+        <button id="btn-whitelist" class="btn btn-secondary">加入白名单</button>
+        <button id="btn-blacklist" class="btn btn-secondary">加入黑名单</button>
+      </div>
+    </div>
+    <a id="p-full-settings" class="full-settings" href="#">打开完整设置…</a>
   </main>
   <script type="module" src="./main.ts"></script>
 </body>

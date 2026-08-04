@@ -37,3 +37,10 @@ export interface ItCommandMessage {
 export interface ClearCacheMessage {
   type: "clear-cache";
 }
+
+/** 检查一批文本的缓存命中数（content → background，用于决定整页/懒翻译） */
+export interface CheckCacheMessage {
+  type: "check-cache";
+  targetLang: string;
+  texts: string[];
+}

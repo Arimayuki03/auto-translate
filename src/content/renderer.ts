@@ -34,7 +34,7 @@ export class Renderer {
     el.style.minHeight = estimateHeight(unit);
     this.insert(unit, el);
     this.byContainer.set(unit.container, el);
-    this.ensureTranslatedHidden(unit.container);
+    this.applyToContainer(unit.container);
   }
 
   /** 译文就绪：填充（复用占位，无占位或占位失效时新建插入） */
@@ -64,7 +64,7 @@ export class Renderer {
         el.appendChild(s);
       }
     }
-    this.ensureTranslatedHidden(unit.container);
+    this.applyToContainer(unit.container);
   }
 
   /** 翻译失败：复用占位或新建，转为错误态 */
@@ -91,6 +91,10 @@ export class Renderer {
     retry.textContent = "重试";
     retry.setAttribute("data-it-unit", unit.id);
     el.append(span, retry);
+    // 仅译文模式：原文未被替换（翻译失败不应覆盖原文），需要隐藏错误元素
+    if (this.mode === "translated") {
+      el.classList.add("it-translated-hidden");
+    }
   }
 
   /** 重试前：移除旧内容（解包原文），回到未译状态 */
@@ -98,25 +102,94 @@ export class Renderer {
     this.clearContainer(unit.container);
   }
 
+  /** 该容器的译文是否为失败态（供重试筛选） */
+  isFailed(container: HTMLElement): boolean {
+    const el = this.byContainer.get(container);
+    return !!el && el.classList.contains("it-error");
+  }
+
   getMode(): DisplayMode {
     return this.mode;
   }
 
-  /** 切换显示模式：body 类控制可见性；inside 容器的直接文本用 JS 隐藏 */
+  /** 切换显示模式：仅译文用"原位替换原文文字"（保留元素结构与链接），双语/原文恢复 */
   setMode(mode: DisplayMode): void {
     this.mode = mode;
     if (mode === "translated") {
-      for (const container of this.byContainer.keys()) this.ensureTranslatedHidden(container);
+      this.applyTranslatedMode();
     } else {
-      this.restoreOriginalTexts();
+      this.clearTranslatedMode();
     }
     document.body.classList.toggle("it-mode-translated", mode === "translated");
     document.body.classList.toggle("it-mode-original", mode === "original");
+    // 包裹层 display 随模式更新（避免仅译文布局跳动）
+    document.querySelectorAll(".it-wrap").forEach((w) => this.applyWrapDisplay(w as HTMLElement));
+  }
+
+  /** 仅译文：把每个译文块的原文文字原位替换为译文，保留结构（链接可点击、样式不变） */
+  private applyTranslatedMode(): void {
+    for (const container of this.byContainer.keys()) this.applyToContainer(container);
+  }
+
+  private applyToContainer(container: HTMLElement): void {
+    if (this.mode !== "translated" || !container.isConnected) return;
+    const transEl = this.byContainer.get(container);
+    if (!transEl || !transEl.isConnected) return;
+    // 失败/错误态不替换原文（不应把"翻译失败"文字写进段落）
+    if (transEl.classList.contains("it-error")) return;
+    const trans = (transEl.textContent ?? "").trim();
+    if (!trans) return;
+    const target = getSourceTarget(container);
+    if (!target.hasAttribute("data-it-orig-html")) {
+      target.setAttribute("data-it-orig-html", target.innerHTML);
+    }
+    // 只原位替换一次，避免重复调用导致重复/错乱
+    if (!target.hasAttribute("data-it-inplace")) {
+      if (target === container) {
+        // 普通容器：替换文字；保留无文本子元素（图片/br 等），去掉有文本的内联元素
+        //（链接/加粗等，其文字已并入整段译文，避免"译文+原文残留"）
+        const keep = Array.from(target.children).filter((c) => !(c.textContent ?? "").trim());
+        target.textContent = trans;
+        for (const c of keep) target.appendChild(c);
+      } else {
+        // 链接（或只包一个链接的容器）：替换链接文字，保留可点击
+        target.textContent = trans;
+      }
+      target.setAttribute("data-it-inplace", "");
+    }
+    transEl.classList.add("it-translated-hidden");
+  }
+
+  /** 离开仅译文：还原原文文字，显示译文元素 */
+  private clearTranslatedMode(): void {
+    document.querySelectorAll("[data-it-orig-html]").forEach((el) => {
+      el.innerHTML = el.getAttribute("data-it-orig-html") ?? "";
+      el.removeAttribute("data-it-orig-html");
+      el.removeAttribute("data-it-inplace");
+    });
+    document.querySelectorAll(".it-translated-hidden").forEach((el) => {
+      el.classList.remove("it-translated-hidden");
+    });
+    // 修复非包裹容器的 byContainer 引用：innerHTML 恢复后译文元素是新建节点，
+    // 旧引用已脱离 DOM，不更新会导致下次切换到仅译文时 in-place 替换失效
+    for (const [container, transEl] of this.byContainer) {
+      if (!transEl.isConnected) {
+        const unitId = transEl.getAttribute("data-it-unit");
+        const newEl = unitId
+          ? (container.querySelector<HTMLElement>(`[data-it-unit="${unitId}"]`))
+          : null;
+        if (newEl) {
+          this.byContainer.set(container, newEl);
+        } else {
+          this.byContainer.delete(container);
+        }
+      }
+    }
   }
 
   /** 一键还原：解包把原文移回原位，移除全部译文与标记 */
   restore(): void {
-    this.restoreOriginalTexts();
+    this.clearTranslatedMode();
     // 解包：原文移回原位，译文随包裹层一起移除
     document.querySelectorAll(".it-wrap").forEach((wrap) => {
       const orig = wrap.querySelector(":scope > .it-orig");
@@ -135,13 +208,18 @@ export class Renderer {
     this.byContainer.clear();
   }
 
-  /** 插入译文/占位：紧凑标签行内；可包的块级元素包裹；li/td 等插内部 */
+  /** 插入译文/占位：
+   * 紧凑标签 → 行内；容器本身是 flex/grid → 包裹（译文放下面，避免译文变 flex 项横排错位）；
+   * 块容器 + 块级流父级 → 包裹；块容器 + flex/grid/列表/表格父级 → 插内部（保持原布局项） */
   private insert(unit: TranslationUnit, el: HTMLElement): void {
     const container = unit.container;
     container.setAttribute("data-it-src", "");
+    const parent = container.parentElement;
+    const containerConstrained = isConstrainedLayout(container);
+    const parentConstrained = !!parent && isConstrainedLayout(parent);
     if (isCompactUILabel(unit)) {
       this.attachInline(container, el);
-    } else if (canWrap(container)) {
+    } else if (canWrap(container) && (containerConstrained || !parentConstrained)) {
       this.wrapContainer(container, el);
     } else {
       container.setAttribute("data-it-inside", "");
@@ -151,6 +229,10 @@ export class Renderer {
 
   /** 包裹：把原文容器移进 .it-wrap（顶替原位置），译文作为兄弟 */
   private wrapContainer(container: HTMLElement, el: HTMLElement): void {
+    // 测量原文段落的真实底边距，应用到译文底部 → 段落间距与原文一致，位置精确
+    //（必须在容器移入包裹前测量，否则 .it-wrap>.it-orig 的 margin-bottom:0 会覆盖）
+    const mb = getComputedStyle(container).marginBottom;
+    if (mb && mb !== "0px") el.style.marginBottom = mb;
     const wrap = document.createElement("div");
     wrap.className = "it-wrap";
     wrap.setAttribute("data-it-unit", el.getAttribute("data-it-unit") ?? "");
@@ -158,11 +240,20 @@ export class Renderer {
     wrap.appendChild(container);
     wrap.appendChild(el);
     container.classList.add("it-orig");
+    this.applyWrapDisplay(wrap);
   }
 
-  /** 行内译文：链接插到后面；li/其他文本块插到内部，与原文并排 */
+  /** 包裹层 display：仅译文或块级流父级用 contents（不产生盒子、布局零变化，避免页面跳动）；
+   *  双语 + flex/grid 父级用 block（包裹层作为单一布局项，避免译文变成多余 flex 项） */
+  private applyWrapDisplay(wrap: HTMLElement): void {
+    const parent = wrap.parentElement;
+    const box = this.mode !== "translated" && !!parent && isConstrainedLayout(parent);
+    wrap.style.display = box ? "block" : "contents";
+  }
+
+  /** 行内译文：链接/折叠摘要插到后面（保持 details>summary 结构不被破坏）；li/其他文本块插到内部 */
   private attachInline(container: HTMLElement, el: HTMLElement): void {
-    if (container.tagName === "A") {
+    if (container.tagName === "A" || container.tagName === "SUMMARY") {
       container.after(el);
     } else {
       container.setAttribute("data-it-inside", "");
@@ -183,28 +274,15 @@ export class Renderer {
       }
       this.byContainer.delete(container);
     }
-    container.removeAttribute("data-it-src");
-  }
-
-  /** 仅译文：把 inside 容器的直接文本节点（原文）包进隐藏 span（CSS 无法选中直接文本） */
-  private ensureTranslatedHidden(container: HTMLElement): void {
-    if (this.mode !== "translated" || !container.hasAttribute("data-it-inside")) return;
-    for (const child of Array.from(container.childNodes)) {
-      if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
-        const wrap = document.createElement("span");
-        wrap.className = "it-orig-text";
-        wrap.style.display = "none";
-        child.replaceWith(wrap);
-        wrap.appendChild(child);
-      }
+    // 清理仅译文模式的 in-place 替换状态（target 可能 ≠ container，如 <li><a> 的链接元素）、
+    // 还原原文文字，否则下次翻译的 in-place 替换会被 data-it-inplace 守卫跳过
+    const target = getSourceTarget(container);
+    if (target.hasAttribute("data-it-orig-html")) {
+      target.innerHTML = target.getAttribute("data-it-orig-html") ?? "";
+      target.removeAttribute("data-it-orig-html");
     }
-  }
-
-  /** 离开仅译文：还原被包裹的原文文本节点 */
-  private restoreOriginalTexts(): void {
-    document.querySelectorAll(".it-orig-text").forEach((wrap) => {
-      wrap.replaceWith(...Array.from(wrap.childNodes));
-    });
+    target.removeAttribute("data-it-inplace");
+    container.removeAttribute("data-it-src");
   }
 }
 
@@ -217,10 +295,28 @@ function canWrap(container: HTMLElement): boolean {
   return true;
 }
 
-/** 链接/导航/页脚标签一律行内；正文列表项超过 24 字符仍用块级 */
+/** 父级是否为 flex/grid/表格等特殊布局（决定包裹层用 block 还是 contents） */
+function isConstrainedLayout(el: HTMLElement): boolean {
+  const d = getComputedStyle(el).display;
+  return (
+    d.startsWith("flex") ||
+    d.startsWith("grid") ||
+    d.startsWith("inline") ||
+    d.startsWith("table") ||
+    d === "contents"
+  );
+}
+
+/** 链接/折叠摘要/导航/页脚标签一律行内；正文列表项超过 24 字符仍用块级 */
 function isCompactUILabel(unit: TranslationUnit): boolean {
   const c = unit.container;
-  if (c.tagName === "A" || c.closest("nav, header, footer")) return unit.text.length <= 40;
+  if (
+    c.tagName === "A" ||
+    c.tagName === "SUMMARY" ||
+    c.closest("nav, header, footer")
+  ) {
+    return unit.text.length <= 40;
+  }
   if (c.tagName === "LI") return unit.text.length <= 24;
   return false;
 }
@@ -234,4 +330,22 @@ function estimateHeight(unit: TranslationUnit): string {
   const perLine = Math.max(10, Math.floor(width / fs));
   const lines = Math.max(1, Math.ceil(unit.text.length / perLine));
   return `${Math.min(lines * lh, 600)}px`;
+}
+
+/**
+ * 仅译文原位替换目标：容器是链接或"只包一个链接"（如 <li><a>）→ 替换链接文字，保留可点击；
+ * 否则替换容器文字（元素/样式不变）。
+ */
+function getSourceTarget(container: HTMLElement): HTMLElement {
+  if (container.tagName === "A") return container;
+  const hasOwnText = Array.from(container.childNodes).some(
+    (n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim()
+  );
+  if (hasOwnText) return container;
+  const links = Array.from(container.children).filter((c) => c.tagName === "A");
+  const meaningful = Array.from(container.children).filter(
+    (c) => !c.classList.contains("it-translated")
+  ).length;
+  if (links.length === 1 && meaningful === 1) return links[0] as HTMLElement;
+  return container;
 }

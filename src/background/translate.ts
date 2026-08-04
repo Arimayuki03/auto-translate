@@ -97,6 +97,15 @@ export class TranslateService {
     await this.cache.clear();
   }
 
+  /** 返回一批文本中命中缓存的条数（用于内容侧决定整页直译还是视口懒翻译） */
+  async checkCache(targetLang: string, texts: string[]): Promise<number> {
+    let cached = 0;
+    for (const t of texts) {
+      if ((await this.cache.get(targetLang, t)) !== undefined) cached++;
+    }
+    return cached;
+  }
+
   /** 单次 API 调用：主 API 重试 → 可重试错误时切换备用 API */
   private async callApi(settings: Settings, texts: string[], targetLang: string): Promise<string> {
     const messages: ChatMessage[] = [

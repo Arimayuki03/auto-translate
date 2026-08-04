@@ -1,6 +1,7 @@
 /** 页面翻译引擎：视口优先 + 滚动懒翻译 / 去重分批 / 顺序渲染 / 段落翻译 / 重试 / 还原 */
+import type { CheckCacheMessage } from "../shared/messages";
 import type { Settings } from "../shared/types";
-import { extractUnits } from "./extractor";
+import { extractUnits, isTargetLanguage } from "./extractor";
 import type { ExtractOptions, TranslationUnit } from "./extractor";
 import { Renderer } from "./renderer";
 import { translateTexts } from "./translate";
@@ -42,6 +43,10 @@ export class PageEngine {
   private lazyUnits = new Map<Element, TranslationUnit>();
   private lazyPending: TranslationUnit[] = [];
   private lazyTimer: number | undefined;
+  /** 代次：restore 后 +1，在途翻译结果作废，防止还原后译文又冒出来 */
+  private generation = 0;
+  /** 用户是否手动还原过本页（点「还原」）：自动翻译不应再把本页译回来 */
+  private userRestored = false;
 
   constructor(renderer: Renderer, settings: Settings) {
     this.renderer = renderer;
@@ -88,6 +93,11 @@ export class PageEngine {
     return this.stats.done > 0 || this.doneTexts.size > 0;
   }
 
+  /** 用户是否手动还原过本页（自动翻译切回前台时不该再译回来） */
+  get restoredByUser(): boolean {
+    return this.userRestored;
+  }
+
   /** 该文本是否已处理（已译或在途），SPA / 段落按钮去重用 */
   isSkipped(text: string): boolean {
     return this.doneTexts.has(text) || this.pendingTexts.has(text);
@@ -95,17 +105,123 @@ export class PageEngine {
 
   /** 全页翻译：提取新增单元，视口内先译，视口外进入时再译 */
   async translateAll(): Promise<void> {
+    this.userRestored = false; // 主动翻译即代表用户想翻译，重置还原标记
+    const gen = this.generation;
     const units = extractUnits(document.body, this.opts).filter(
       (u) =>
         !u.container.hasAttribute("data-it-src") &&
         !u.container.hasAttribute("data-it-processing")
     );
-    this.scheduleUnits(units);
+    if (units.length === 0) {
+      void this.translatePlaceholders();
+      return;
+    }
+    // 页面大部分内容已有缓存（之前翻过）→ 整页直译；否则视口懒翻译省 token
+    const cachedRatio = await this.checkPageCacheRatio(units);
+    if (gen !== this.generation) return; // 等待期间被还原，放弃本次
+    this.scheduleUnits(units, cachedRatio >= 0.6);
+    void this.translatePlaceholders();
+  }
+
+  /** 抽样判断页面缓存命中率（有缓存则整页直译，无需懒翻译） */
+  private async checkPageCacheRatio(units: TranslationUnit[]): Promise<number> {
+    const texts = [...new Set(units.map((u) => u.text))];
+    const sample = texts.slice(0, 40);
+    if (sample.length === 0) return 0;
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: "check-cache",
+        targetLang: this.targetLang,
+        texts: sample,
+      } as CheckCacheMessage)) as { cachedCount?: number };
+      return (res?.cachedCount ?? 0) / sample.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** 翻译搜索框/输入框的 placeholder 提示词（去重 + 术语表 + 防重复） */
+  async translatePlaceholders(): Promise<void> {
+    const gen = this.generation;
+    const els = Array.from(
+      document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+        'input[placeholder], textarea[placeholder]'
+      )
+    ).filter(
+      (el) =>
+        el.placeholder.trim() !== "" &&
+        !el.hasAttribute("data-it-ph-done") &&
+        isTranslatablePlaceholder(el.placeholder, this.targetLang)
+    );
+    if (els.length === 0) return;
+
+    const byText = new Map<string, (HTMLInputElement | HTMLTextAreaElement)[]>();
+    for (const el of els) {
+      const list = byText.get(el.placeholder) ?? [];
+      list.push(el);
+      byText.set(el.placeholder, list);
+    }
+    const texts = [...byText.keys()];
+
+    let results: string[];
+    try {
+      results = await translateTexts(texts, this.targetLang, this.glossary);
+    } catch {
+      return;
+    }
+    if (gen !== this.generation) return; // 期间被还原，放弃
+
+    for (let i = 0; i < texts.length && i < results.length; i++) {
+      const t = results[i]?.trim();
+      if (!t) continue;
+      for (const el of byText.get(texts[i]) ?? []) {
+        if (!el.hasAttribute("data-it-ph-orig")) {
+          el.setAttribute("data-it-ph-orig", texts[i]);
+        }
+        el.placeholder = t;
+        el.setAttribute("data-it-ph-done", "");
+      }
+    }
+  }
+
+  /** 还原 placeholder 提示词到原文 */
+  private restorePlaceholders(): void {
+    document
+      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-it-ph-done]")
+      .forEach((el) => {
+        const orig = el.getAttribute("data-it-ph-orig");
+        if (orig !== null) el.placeholder = orig;
+        el.removeAttribute("data-it-ph-orig");
+        el.removeAttribute("data-it-ph-done");
+      });
+  }
+
+  /**
+   * SPA 整体换页（<body> 被替换）：作废在途请求、清空旧页缓存与渲染状态。
+   * 不置 state 为 off —— 换页后仍需按自动翻译/观察器语义继续译新内容。
+   */
+  resetForNavigation(): void {
+    this.generation++; // 在途翻译结果作废（旧页容器已脱离文档）
+    this.renderer.restore();
+    this.restorePlaceholders(); // SPA 换页后重置 placeholder，避免旧译文残留
+    this.doneTexts.clear();
+    this.pendingTexts.clear();
+    this.allUnits = [];
+    this.stats = { done: 0, error: 0, total: 0 };
+    this.pendingCount = 0;
+    this.lazyIO?.disconnect();
+    this.lazyIO = null;
+    this.lazyUnits.clear();
+    this.lazyPending = [];
+    clearTimeout(this.lazyTimer);
   }
 
   /** 一键还原 */
   restore(): void {
+    this.userRestored = true; // 用户明确还原，自动翻译不再把本页译回来
+    this.generation++; // 在途翻译结果作废
     this.renderer.restore();
+    this.restorePlaceholders();
     this.doneTexts.clear();
     this.pendingTexts.clear();
     this.allUnits = [];
@@ -123,7 +239,7 @@ export class PageEngine {
    * 调度翻译：按文本去重 → 视口内先译 → 视口外注册 IntersectionObserver 滚动再译。
    * 自动翻译 / SPA 新增 / 重试 都走这里 —— 只翻译正在看的内容，不一次性翻整页。
    */
-  scheduleUnits(units: TranslationUnit[]): void {
+  scheduleUnits(units: TranslationUnit[], forceFull = false): void {
     // 只调度“新鲜”单元：已译 / 在途 / 已在懒观察中 的不重复入队
     const fresh = units.filter(
       (u) =>
@@ -134,14 +250,14 @@ export class PageEngine {
     if (fresh.length === 0) return;
     this.pendingCount += fresh.length;
     this.stats.total += fresh.length;
-    if (this.viewportLazy) {
+    if (forceFull || !this.viewportLazy) {
+      // 有缓存（整页直译）或关闭懒翻译：一次性全部翻译
+      void this.translateUnits(fresh);
+    } else {
       // 视口懒翻译：视口内先译，视口外进入时再译（省 token）
       const [visible, hidden] = partition(fresh, (u) => inViewport(u.container));
       if (visible.length > 0) void this.translateUnits(visible);
       if (hidden.length > 0) this.observeLazy(hidden);
-    } else {
-      // 关闭懒翻译：一次性全部翻译
-      void this.translateUnits(fresh);
     }
   }
 
@@ -182,6 +298,7 @@ export class PageEngine {
   /** 处理一组单元：预留空间 → 标记在途 → 去重分批 → 并发请求 → 按序渲染 */
   async translateUnits(units: TranslationUnit[]): Promise<void> {
     if (units.length === 0) return;
+    const gen = this.generation; // 捕获本批代次
     const anchor = this.captureAnchor();
     for (const u of units) u.container.setAttribute("data-it-processing", "");
     // 预留译文空间（不可见占位），填充在原位，避免页面跳动
@@ -206,6 +323,7 @@ export class PageEngine {
       }
       const chunks = await fetchMap.get(i)!;
       fetchMap.delete(i);
+      if (gen !== this.generation) return; // 期间被还原，丢弃后续结果
       if (chunks) {
         this.renderBatch(batches[i], chunks);
       } else {
@@ -222,13 +340,10 @@ export class PageEngine {
     this.afterGroup();
   }
 
-  /** 完成一组后的状态推进：还有待译保持 translating，全部完成则 done/partial */
+  /** 完成一组后的状态推进：按结果标记完成/部分失败
+   * （不再因视口外懒翻译未译而卡在 translating，否则工具条“还原”按钮会被永久禁用） */
   private afterGroup(): void {
-    if (this.pendingCount > 0 || this.lazyUnits.size > 0) {
-      this.setState("translating");
-    } else {
-      this.setState(this.stats.error > 0 ? "partial" : "done");
-    }
+    this.setState(this.stats.error > 0 ? "partial" : "done");
   }
 
   /** 发起一批请求：只请求、不渲染；成功返回 文本→译文chunks，失败返回 null */
@@ -272,6 +387,7 @@ export class PageEngine {
     textToChunks: Map<string, string[]>
   ): void {
     let filled = 0;
+    let failed = 0;
     for (const [text, us] of batch) {
       const chunks = textToChunks.get(text);
       for (const u of us) {
@@ -281,25 +397,32 @@ export class PageEngine {
           filled++;
         } else {
           this.renderer.fail(u);
+          failed++;
         }
       }
     }
     this.stats.done += filled;
+    this.stats.error += failed;
     this.emitStats();
   }
 
-  /** 重试某个单元（连同共享文本的单元一起） */
+  /** 重试某个单元（连同共享文本、同为失败态的兄弟单元一起） */
   retry(unit: TranslationUnit): void {
-    this.renderer.retryState(unit);
     const siblings = this.allUnits.filter((u) => u.text === unit.text);
-    this.scheduleUnits(siblings);
+    const toRetry = siblings.filter((s) => s === unit || this.renderer.isFailed(s.container));
+    for (const s of toRetry) this.renderer.retryState(s);
+    this.scheduleUnits(toRetry);
   }
 
   /** 捕获滚动锚点：视口顶部附近的元素及其视口相对位置 */
   private captureAnchor(): { el: Element; top: number } | null {
-    const el = document.elementFromPoint(innerWidth / 2, Math.min(60, innerHeight / 3));
-    if (!(el instanceof Element)) return null;
-    return { el, top: el.getBoundingClientRect().top };
+    try {
+      const el = document.elementFromPoint(innerWidth / 2, Math.min(60, innerHeight / 3));
+      if (!(el instanceof Element)) return null;
+      return { el, top: el.getBoundingClientRect().top };
+    } catch {
+      return null; // 个别环境未实现 elementFromPoint，忽略滚动锚点即可
+    }
   }
 
   /** 预留空间后补偿滚动，把锚点元素拉回原位置，避免页面自动移动 */
@@ -341,4 +464,11 @@ function buildBatches(entries: [string, TranslationUnit[]][]): [string, Translat
   }
   if (cur.length > 0) batches.push(cur);
   return batches;
+}
+
+/** placeholder 提示词是否值得翻译：够长、含字母、且不是目标语言 */
+function isTranslatablePlaceholder(text: string, targetLang: string): boolean {
+  if (text.length < 2) return false;
+  if (!/[A-Za-zÀ-ɏ぀-ヿ가-힣一-鿿]/.test(text)) return false;
+  return !isTargetLanguage(text, targetLang);
 }

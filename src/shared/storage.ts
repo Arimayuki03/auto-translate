@@ -1,7 +1,7 @@
 import type { ApiConfig, Settings } from "./types";
 
 /** 设置结构版本：变更默认值（如自动翻译默认关闭/并发加大）时 +1，老版本读取时迁移 */
-const SETTINGS_VERSION = 3;
+const SETTINGS_VERSION = 4;
 
 export const DEFAULT_SETTINGS: Settings = {
   version: SETTINGS_VERSION,
@@ -27,7 +27,7 @@ export const DEFAULT_SETTINGS: Settings = {
     terminology: [],
   },
   sites: { whitelist: [], blacklist: [] },
-  security: { encryptApiKey: true, sensitivePages: true },
+  security: { encryptApiKey: true, sensitivePages: false },
   cache: { enabled: true, maxEntries: 5000 },
 };
 
@@ -72,6 +72,10 @@ export async function getSettings(): Promise<Settings> {
     // v2 → v3：加大默认并发以提速
     if (!saved.version || saved.version < 3) {
       merged.api.maxConcurrency = DEFAULT_SETTINGS.api.maxConcurrency;
+    }
+    // v3 → v4：取消敏感页不翻译限制（默认关，老设置里存的 true 归零）
+    if (!saved.version || saved.version < 4) {
+      merged.security.sensitivePages = DEFAULT_SETTINGS.security.sensitivePages;
     }
     merged.version = SETTINGS_VERSION;
   }
