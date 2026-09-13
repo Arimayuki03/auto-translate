@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
     // 请求启动限速的间隔（毫秒）：默认 500 ≈ 2 请求/秒，可在设置页按中转站额度调整
     minRequestIntervalMs: 500,
     batchMode: "lines",
+    customSystemPrompt: "",
     freeEndpoint: "",
     freeBackupEndpoint: "",
   },

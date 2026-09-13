@@ -27,6 +27,7 @@ function fullSettings(overrides?: Partial<Settings>): Settings {
       timeoutMs: 120000,
       maxConcurrency: 6,
       batchMode: "lines",
+      customSystemPrompt: "保持术语一致。",
       freeEndpoint: "https://translate.example/free",
       freeBackupEndpoint: "https://translate.example/backup",
     },
@@ -116,6 +117,7 @@ describe("v4 设置的第三方 API 配置完全保留", () => {
       timeoutMs: 120000,
       maxConcurrency: 6,
       batchMode: "lines",
+      customSystemPrompt: "保持术语一致。",
       freeEndpoint: "https://translate.example/free",
       freeBackupEndpoint: "https://translate.example/backup",
     });
@@ -210,5 +212,31 @@ describe("导出 / 导入往返", () => {
     mockStorage();
     await expect(importSettings(null)).rejects.toThrow("不是有效的设置文件");
     await expect(importSettings([1, 2])).rejects.toThrow("不是有效的设置文件");
+  });
+});
+
+describe("自定义翻译 prompt（api.customSystemPrompt）兼容性", () => {
+  it("旧版 v4 设置没有该字段 → 读取为默认空串（不触发版本迁移）", async () => {
+    const saved = fullSettings();
+    delete (saved.api as { customSystemPrompt?: string }).customSystemPrompt;
+    mockStorage({ settings: structuredClone(saved) });
+    const s = await getSettings();
+    expect(s.api.customSystemPrompt).toBe("");
+    expect(s.version).toBe(4);
+  });
+
+  it("用户已配置的附加指令读取时原样保留", async () => {
+    mockStorage({ settings: structuredClone(fullSettings()) });
+    const s = await getSettings();
+    expect(s.api.customSystemPrompt).toBe("保持术语一致。");
+  });
+
+  it("导出/导入往返后附加指令不丢失", async () => {
+    const memory = mockStorage({ settings: structuredClone(fullSettings()) });
+    const exported = await exportSettings();
+    memory.clear();
+    await importSettings(exported);
+    const s = await getSettings();
+    expect(s.api.customSystemPrompt).toBe("保持术语一致。");
   });
 });

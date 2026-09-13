@@ -106,3 +106,42 @@ export interface CheckCacheMessage {
   targetLang: string;
   texts: string[];
 }
+
+// ===== 划词流式翻译（Port 长连接协议）=====
+
+/** Port 名：content 划词翻译时 chrome.runtime.connect({ name }) 建立长连接 */
+export const STREAM_PORT_NAME = "it-stream";
+
+/** content → background（Port 建立后的首条消息）：发起一次流式翻译 */
+export interface StreamStartMessage {
+  type: "stream-start";
+  text: string;
+  targetLang: string;
+}
+
+/** background → content：增量文本（自上一条消息以来新增的部分） */
+export interface StreamDeltaMessage {
+  type: "stream-delta";
+  delta: string;
+}
+
+/** background → content：流正常结束；text 为完整译文（以它为准覆盖增量累积） */
+export interface StreamDoneMessage {
+  type: "stream-done";
+  text: string;
+}
+
+/** background → content：流失败（错误类型 / 脱敏诊断与 translate 消息同语义） */
+export interface StreamErrorMessage {
+  type: "stream-error";
+  error: string;
+  errorCode?: ApiErrorCode;
+  diagnostic?: ApiDiagnostic;
+}
+
+/** Port 上流转的全部消息形态 */
+export type StreamPortMessage =
+  | StreamStartMessage
+  | StreamDeltaMessage
+  | StreamDoneMessage
+  | StreamErrorMessage;

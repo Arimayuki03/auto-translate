@@ -3,7 +3,7 @@
  *  译文作为兄弟放在包裹层内，不新增父级布局项，避免 flex/grid/表格被挤变形。
  *  列表/表格项（li/td）不能包，退回「插内部」；导航/页脚等紧凑标签用「行内」。
  */
-import type { DisplayMode } from "../shared/types";
+import type { DisplayMode, TranslationStyle } from "../shared/types";
 import type { TranslationUnit } from "./extractor";
 
 /** 父级为这些标签时译文插到容器内部（块级兄弟会破坏列表/表格结构） */
@@ -67,6 +67,11 @@ export class Renderer {
   private byContainer = new Map<HTMLElement, HTMLElement>();
   /** 容器 → 控件原文/译文（data-it-ctl-orig/trans 的镜像，供模式切换快速遍历） */
   private controlContainers = new Set<HTMLElement>();
+  /** 已注入译文样式的 shadow root → sheet（WeakMap 记录：随宿主回收，每 root 只注入一次） */
+  private shadowSheets = new WeakMap<
+    ShadowRoot,
+    { sheet: CSSStyleSheet | HTMLStyleElement; mode: DisplayMode }
+  >();
 
   constructor(mode: DisplayMode, targetLang = "zh-CN") {
     this.mode = mode;
@@ -242,6 +247,7 @@ export class Renderer {
       const wrap = transEl?.closest?.(".it-wrap") as HTMLElement | null;
       if (wrap) this.applyWrapDisplay(wrap);
     }
+    this.syncShadowStyles(); // body 模式类不跨 shadow 边界，shadow 内样式文本需按新模式重建
   }
 
   /** 控件（按钮/选项）文字随模式切换：双语/仅译文显示译文，原文模式恢复原文 */
@@ -399,6 +405,7 @@ export class Renderer {
    * 紧凑标签 → 行内；容器本身是 flex/grid → 包裹（译文放下面，避免译文变 flex 项横排错位）；
    * 块容器 + 块级流父级 → 包裹；块容器 + flex/grid/列表/表格父级 → 插内部（保持原布局项） */
   private insert(unit: TranslationUnit, el: HTMLElement, style?: ContainerStyle): void {
+    this.ensureShadowStyles(unit.container); // 容器在 shadow root 内时先补译文样式（content.css 够不着）
     const container = unit.container;
     container.setAttribute("data-it-src", "");
     const parent = container.parentElement;
@@ -498,6 +505,42 @@ export class Renderer {
     }
     target.removeAttribute("data-it-inplace");
     container.removeAttribute("data-it-src");
+  }
+
+  /** shadow root 译文样式注入：每个 root 只建一份 sheet（WeakMap 判重防泄漏）；
+   *  已存在但模式变化时仅重建样式文本。MV3 Chrome 支持 Constructable Stylesheet
+   *  （adoptedStyleSheets，不占 DOM 节点）；不支持的环境回退 shadow 内 <style data-it-ui>。 */
+  private ensureShadowStyles(container: HTMLElement): void {
+    const root = container.getRootNode();
+    if (!(root instanceof ShadowRoot)) return;
+    const prev = this.shadowSheets.get(root);
+    if (prev) {
+      if (prev.mode !== this.mode) {
+        applyShadowCss(prev.sheet, buildShadowCss(this.mode));
+        prev.mode = this.mode;
+      }
+      return;
+    }
+    let sheet: CSSStyleSheet | HTMLStyleElement;
+    if (supportsAdoptedStyleSheets(root)) {
+      sheet = new CSSStyleSheet();
+      root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    } else {
+      const style = document.createElement("style");
+      style.setAttribute("data-it-ui", ""); // 标记我们的 UI：提取与观察器按自身产物跳过
+      root.appendChild(style); // 放在末尾：同特异性时晚于站点内 shadow 样式生效
+      sheet = style;
+    }
+    applyShadowCss(sheet, buildShadowCss(this.mode));
+    this.shadowSheets.set(root, { sheet, mode: this.mode });
+  }
+
+  /** 模式切换后重建各 shadow root 的样式文本（body 上的 it-mode-* 类在 shadow 内匹配不到） */
+  private syncShadowStyles(): void {
+    for (const container of this.byContainer.keys()) {
+      const root = container.getRootNode();
+      if (root instanceof ShadowRoot) this.ensureShadowStyles(container);
+    }
   }
 }
 
@@ -692,4 +735,86 @@ function restoreTextNodes(el: HTMLElement, raw: string): void {
     el.appendChild(document.createTextNode(texts[i]));
     i++;
   }
+}
+
+// ===== Shadow DOM 译文样式（自包含子集） =====
+// content.css 注入在 light DOM，其规则（body.it-* 前缀选择器、:root 变量）不跨 shadow
+// 边界生效；shadow 内的译文单元需要一份独立样式。此处从 content.css 摘出与译文 /
+// 骨架屏 / data-it-* 相关的规则：
+// - 模式类（body.it-mode-*）与主题类（body.it-style-*）在 shadow 内匹配不到，
+//   改为按 Renderer 当前模式直出对应规则、按 body 主题类读取当前主题；
+// - 自定义属性挂在 :host（:root 的定义同样进不了 shadow 树）；
+// - 模式切换时整体重建样式文本（见 syncShadowStyles）。
+
+const SHADOW_CSS_BASE = `:host{--it-error:#dc2626;--it-muted:#6b7280}
+.it-translated{display:block;color:inherit;font-family:inherit;font-size:inherit;line-height:inherit;word-break:break-word;margin:8px 0;overflow-anchor:none}
+.it-pending{border-radius:4px;background-color:rgba(107,114,128,.16);background-color:color-mix(in srgb,currentColor 13%,transparent);animation:it-pulse 1.8s ease-in-out infinite}
+@keyframes it-pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.it-pending{animation:none}}
+.it-wrap{margin:0;padding:0}
+[data-it-src]{overflow-anchor:none}
+.it-translated.it-inline{display:inline;margin:0 0 0 8px;vertical-align:baseline}
+.it-translated.it-inline::before{content:"· ";color:var(--it-muted)}
+.it-translated.it-pending.it-inline{display:inline-block;min-width:2.5em;vertical-align:baseline}
+.it-translated.it-pending.it-inline::before{content:none}
+.it-translated .it-chunk{display:inline;margin:0}
+.it-error{color:var(--it-error)}
+.it-error .it-err-text{margin-right:8px;font-size:12px}
+.it-retry{border:1px solid currentColor;background:transparent;color:inherit;font-size:12px;padding:1px 8px;border-radius:4px;cursor:pointer}
+.it-retry:hover{opacity:.7}
+.it-translated-hidden{display:none!important}
+.it-done{animation:it-fade-in .3s ease}
+@keyframes it-fade-in{from{opacity:0}to{opacity:1}}`;
+
+/** 模式相关规则直出（对应 content.css 中 body.it-mode-* 前缀的规则） */
+function shadowModeCss(mode: DisplayMode): string {
+  if (mode === "translated") {
+    // 顺序敏感：失败块守卫（4 个类）必须能压过上面的强制显示规则
+    return `.it-pending{display:none!important}
+[data-it-orig-hidden]{display:none}
+.it-wrap>.it-translated{display:block!important;margin:0}
+.it-wrap>.it-translated.it-translated-hidden{display:none!important}`;
+  }
+  if (mode === "original") {
+    return ".it-translated{display:none!important}";
+  }
+  // 双语（默认）：原文去底部外边距，让译文紧跟原文
+  return ".it-wrap>.it-orig{margin-bottom:0}";
+}
+
+/** 主题规则（对应 content.css 中 body.it-style-* 前缀的规则，按当前主题直出一份） */
+const SHADOW_THEME_CSS: Record<TranslationStyle, string> = {
+  gray: `.it-translated .it-chunk,.it-translated.it-done.it-inline{color:#4b5563;color:color-mix(in srgb,currentColor 72%,transparent)}`,
+  outline: `.it-translated .it-chunk,.it-translated.it-done.it-inline{color:inherit;-webkit-text-fill-color:transparent;-webkit-text-stroke:.6px currentColor}`,
+  underline: `.it-translated .it-chunk,.it-translated.it-done.it-inline{color:inherit;text-decoration:underline dashed;text-decoration-color:#4b5563;text-decoration-color:color-mix(in srgb,currentColor 55%,transparent);text-underline-offset:3px}`,
+  blur: `.it-translated .it-chunk,.it-translated.it-done.it-inline{color:inherit;filter:blur(4px);transition:filter .2s ease}
+.it-translated.it-done:hover .it-chunk,.it-translated.it-done.it-inline:hover{filter:none}
+@media (hover:none){.it-translated .it-chunk,.it-translated.it-done.it-inline{filter:none;color:#4b5563;color:color-mix(in srgb,currentColor 72%,transparent)}}`,
+};
+
+/** 从 body 主题类读取当前主题（style.ts 挂载，保存设置后刷新页面才变化） */
+function currentStyleTheme(): TranslationStyle {
+  const cls = document.body?.className ?? "";
+  if (cls.includes("it-style-outline")) return "outline";
+  if (cls.includes("it-style-underline")) return "underline";
+  if (cls.includes("it-style-blur")) return "blur";
+  return "gray";
+}
+
+function buildShadowCss(mode: DisplayMode): string {
+  return [SHADOW_CSS_BASE, shadowModeCss(mode), SHADOW_THEME_CSS[currentStyleTheme()]].join("\n");
+}
+
+/** Constructable Stylesheet 可用性（jsdom 等环境无此能力，需回退 <style> 方案） */
+function supportsAdoptedStyleSheets(root: ShadowRoot): boolean {
+  return (
+    typeof CSSStyleSheet === "function" &&
+    typeof CSSStyleSheet.prototype.replaceSync === "function" &&
+    "adoptedStyleSheets" in root
+  );
+}
+
+function applyShadowCss(sheet: CSSStyleSheet | HTMLStyleElement, css: string): void {
+  if (sheet instanceof CSSStyleSheet) sheet.replaceSync(css);
+  else sheet.textContent = css;
 }

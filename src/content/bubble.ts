@@ -1,5 +1,7 @@
-/** 划词翻译气泡（F-010）：选中文本 → 译文气泡，可拖动/复制/关闭/重试 */
+/** 划词翻译气泡（F-010）：选中文本 → 流式译文气泡（逐字增量），可拖动/复制/关闭/重试 */
 import type { PageEngine } from "./engine";
+import { getSettings } from "../shared/storage";
+import { translateTextStream } from "./translate";
 import { copyText, isInsideOurUI, makeDraggable } from "./ui";
 
 const DEDUP_WINDOW_MS = 3000;
@@ -12,8 +14,12 @@ export function initBubble(
 ): void {
   let bubble: HTMLElement | null = null;
   const recent = new Map<string, number>();
+  /** 在途流式翻译的取消函数：气泡任何形式的关闭都断开 Port → background 中止在途请求 */
+  let activeCancel: (() => void) | null = null;
 
   function close(): void {
+    activeCancel?.();
+    activeCancel = null;
     bubble?.remove();
     bubble = null;
   }
@@ -51,10 +57,11 @@ export function initBubble(
     }
 
     if (translateOnSelect) {
-      bubble = buildBubble();
+      close(); // 连续划词：取消上一条仍在途的流式请求，再开新气泡
+      bubble = buildBubble(close);
       position(bubble, rect);
       makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
-      void renderTranslation(bubble, text, engine);
+      void renderTranslation(bubble, text, engine, () => (activeCancel = null));
     } else {
       // 先显示一个小「译」按钮，点击才翻译
       const btn = document.createElement("button");
@@ -66,10 +73,10 @@ export function initBubble(
       position(btn, rect);
       btn.addEventListener("click", () => {
         btn.remove();
-        bubble = buildBubble();
+        bubble = buildBubble(close);
         position(bubble, rect);
         makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
-        void renderTranslation(bubble, text, engine);
+        void renderTranslation(bubble, text, engine, () => (activeCancel = null));
       });
     }
   });
@@ -93,28 +100,69 @@ export function initBubble(
     },
     true
   );
-}
 
-/** 翻译并渲染到气泡主体：loading → 译文 / 失败+重试 */
-async function renderTranslation(bubble: HTMLElement, text: string, engine: PageEngine): Promise<void> {
-  const body = bubble.querySelector(".it-bubble-body") as HTMLElement;
-  body.textContent = "翻译中…";
-  try {
-    const result = await engine.translateText(text);
-    body.textContent = result;
-    bubble.classList.remove("it-bubble-loading");
-  } catch {
-    body.textContent = "翻译失败 ";
-    const retry = document.createElement("button");
-    retry.className = "it-retry";
-    retry.textContent = "重试";
-    retry.addEventListener("click", () => void renderTranslation(bubble, text, engine));
-    body.appendChild(retry);
-    bubble.classList.remove("it-bubble-loading");
+  /**
+   * 流式翻译并渲染到气泡主体：loading → 增量逐字（rAF 节流追加，一帧最多刷一次 DOM）
+   * → 流结束以完整译文收尾（术语表占位在此统一还原）/ 失败显示现有错误态+重试。
+   * onSettled：流结束（成功或失败）后解除关闭时的取消引用，避免误调已结束的流。
+   */
+  async function renderTranslation(
+    bubbleEl: HTMLElement,
+    text: string,
+    eng: PageEngine,
+    onSettled: () => void
+  ): Promise<void> {
+    const body = bubbleEl.querySelector(".it-bubble-body") as HTMLElement;
+    body.textContent = "翻译中…";
+    // 术语表与整页翻译同源：按当前设置读取（划词是低频用户手势，一次小读取可接受）
+    let glossary: string[] = [];
+    try {
+      glossary = (await getSettings()).translate.terminology ?? [];
+    } catch {
+      // 读取失败按无术语表处理，不阻塞翻译
+    }
+    if (!bubbleEl.isConnected) return; // 等待读取设置期间气泡已被关闭
+
+    let acc = "";
+    let raf = 0;
+    const paint = (): void => {
+      raf = 0;
+      body.textContent = acc;
+    };
+
+    let cancel: (() => void) | null = null;
+    try {
+      const handle = translateTextStream(text, eng.targetLanguage, glossary, (delta) => {
+        acc += delta;
+        if (!raf && bubbleEl.isConnected) raf = requestAnimationFrame(paint);
+      });
+      cancel = handle.cancel;
+      activeCancel = cancel;
+      const result = await handle.promise;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      body.textContent = result;
+      bubbleEl.classList.remove("it-bubble-loading");
+    } catch {
+      if (!bubbleEl.isConnected) return; // 气泡已关闭（取消导致的中止）：无 UI 可更新
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      body.textContent = "翻译失败 ";
+      const retry = document.createElement("button");
+      retry.className = "it-retry";
+      retry.textContent = "重试";
+      retry.addEventListener("click", () => void renderTranslation(bubbleEl, text, eng, onSettled));
+      body.appendChild(retry);
+      bubbleEl.classList.remove("it-bubble-loading");
+    } finally {
+      if (raf) cancelAnimationFrame(raf);
+      if (activeCancel === cancel) onSettled();
+    }
   }
 }
 
-function buildBubble(): HTMLElement {
+/** 构建气泡骨架；onClose 供右上角 ✕ 走统一关闭（取消在途流式请求） */
+function buildBubble(onClose: () => void): HTMLElement {
   const el = document.createElement("div");
   el.className = "it-bubble it-bubble-loading";
   el.setAttribute("data-it-ui", "");
@@ -126,7 +174,7 @@ function buildBubble(): HTMLElement {
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "✕";
   closeBtn.title = "关闭";
-  closeBtn.addEventListener("click", () => el.remove());
+  closeBtn.addEventListener("click", () => onClose());
   header.append(title, closeBtn);
 
   const body = document.createElement("div");

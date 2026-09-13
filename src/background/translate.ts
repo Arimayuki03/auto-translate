@@ -38,6 +38,10 @@ export class TranslationCancelledError extends Error {
 /** 批量分隔哨兵：模型按此分隔符逐段输出，解析按哨兵 split（比按行数匹配鲁棒得多） */
 export const BATCH_SEPARATOR = "===IT_SEP===";
 
+/** 免译哨兵：批量输出「严格等于」该值（忽略首尾空白）的段，返回原文代替译文
+ *  （该段本身已是目标语言 / 代码 / 公式 / 编号 / 专有名词等，不硬译；未来方向 三.5） */
+export const NO_TRANSLATION_SENTINEL = "{{NO_TRANSLATION_NEEDED}}";
+
 /** 批量解析失败时的二次降级组大小：先拆成 ≤8 段的小批量重试——小批量输出短、
  *  解析成功率高，把最坏情况的请求数从 N 压到约 N/8；仍失败的组才逐段。 */
 const SUB_BATCH_SIZE = 8;
@@ -71,6 +75,23 @@ export function scaleTimeoutMs(baseMs: number, chars: number): number {
 
 function systemPrompt(targetLang: string): string {
   return `你是专业翻译引擎。将用户输入翻译为${targetLang}，只输出译文，不要解释、不要添加任何额外内容。`;
+}
+
+/** 用户自定义附加指令（需求：进阶用户自定义 prompt）：非空时拼在系统提示词最前面；
+ *  批量协议指令（逐行 / 哨兵分段规则）始终完整保留在其后，保证批量协议不被用户 prompt 破坏 */
+function withCustomPrompt(system: string, custom?: string): string {
+  const c = (custom ?? "").trim();
+  return c ? `${c}\n\n${system}` : system;
+}
+
+/** 免译规则（仅 LLM 通道的批量协议追加；免费通道端点不解析 system 指令，不注入） */
+function noTranslationRule(): string {
+  return `
+
+## 免译规则（必须严格遵守）
+若某段本身已是目标语言、或无需翻译（代码、公式、编号、专有名词等），该段不要硬译：
+该段只输出 ${NO_TRANSLATION_SENTINEL}（除该标记外不要输出任何其他内容），其余段落照常翻译，
+输出段数与输入完全一致。`;
 }
 
 /** 批量哨兵模式的系统提示词：在原规则之上追加哨兵规则（仅 batchMode="separator" 使用；
@@ -265,8 +286,10 @@ export class TranslateService {
         parts: string[]
       ): Promise<void> => {
         for (let k = 0; k < items.length; k++) {
-          results[items[k].idx] = parts[k];
-          await this.storeCache(targetLang, items[k].text, parts[k]);
+          // 免译哨兵映射：该段输出「严格等于」{{NO_TRANSLATION_NEEDED}} → 返回原文代替译文
+          const translated = mapNoTranslationNeeded(items[k].text, parts[k]);
+          results[items[k].idx] = translated;
+          await this.storeCache(targetLang, items[k].text, translated);
         }
       };
 
@@ -320,7 +343,7 @@ export class TranslateService {
           return this.callApi(settings, [text], targetLang, { context, signal });
         })
           .then(async (raw) => {
-            const t = raw.trim();
+            const t = mapNoTranslationNeeded(text, raw);
             results[idx] = t;
             await this.storeCache(targetLang, text, t);
           })
@@ -339,6 +362,149 @@ export class TranslateService {
     }
     if (firstError instanceof TranslationCancelledError) throw firstError;
     return results;
+  }
+
+  /**
+   * 划词流式翻译（Port 长连接路径）：单段、无页面上下文，增量文本经 onDelta 转发给 Port。
+   * 复用整页翻译的缓存 / 请求启动限速 / 并发限制 / 429 队列冷却；
+   * 中止（气泡关闭 → Port 断开 → signal）按普通错误处理：归一化为 TranslationCancelledError，
+   * 不触发备用切换。免费通道与缓存命中不支持增量，经 stream-done 一次性回传全文。
+   */
+  async translateStream(
+    text: string,
+    targetLang: string,
+    onDelta: (delta: string) => void,
+    signal?: AbortSignal
+  ): Promise<string> {
+    if (signal?.aborted) throw new TranslationCancelledError();
+    const settings = await this.getSettingsCached();
+    this.applyCacheSettings(settings);
+    // 缓存命中直接整段返回（不发请求、不产增量）
+    const cached = this.cacheEnabled ? await this.cache.get(targetLang, text) : undefined;
+    if (cached !== undefined) return cached;
+
+    const limit = Math.max(1, settings.api.maxConcurrency || 3);
+    const interval = Math.max(50, settings.api.minRequestIntervalMs ?? 500);
+    this.minRequestIntervalMs = interval;
+    this.bucket.configure(1000 / interval, Math.min(limit, 16));
+
+    let emitted = false;
+    const emit = (delta: string): void => {
+      if (!delta) return;
+      emitted = true;
+      onDelta(delta);
+    };
+    const attempt = async (api: ApiConfig): Promise<string> => {
+      const system = withCustomPrompt(systemPrompt(targetLang), settings.api.customSystemPrompt);
+      const messages: ChatMessage[] = [
+        { role: "system", content: system },
+        { role: "user", content: text },
+      ];
+      let lastError: unknown;
+      // 至多一次退避重试，且仅「尚未产出增量」时——增量已出再重试会从零重发造成重复文本
+      for (let round = 0; round < 2; round++) {
+        if (signal?.aborted) throw new TranslationCancelledError();
+        try {
+          return await this.runConcurrent(limit, () =>
+            this.requestStream(
+              api,
+              messages,
+              targetLang,
+              emit,
+              signal,
+              settings.api.freeEndpoint,
+              settings.api.freeBackupEndpoint
+            )
+          );
+        } catch (err) {
+          lastError = err;
+          if (emitted || !isRetryable(err) || signal?.aborted) break;
+          // 429 与整页翻译同样做队列级冷却，避免气泡重试继续冲击已限流的通道
+          if (err instanceof ApiError && err.code === "rate_limit") {
+            this.pauseRateLimit(
+              Math.min(err.retryAfterMs ?? RATE_LIMIT_BASE_PAUSE_MS, MAX_RETRY_AFTER_MS)
+            );
+          }
+          await sleep(backoffDelayMs(0));
+        }
+      }
+      throw lastError;
+    };
+
+    try {
+      return await this.finishStream(targetLang, text, await attempt(settings.api));
+    } catch (err) {
+      // 会话中止（气泡关闭）：归一化为取消错误，上两层不得当作普通失败处理
+      if (signal?.aborted || (err instanceof Error && err.message === "cancelled")) {
+        throw new TranslationCancelledError();
+      }
+      // 与 callApi 同一套降级顺序：免费通道互切 → 备用 API；
+      // 两者都仅在「尚未产出增量」时值得切（已出增量的失败只能上抛，重试会重复文本）
+      if (isRetryable(err) && !emitted) {
+        const sibling = freeSiblingApi(settings);
+        if (sibling) {
+          try {
+            return await this.finishStream(targetLang, text, await attempt(sibling));
+          } catch (siblingErr) {
+            if (signal?.aborted) throw new TranslationCancelledError();
+            if (settings.backupApi && isRetryable(siblingErr) && !emitted) {
+              try {
+                return await this.finishStream(targetLang, text, await attempt(settings.backupApi));
+              } catch (backupErr) {
+                if (signal?.aborted) throw new TranslationCancelledError();
+                throw withErrorSource(backupErr, "backup");
+              }
+            }
+            throw withErrorSource(siblingErr, "main");
+          }
+        }
+        if (settings.backupApi) {
+          try {
+            return await this.finishStream(targetLang, text, await attempt(settings.backupApi));
+          } catch (backupErr) {
+            if (signal?.aborted) throw new TranslationCancelledError();
+            throw withErrorSource(backupErr, "backup");
+          }
+        }
+      }
+      throw withErrorSource(err, "main");
+    }
+  }
+
+  /** 流收尾：免译哨兵映射为原文（不重试不报错），并写缓存（与整页翻译同口径） */
+  private async finishStream(targetLang: string, text: string, raw: string): Promise<string> {
+    const finalText = mapNoTranslationNeeded(text, raw);
+    await this.storeCache(targetLang, text, finalText);
+    return finalText;
+  }
+
+  /** 单次流式 API 调用：与 request 同一套启动限速 / 超时缩放，增量回调 emit；
+   *  免费通道端点参数与 callApi 同源透传（免费通道在 Port 上一次性整段返回） */
+  private async requestStream(
+    api: ApiConfig,
+    messages: ChatMessage[],
+    targetLang: string,
+    emit: (delta: string) => void,
+    signal?: AbortSignal,
+    freeEndpoint?: string,
+    freeBackupEndpoint?: string
+  ): Promise<string> {
+    await this.acquireStartSlot();
+    const provider = createProvider(api);
+    const chars = messages.reduce((n, m) => n + m.content.length, 0);
+    const result = await provider.chat(messages, {
+      baseUrl: api.baseUrl,
+      apiKey: api.apiKey,
+      model: api.model,
+      temperature: api.temperature,
+      timeoutMs: scaleTimeoutMs(api.timeoutMs, chars),
+      targetLang,
+      signal,
+      freeEndpoint,
+      freeBackupEndpoint,
+      stream: { onDelta: emit },
+    });
+    return result.text;
   }
 
   /** 清空译文缓存（设置页入口） */
@@ -440,22 +606,27 @@ export class TranslateService {
       // 免费通道 provider（googlefree/microsoft）无法执行逐行协议（会把逐行指令前缀当作
       // 待译段发给免费端点）：其内部固定使用安全哨兵协议，与 ApiConfig.batchMode 的文档约定
       // 一致；第三方 LLM 按配置（默认逐行）。
-      const mode: BatchMode =
-        api.format === "googlefree" || api.format === "microsoft"
-          ? "separator"
-          : (opts?.batchMode ?? "lines");
+      const isFreeChannel = api.format === "googlefree" || api.format === "microsoft";
+      const mode: BatchMode = isFreeChannel ? "separator" : (opts?.batchMode ?? "lines");
+      // 免译哨兵冲突防护（与 ===IT_SEP=== 同思路）：原文本身含 {{NO_TRANSLATION_NEEDED}} 字样时，
+      // 模型可能把它当普通文本回显造成段内容歧义 → 本批不注入免译指令
+      const noTranslationSafe = !texts.some((t) => t.includes(NO_TRANSLATION_SENTINEL));
       let system: string;
       let user: string;
       if (!isBatch) {
-        system = systemPrompt(targetLang);
+        system = withCustomPrompt(systemPrompt(targetLang), settings.api.customSystemPrompt);
         user = texts[0];
       } else if (mode === "separator") {
-        system = sentinelSystemPrompt(targetLang);
+        system = withCustomPrompt(sentinelSystemPrompt(targetLang), settings.api.customSystemPrompt);
         user = texts.join(`\n${BATCH_SEPARATOR}\n`);
       } else {
-        // 旧版逐行协议：system/user 与历史版本逐字一致，第三方站点兼容性最好
-        system = systemPrompt(targetLang);
+        // 旧版逐行协议：system/user 主体与历史版本一致，第三方站点兼容性最好
+        system = withCustomPrompt(systemPrompt(targetLang), settings.api.customSystemPrompt);
         user = linesBatchUserContent(texts);
+      }
+      // 免译指令只追加给 LLM 通道的批量协议（免费通道端点不解析 system 指令）
+      if (isBatch && !isFreeChannel && noTranslationSafe) {
+        system += noTranslationRule();
       }
       const messages: ChatMessage[] = [
         { role: "system", content: system + contextText },
@@ -567,8 +738,7 @@ export class TranslateService {
 /**
  * 拆分批量译文：优先按哨兵 ${BATCH_SEPARATOR} 分段（鲁棒）；哨兵缺失时退回按行匹配。
  * 都不匹配返回 null，走逐段并发降级。（导出供单元测试）
- */
-export function splitBatch(batch: string, expected: number): string[] | null {
+ */export function splitBatch(batch: string, expected: number): string[] | null {
   // ① 哨兵分段：模型按 ===IT_SEP=== 分隔输出，段数应与输入一致
   if (batch.includes(BATCH_SEPARATOR)) {
     const parts = batch
@@ -600,4 +770,10 @@ export function splitBatch(batch: string, expected: number): string[] | null {
 /** 剥掉段首可能残留的编号（"1. 译文" → "译文"） */
 function stripIndex(s: string): string {
   return s.replace(/^\d+[.、．:：]\s*/, "");
+}
+
+/** 免译哨兵映射：段输出「严格等于」{{NO_TRANSLATION_NEEDED}}（忽略首尾空白）→ 返回原文。
+ *  免费通道不注入该指令，但解析同样兜底映射（模型自发回该标记时保持原文，不重试不报错）。 */
+export function mapNoTranslationNeeded(source: string, translated: string): string {
+  return translated.trim() === NO_TRANSLATION_SENTINEL ? source : translated.trim();
 }

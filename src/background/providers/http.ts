@@ -1,5 +1,6 @@
 import type { ApiDiagnostic, ApiErrorCode } from "../../shared/messages";
 import type { ApiFormat } from "../../shared/types";
+import type { ChatOptions, ChatResult } from "./types";
 
 export interface HttpResult<T> {
   data: T;
@@ -138,6 +139,201 @@ export async function postJson<T = Record<string, unknown>>(
     data: (await res.json()) as T,
     diagnostic: makeDiagnostic(provider, url, { status: res.status }),
   };
+}
+
+/**
+ * 流式 POST 的公共骨架：超时 / 会话中止 / 错误分级与 postJson 完全同一套约定
+ * （中止抛普通 Error("cancelled")，不触发重试/备用切换），把响应正文增量喂给 onText。
+ * 仅错误分级与读流归 postBodyStream 管，协议解析（SSE / NDJSON）由上层包装完成。
+ */
+async function postBodyStream(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  timeoutMs: number,
+  provider: ApiFormat,
+  signal: AbortSignal | undefined,
+  onText: (text: string) => void
+): Promise<ApiDiagnostic> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // 会话中止桥接：与 postJson 相同（中止打断在途 fetch 与读流）
+  const onSessionAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", onSessionAbort);
+  }
+  try {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        if (signal?.aborted) throw new Error("cancelled");
+        throw new ApiError(
+          "timeout",
+          `请求超时（${Math.round(timeoutMs / 1000)}s）`,
+          makeDiagnostic(provider, url, { code: "timeout" })
+        );
+      }
+      throw new ApiError(
+        "network",
+        `网络错误：${err instanceof Error ? err.message : String(err)}`,
+        makeDiagnostic(provider, url, { code: "network" })
+      );
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const safeText = redactSecrets(text, url, headers).slice(0, 300);
+      const error = classifyError(provider, url, res.status, safeText, res.headers.get("Retry-After") ?? undefined);
+      console.warn("[auto-translate] API 请求失败", error.diagnostic, error.message);
+      throw error;
+    }
+    if (!res.body) {
+      throw new ApiError("bad_response", "流式响应无正文", {
+        ...makeDiagnostic(provider, url, { status: res.status }),
+        code: "bad_response",
+      });
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    // 读流失败（网络中断/超时中止）按可重试错误归类；onText 回调抛出的业务错误原样上抛
+    const readChunk = async (): Promise<Uint8Array | null> => {
+      try {
+        const { done, value } = await reader.read();
+        return done ? null : value;
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          if (signal?.aborted) throw new Error("cancelled");
+          throw new ApiError(
+            "timeout",
+            `请求超时（${Math.round(timeoutMs / 1000)}s）`,
+            makeDiagnostic(provider, url, { code: "timeout" })
+          );
+        }
+        throw new ApiError(
+          "network",
+          `流式响应中断：${err instanceof Error ? err.message : String(err)}`,
+          makeDiagnostic(provider, url, { code: "network" })
+        );
+      }
+    };
+    try {
+      for (;;) {
+        const chunk = await readChunk();
+        if (!chunk) break;
+        // stream:true 处理跨 chunk 被切断的多字节字符
+        onText(decoder.decode(chunk, { stream: true }));
+      }
+      onText(decoder.decode()); // 冲出解码器尾字节
+    } finally {
+      // 提前退出（业务错误/会话中止）时释放连接，不让响应体悬挂
+      reader.cancel().catch(() => undefined);
+    }
+    return makeDiagnostic(provider, url, { status: res.status });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onSessionAbort);
+  }
+}
+
+/** SSE 流式 POST：按空行切事件，把每个事件的 data 负载回调给 onData
+ *  （[DONE] 帧原样透传由调用方处理；兼容 CRLF 分隔与跨 chunk 切断的事件边界）。 */
+export async function postSSE(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  timeoutMs: number,
+  provider: ApiFormat,
+  signal: AbortSignal | undefined,
+  onData: (payload: string) => void
+): Promise<ApiDiagnostic> {
+  let buf = "";
+  const dispatch = (event: string): void => {
+    // 一个事件可含多行 data:（SSE 规范按换行拼接）；event:/id:/注释行忽略
+    const data = event
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).replace(/^ /, ""))
+      .join("\n");
+    if (data) onData(data);
+  };
+  const feed = (text: string): void => {
+    buf += text;
+    // 结尾的孤立 \r 可能是 CRLF 的前半（\n 在下一个 chunk），先暂存待下轮回填后统一归一
+    let hold = "";
+    if (buf.endsWith("\r")) {
+      hold = "\r";
+      buf = buf.slice(0, -1);
+    }
+    buf = buf.split("\r\n").join("\n") + hold;
+    let idx: number;
+    while ((idx = buf.indexOf("\n\n")) !== -1) {
+      const event = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      dispatch(event);
+    }
+  };
+  const diagnostic = await postBodyStream(url, headers, body, timeoutMs, provider, signal, feed);
+  // 流结束：处理最后一个未以空行收尾的事件（dispatch 内部保证无 data 行时不误发）
+  if (buf.trim()) dispatch(buf);
+  return diagnostic;
+}
+
+/** NDJSON 流式 POST（Ollama /api/chat stream）：逐行回调非空行 */
+export async function postNDJSONLines(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  timeoutMs: number,
+  provider: ApiFormat,
+  signal: AbortSignal | undefined,
+  onLine: (line: string) => void
+): Promise<ApiDiagnostic> {
+  let buf = "";
+  const feed = (text: string): void => {
+    buf += text;
+    let idx: number;
+    while ((idx = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line) onLine(line);
+    }
+  };
+  const diagnostic = await postBodyStream(url, headers, body, timeoutMs, provider, signal, feed);
+  const rest = buf.trim();
+  if (rest) onLine(rest);
+  return diagnostic;
+}
+
+/**
+ * 流式 → 非流式回退包装：onDelta 缺省直接走非流式；流式失败（端点不支持 stream、
+ * 中转兼容性等）且尚未产出任何增量时回退非流式重试一次。
+ * 已产出增量再回退会让调用方收到「前半段 + 重新开始的整段」重复文本，只能上抛交上层展示错误；
+ * 会话已中止同样不回退（回退请求会立刻被打断）。
+ */
+export async function withStreamFallback(
+  options: ChatOptions,
+  runStream: (onDelta: (delta: string) => void) => Promise<ChatResult>,
+  runNonStream: () => Promise<ChatResult>
+): Promise<ChatResult> {
+  const outer = options.stream?.onDelta;
+  if (!outer) return runNonStream();
+  let emitted = false;
+  try {
+    return await runStream((delta) => {
+      emitted = true;
+      outer(delta);
+    });
+  } catch (err) {
+    if (emitted || options.signal?.aborted) throw err;
+    return runNonStream();
+  }
 }
 
 function classifyError(

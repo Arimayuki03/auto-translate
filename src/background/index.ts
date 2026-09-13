@@ -2,11 +2,14 @@ import type {
   CancelTranslationMessage,
   CheckCacheMessage,
   ItCommandMessage,
+  StreamPortMessage,
+  StreamStartMessage,
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
   TranslateRequestMessage,
   TranslateResponseMessage,
 } from "../shared/messages";
+import { STREAM_PORT_NAME } from "../shared/messages";
 import type { ApiConfig } from "../shared/types";
 import { createProvider } from "./providers";
 import { TranslateService, TranslationCancelledError } from "./translate";
@@ -171,6 +174,64 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   return undefined;
+});
+
+// ===== 划词流式翻译（Port 长连接网关）=====
+// content 每次划词翻译建立一条 Port；background 执行流式翻译并把 provider 增量转发回 Port，
+// 结束回传完整文本或错误。Port 断开（气泡关闭）→ AbortController 中止在途请求。
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== STREAM_PORT_NAME) return;
+  const controller = new AbortController();
+  let started = false;
+  let finished = false;
+  const post = (msg: StreamPortMessage): void => {
+    try {
+      port.postMessage(msg);
+    } catch {
+      // Port 已断开（气泡先关了）：静默丢弃；翻译照常收尾并写缓存
+    }
+  };
+  port.onMessage.addListener((raw) => {
+    if (started || finished) return; // 只认首条 start，重复消息忽略
+    const msg = raw as StreamStartMessage;
+    if (msg?.type !== "stream-start") return;
+    started = true;
+    translateService
+      .translateStream(
+        msg.text,
+        msg.targetLang,
+        (delta) => post({ type: "stream-delta", delta }),
+        controller.signal
+      )
+      .then(
+        (text) => {
+          finished = true;
+          post({ type: "stream-done", text });
+          try {
+            port.disconnect();
+          } catch {
+            // Port 可能已断开，收尾阶段的 disconnect 竞争属预期
+          }
+        },
+        (err) => {
+          finished = true;
+          // 中止 = 用户关闭气泡 = Port 已断开：预期行为，静默结束不当作失败上报
+          if (err instanceof TranslationCancelledError || controller.signal.aborted) return;
+          post({
+            type: "stream-error",
+            error: err instanceof Error ? err.message : String(err),
+            ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
+            ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
+          });
+          try {
+            port.disconnect();
+          } catch {
+            // 同上
+          }
+        }
+      );
+  });
+  port.onDisconnect.addListener(() => controller.abort());
 });
 
 async function testConnection(api: ApiConfig): Promise<string> {

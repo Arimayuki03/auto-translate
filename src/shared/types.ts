@@ -23,6 +23,9 @@ export interface ApiConfig {
   minRequestIntervalMs?: number;
   /** 第三方 LLM 默认使用旧版逐行协议；Google 免费通道内部固定使用安全哨兵协议 */
   batchMode?: BatchMode;
+  /** 用户自定义附加翻译指令：非空时拼在系统提示词最前面；
+   *  批量协议的分段 / 逐行指令始终完整保留在其后，不会被覆盖（免费通道不使用） */
+  customSystemPrompt?: string;
   /** Google 免费通道可选主/备用端点；留空使用内置公开端点 */
   freeEndpoint?: string;
   freeBackupEndpoint?: string;

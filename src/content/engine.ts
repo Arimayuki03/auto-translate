@@ -5,7 +5,7 @@ import type {
   TranslationContext,
 } from "../shared/messages";
 import type { Settings } from "../shared/types";
-import { extractUnitsChunked, isTargetLanguage, EXCLUDED_TAGS, LETTER_RE } from "./extractor";
+import { extractUnits, extractUnitsChunked, isTargetLanguage, EXCLUDED_TAGS, LETTER_RE } from "./extractor";
 import type { ExtractOptions, TranslationUnit } from "./extractor";
 import { precomputeStyles, Renderer } from "./renderer";
 import { createWorkPacer, pauseIfBudgetSpent } from "./scheduler";
@@ -53,6 +53,11 @@ export class PageEngine {
   /** 防止自动翻译/可见性/SPA 信号同时触发时重复扫描并重复计数 */
   private translateAllRunning = false;
   private translateAllQueued = false;
+  /** 悬停单元素翻译期间钳制整页状态机：观察器与自动翻译都以 state === "off" 判定
+   *  “整页未翻译”，若单译把 state 推到 translating/done，下一次点击兜底扫描或动态内容
+   *  变化就会经观察器把整页补译掉，破坏“只译该段”语义。translateAll / restore /
+   *  resetForNavigation 会解除钳制，真正的整页动作不受影响。 */
+  private suppressPageState = false;
   private doneTexts = new Set<string>();
   private pendingTexts = new Set<string>();
   /** 所有已调度单元（按 id 索引，O(1) 查找代替数组 find） */
@@ -149,6 +154,7 @@ export class PageEngine {
     }
     this.translateAllRunning = true;
     this.userRestored = false; // 主动翻译即代表用户想翻译，重置还原标记
+    this.suppressPageState = false; // 整页翻译解除悬停单译的状态钳制
     this.lastError = undefined; // 新一轮翻译开始，清掉上一轮的失败信息
     try {
       const gen = this.generation;
@@ -187,6 +193,31 @@ export class PageEngine {
         void this.translateAll();
       }
     }
+  }
+
+  /**
+   * 单元素翻译（悬停翻译入口）：以该元素为根做一次块级提取，走与整页/观察器完全相同的
+   * 调度与去重口径（data-it-src / data-it-processing / isFailed / 懒观察 / 在途与已译文本）。
+   * 同步提取无 await，代次校验由 translateUnits 内部兜底（调度后还原/换页即在途作废）。
+   * 整页未动时钳制状态机（suppressPageState）：只译该段不应让下一次点击/动态变化把整页补译掉。
+   */
+  translateElement(el: Element): void {
+    if (!(el instanceof HTMLElement) || !el.isConnected) return;
+    const units = extractUnits(el, this.opts).filter(
+      (u) =>
+        !u.container.hasAttribute("data-it-src") &&
+        !u.container.hasAttribute("data-it-processing") &&
+        !this.renderer.isFailed(u.container) &&
+        !this.lazyUnits.has(u.container) &&
+        !this.scheduledContainers.has(u.container) &&
+        !this.pendingTexts.has(u.text) &&
+        !this.doneTexts.has(u.text)
+    );
+    if (units.length === 0) return;
+    // 只在整页确实未动时钳制：translateAll 进行中或已译状态下走常规状态机，
+    // 避免与在途整页翻译竞争时把状态永久卡在 translating
+    if (this.state === "off" && !this.translateAllRunning) this.suppressPageState = true;
+    this.scheduleUnits(units);
   }
 
   /** 抽样判断页面缓存命中率（有缓存则整页直译，无需懒翻译） */
@@ -294,6 +325,7 @@ export class PageEngine {
    * 不置 state 为 off —— 换页后仍需按自动翻译/观察器语义继续译新内容。
    */
   resetForNavigation(): void {
+    this.suppressPageState = false; // 换页后按新页面语义重新开始
     this.cancelSession(this.generation); // SPA 换页：中止旧页在途请求
     this.generation++; // 在途翻译结果作废（旧页容器已脱离文档）
     this.renderer.restore();
@@ -320,6 +352,7 @@ export class PageEngine {
   /** 一键还原 */
   restore(): void {
     this.userRestored = true; // 用户明确还原，自动翻译不再把本页译回来
+    this.suppressPageState = false; // 解除悬停单译的状态钳制
     this.cancelSession(this.generation); // 中止当前会话在途请求，不浪费额度/算力
     this.generation++; // 在途翻译结果作废
     this.renderer.restore();
@@ -608,6 +641,9 @@ export class PageEngine {
   }
 
   private setState(state: EngineState): void {
+    // 悬停单译期间钳制状态机（见 suppressPageState）：off 恒放行，
+    // 保证 restore 的收尾 setState("off") 永远不被钳制吞掉
+    if (this.suppressPageState && state !== "off") return;
     this.state = state;
     this.onStateChange?.(state, this.stats);
   }

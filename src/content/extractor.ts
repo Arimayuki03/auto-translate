@@ -20,6 +20,11 @@ export interface ExtractOptions {
   targetLang: string;
 }
 
+/** 巨型段落拆分阈值：单个文本块超过该长度时，在句子边界拆分为多个子单元（chunk）。
+ *  超高段落（超长小说章节/评论区）若整块进批量管线，会产生远超上限的畸形 chunk
+ *  或让单批请求过大超时；拆分后各子单元独立进批、独立渲染，互不影响。 */
+export const CHUNK_SPLIT_CHARS = 1200;
+
 /**
  * 不参与翻译的标签（文本在这些标签内一律跳过）。
  * 注：BUTTON / OPTION / SELECT 不再整体排除——下拉菜单、点击展开的选项
@@ -42,6 +47,7 @@ const BLOCK_TAGS = new Set([
 let seq = 0;
 
 /** 遍历 root，返回翻译单元列表（已按容器分组并过滤）。
+ *  遍历范围除 light DOM 外还进入 open shadow root（见 walkTextNodes）。
  *  性能要点（大页面卡顿修复）：isHiddenElement 依赖 getComputedStyle，代价高；
  *  同一次扫描内对每个元素的"是否隐藏/是否处于排除区"做记忆化，
  *  把 O(文本节点数 × 祖先深度) 次样式计算降到 O(去重元素数)。 */
@@ -51,18 +57,7 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
   const excludedSubtreeCache = new Map<HTMLElement, boolean>();
   const idCache = new Map<string, boolean>();
 
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const t = node as Text;
-      if (!t.textContent || !t.textContent.trim()) return NodeFilter.FILTER_REJECT;
-      if (isExcluded(t, hiddenCache, excludedSubtreeCache, idCache)) return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-
-  let node: Node | null;
-  while ((node = walker.nextNode())) {
-    const t = node as Text;
+  for (const t of walkTextNodes(root, hiddenCache, excludedSubtreeCache, idCache)) {
     // 一次向上遍历同时判定 control / standalone link / block container，
     // 避免原来三个函数各自独立爬祖先链（O(3×深度) → O(深度)）
     const container = resolveContainer(t);
@@ -72,19 +67,7 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
     list.push(t);
   }
 
-  const units: TranslationUnit[] = [];
-  for (const [container, nodes] of grouped) {
-    const text = joinTextNodes(nodes);
-    if (!shouldTranslate(text, opts, container)) continue;
-    units.push({
-      id: `it-${++seq}`,
-      container,
-      text,
-      chunks: splitBySentences(text, opts.blockMaxChars),
-      textOnly: isControl(container),
-    });
-  }
-  return units;
+  return buildUnitsFromGrouped(grouped, opts);
 }
 
 /**
@@ -104,18 +87,7 @@ export async function extractUnitsChunked(
   const idCache = new Map<string, boolean>();
   const pacer = createWorkPacer();
 
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const t = node as Text;
-      if (!t.textContent || !t.textContent.trim()) return NodeFilter.FILTER_REJECT;
-      if (isExcluded(t, hiddenCache, excludedSubtreeCache, idCache)) return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-
-  let node: Node | null;
-  while ((node = walker.nextNode())) {
-    const t = node as Text;
+  for (const t of walkTextNodes(root, hiddenCache, excludedSubtreeCache, idCache)) {
     // 一次向上遍历同时判定 control / standalone link / block container
     const container = resolveContainer(t);
     if (container !== document.body) {
@@ -146,11 +118,75 @@ function buildUnitsFromGrouped(
       id: `it-${++seq}`,
       container,
       text,
-      chunks: splitBySentences(text, opts.blockMaxChars),
+      chunks: splitUnitChunks(text, opts.blockMaxChars),
       textOnly: isControl(container),
     });
   }
   return units;
+}
+
+/** 跨域遍历文本节点：先 light DOM，再 root 内所有 open shadow root，同一节点只产出一次。
+ *  TreeWalker 不穿透 shadow 边界，shadow 内容必须按域分别建 walker；
+ *  各域子树互不相交，slot 分发的 light DOM 文本仍属 light 树，故不会重复访问。 */
+function* walkTextNodes(
+  root: HTMLElement,
+  hiddenCache: Map<HTMLElement, boolean>,
+  excludedCache: Map<HTMLElement, boolean>,
+  idCache: Map<string, boolean>
+): Generator<Text> {
+  const acceptNode = (node: Node): number => {
+    const t = node as Text;
+    if (!t.textContent || !t.textContent.trim()) return NodeFilter.FILTER_REJECT;
+    if (isExcluded(t, hiddenCache, excludedCache, idCache)) return NodeFilter.FILTER_REJECT;
+    return NodeFilter.FILTER_ACCEPT;
+  };
+  // 1) light DOM（含 slot 分发的宿主子节点）
+  let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode });
+  let n: Node | null;
+  while ((n = walker.nextNode())) yield n as Text;
+  // 2) 各 open shadow root：过滤规则与 light DOM 相同，宿主侧排除状态单独判定
+  for (const scope of collectShadowRoots(root)) {
+    if (isShadowScopeExcluded(scope.host)) continue;
+    walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, { acceptNode });
+    while ((n = walker.nextNode())) yield n as Text;
+  }
+}
+
+/** 收集 root 下所有需要独立遍历的 open shadow root（含嵌套 shadow，按文档序）。
+ *  仅做 shadowRoot 属性检查的轻量元素趟；shadow 树无环，每域恰好入栈一次。 */
+function collectShadowRoots(root: HTMLElement): ShadowRoot[] {
+  const roots: ShadowRoot[] = [];
+  if (root.shadowRoot) roots.push(root.shadowRoot); // root 自身可能是宿主（观察器会以宿主为根补扫）
+  const visit = (scope: Node): void => {
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT);
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+      const shadow = (n as Element).shadowRoot;
+      if (shadow) {
+        roots.push(shadow);
+        visit(shadow); // shadow 内再挂 shadow：递归收集嵌套域
+      }
+    }
+  };
+  visit(root);
+  return roots;
+}
+
+/** shadow 域是否整体跳过：宿主不可见，或宿主自身及其 light 祖先带排除标记。
+ *  shadow 内文本的祖先链不跨 shadow 边界，宿主侧的排除状态需在此单独判定。 */
+function isShadowScopeExcluded(host: Element): boolean {
+  for (let el: Element | null = host; el; el = el.parentElement) {
+    if (
+      el.hasAttribute("data-it-ui") ||
+      (el instanceof HTMLElement && el.isContentEditable) ||
+      el.hasAttribute("hidden") ||
+      el.getAttribute("aria-hidden") === "true" ||
+      el.getAttribute("translate") === "no"
+    ) {
+      return true;
+    }
+  }
+  return isHiddenElement(host as HTMLElement);
 }
 
 /** 元素是否视觉隐藏：display:none / visibility:hidden / sr-only 式屏幕阅读器隐藏 */
@@ -352,23 +388,46 @@ export function isTargetLanguage(text: string, targetLang: string): boolean {
   return nonLatin === 0;
 }
 
-/** 超长文本按句子切分，每块控制在 maxChars 以内（导出供单元测试） */
+/** 句子边界：中文句读（。！？!?…；;）后必切；英文句读（.!?;）后跟空白才切——
+ *  "3.14"、"e.g" 中的句点不切。split 消费掉边界处空白，token 内部空白保留。 */
+const SENTENCE_SPLIT_RE = /(?<=[。！？!?…；;])|(?<=[.!?;])\s+/;
+
+/** 超长文本按句子聚簇切分，每块控制在 maxChars 以内（导出供单元测试）：
+ *  1) 按句子边界 token 化，单个无边界 token 超限时按硬上限强切，全程不产生空段；
+ *  2) 聚簇目标块大小 = 总长/块数（块数按硬上限估算），各块尽量均衡，
+ *     避免「前满后尖」——老实现贪心填满上限，最后一块只剩零头。 */
 export function splitBySentences(text: string, maxChars: number): string[] {
   if (text.length <= maxChars) return [text];
-  const sentences = text
-    .split(/(?<=[。！？.!?…；;])\s*/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const pieces: string[] = [];
+  for (const token of text.split(SENTENCE_SPLIT_RE)) {
+    const t = token.trim();
+    if (!t) continue;
+    if (t.length <= maxChars) {
+      pieces.push(t);
+    } else {
+      for (let i = 0; i < t.length; i += maxChars) pieces.push(t.slice(i, i + maxChars));
+    }
+  }
+  if (pieces.length === 0) return [text];
+  const totalLen = pieces.reduce((sum, p) => sum + p.length, 0) + (pieces.length - 1);
+  const target = Math.max(1, Math.ceil(totalLen / Math.ceil(totalLen / maxChars)));
   const chunks: string[] = [];
   let cur = "";
-  for (const s of sentences) {
-    if (!cur || (cur + " " + s).length <= maxChars) {
-      cur = cur ? cur + " " + s : s;
-    } else {
+  for (const p of pieces) {
+    if (cur && (cur.length + 1 + p.length > maxChars || cur.length >= target)) {
       chunks.push(cur);
-      cur = s;
+      cur = p;
+    } else {
+      cur = cur ? cur + " " + p : p;
     }
   }
   if (cur) chunks.push(cur);
   return chunks;
+}
+
+/** 单元 chunk 计算：上限取用户设置与 CHUNK_SPLIT_CHARS 的较小值——
+ *  用户调小 blockMaxChars 时尊重其设置；调大时巨型文本仍按 CHUNK_SPLIT_CHARS
+ *  拆分，保住批量管线的体积假设。 */
+function splitUnitChunks(text: string, blockMaxChars: number): string[] {
+  return splitBySentences(text, Math.min(blockMaxChars, CHUNK_SPLIT_CHARS));
 }

@@ -2,10 +2,13 @@
 import type {
   ApiDiagnostic,
   ApiErrorCode,
+  StreamPortMessage,
+  StreamStartMessage,
   TranslateRequestMessage,
   TranslateResponseMessage,
   TranslationContext,
 } from "../shared/messages";
+import { STREAM_PORT_NAME } from "../shared/messages";
 
 let msgSeq = 0;
 
@@ -60,6 +63,80 @@ export async function translateTexts(
     throw new TranslateError(res?.error ?? "翻译请求失败", res?.errorCode, res?.diagnostic);
   }
   return res.results.map((r) => restore(r));
+}
+
+/**
+ * 划词流式翻译：建立 Port 长连接（it-stream），background 把 provider 增量经 stream-delta
+ * 回调给 onDelta，结束时以完整译文 resolve（失败 reject TranslateError）。
+ * 术语表沿用整页翻译的占位协议：发送前替换为 ⟦n⟧，流结束后在完整译文上统一还原
+ * （增量中途术语 token 可能被切成两半，不能逐增量还原）。
+ * cancel() 断开 Port → background 中止在途请求（气泡关闭时必须调用）。
+ */
+export function translateTextStream(
+  text: string,
+  targetLang: string,
+  glossary: string[],
+  onDelta: (delta: string) => void
+): { promise: Promise<string>; cancel: () => void } {
+  const { tokenized, restore } = tokenizeGlossary([text], glossary);
+
+  let port: chrome.runtime.Port;
+  try {
+    port = chrome.runtime.connect({ name: STREAM_PORT_NAME });
+  } catch (err) {
+    return {
+      promise: Promise.reject(
+        new TranslateError(err instanceof Error ? err.message : String(err))
+      ),
+      cancel: () => undefined,
+    };
+  }
+
+  let settled = false;
+  // cancel() 需要在 Port 断开的同时终结 promise：否则 await 方（气泡渲染帧）永远挂起不释放
+  let rejectExternal: ((err: unknown) => void) | null = null;
+  const promise = new Promise<string>((resolve, reject) => {
+    rejectExternal = reject;
+    port.onMessage.addListener((msg: StreamPortMessage) => {
+      if (settled) return;
+      if (msg?.type === "stream-delta") {
+        onDelta(msg.delta);
+      } else if (msg?.type === "stream-done") {
+        settled = true;
+        resolve(restore(msg.text));
+      } else if (msg?.type === "stream-error") {
+        settled = true;
+        reject(new TranslateError(msg.error, msg.errorCode, msg.diagnostic));
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      if (settled) return;
+      // background 收尾后会主动断连；未收到 done/error 就断开 = 服务侧异常中断
+      settled = true;
+      reject(new TranslateError("翻译连接已断开"));
+    });
+    const req: StreamStartMessage = { type: "stream-start", text: tokenized[0], targetLang };
+    try {
+      port.postMessage(req);
+    } catch (err) {
+      settled = true;
+      reject(new TranslateError(err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  return {
+    promise,
+    cancel: () => {
+      if (settled) return;
+      settled = true;
+      rejectExternal?.(new Error("cancelled"));
+      try {
+        port.disconnect();
+      } catch {
+        // 已断开的 Port 重复 disconnect 无副作用
+      }
+    },
+  };
 }
 
 /** 术语表占位：把每个术语替换为 ⟦n⟧，返回恢复函数（词序打乱，仅原地替换） */

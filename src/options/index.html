@@ -56,6 +56,11 @@
         </select>
         <p class="hint">逐行：一次请求多段、按行返回，兼容性最好。哨兵：用 ===IT_SEP=== 分隔输入输出，段落内含换行时更可靠，但对模型指令服从度要求高；解析失败会自动回退逐行。</p>
       </div>
+      <div class="form-row">
+        <label for="custom-prompt">自定义翻译指令（可选，附加到系统提示词）</label>
+        <textarea id="custom-prompt" rows="3" placeholder="例如：保持专业术语一致；译文使用简练的书面语。"></textarea>
+        <p class="hint">非空时作为「附加指令」拼在系统提示词最前面。批量协议的分段 / 逐行指令始终完整保留在附加指令之后，不会被覆盖；免费通道不使用该指令。最长 2000 字符。</p>
+      </div>
       <div class="form-row form-inline">
         <div>
           <label for="temperature">温度</label>

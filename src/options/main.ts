@@ -89,6 +89,7 @@ async function loadForm(): Promise<void> {
   input("api-key").value = api.apiKey;
   input("model").value = api.model;
   select("batch-mode").value = api.batchMode ?? "lines";
+  ($("custom-prompt") as HTMLTextAreaElement).value = api.customSystemPrompt ?? "";
   input("free-endpoint").value = api.freeEndpoint ?? "";
   input("free-backup-endpoint").value = api.freeBackupEndpoint ?? "";
   input("temperature").value = String(api.temperature);
@@ -148,6 +149,8 @@ async function readForm(): Promise<Settings> {
       Math.max(50, parseInt(($("request-interval") as HTMLInputElement).value, 10) || 500)
     ),
     batchMode: select("batch-mode").value as BatchMode,
+    // 自定义附加指令：拼在系统提示词最前（批量协议段保留在其后），限长防提示词膨胀
+    customSystemPrompt: ($("custom-prompt") as HTMLTextAreaElement).value.slice(0, 2000),
     // 免费端点仅 googlefree 使用：非免费通道保留原值，避免误清
     freeEndpoint: (select("api-format").value as ApiFormat) === "googlefree"
       ? ($("free-endpoint") as HTMLInputElement).value.trim()

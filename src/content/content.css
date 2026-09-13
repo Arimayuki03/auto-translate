@@ -457,3 +457,39 @@ body.it-style-blur .it-translated.it-done.it-inline:hover {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* ===== 悬停翻译角标：块级容器左上角的「译」小方块，点击只译该元素 ===== */
+/* 深浅色页面都可见：实色主题蓝底白字，不继承页面文字色（区别于随页面变灰的译文块） */
+.it-hover-badge {
+  position: fixed;
+  z-index: 2147483001; /* 与划词气泡同级：盖过页面内容，低于无 */
+  display: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--it-accent);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  cursor: pointer;
+  user-select: none; /* 角标不参与文本选择，避免拖选时误带「译」字 */
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+.it-hover-badge:hover {
+  background: #2563eb;
+}
+
+@media (hover: none) {
+  /* 触屏无悬停：角标不会出现（hover.ts 只响应 mouseover），样式兜底隐藏 */
+  .it-hover-badge {
+    display: none !important;
+  }
+}
