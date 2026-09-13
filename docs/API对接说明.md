@@ -10,20 +10,24 @@
 | `anthropic` | Anthropic Claude / 兼容系 | `POST {baseURL}/v1/messages` | `x-api-key: {key}` + `anthropic-version: 2023-06-01` |
 | `gemini` | Google Gemini | `POST {baseURL}/v1beta/models/{model}:generateContent?key={key}` | `?key=` 查询参数（附在 URL） |
 | `ollama` | Ollama 原生 | `POST {baseURL}/api/chat` | 无（本地默认） |
+| `googlefree` | Google 免费翻译通道 | `GET translate.googleapis.com/translate_a/single`（可自定义主/备端点） | 无（免 Key，有频率限制） |
 
-> 提示：Ollama 也可开启 OpenAI 兼容模式（`/v1`），两种方式都支持；OneAPI / new-api / 中转一般建议直接用 `openai` 格式。
+> 提示：Ollama 也可开启 OpenAI 兼容模式（`/v1`），两种方式都支持；OneAPI / new-api / 中转一般建议直接用 `openai` 格式。没有 Key 时选 `googlefree` 开箱即用。
 
 ## 2. 通用配置项
 
 | 配置 | 必填 | 说明 |
 | --- | --- | --- |
-| API 格式 | 是 | 上述四种之一，默认 `openai` |
-| BaseURL | 是 | 服务地址，**不要**带完整请求路径，如 `https://xxx.com/v1` |
-| API Key | 看格式 | OpenAI/Claude/Gemini 必填；Ollama 本地可留空 |
-| 模型 | 是 | 服务支持的模型名，如 `gpt-4o-mini`、`claude-sonnet-4-20250514`、`gemini-2.0-flash`、`qwen2.5` |
+| API 格式 | 是 | 上述五种之一，默认 `openai` |
+| BaseURL | 看格式 | LLM 格式必填，**不要**带完整请求路径，如 `https://xxx.com/v1`；`googlefree` 留空 |
+| API Key | 看格式 | OpenAI/Claude/Gemini 必填；Ollama / googlefree 可留空 |
+| 模型 | 看格式 | LLM 格式必填，如 `gpt-4o-mini`、`claude-sonnet-4-20250514`、`gemini-2.0-flash`、`qwen2.5`；`googlefree` 留空 |
 | 温度 | 否 | 默认 0.3，翻译建议保持低温度 |
 | 超时 | 否 | 默认 60 秒 |
-| 最大并发 | 否 | 默认 6 |
+| 最大并发 | 否 | 默认 2 |
+| 请求间隔（毫秒） | 否 | 相邻请求的最小启动间隔，默认 500（≈2 请求/秒）；中转站/服务商限额严格时调大（如 1000～2000） |
+| 批量协议 | 否 | 逐行（默认，兼容性最好）/ 哨兵 `===IT_SEP===`；`googlefree` 固定哨兵，无需配置 |
+| 免费端点 | 否 | 仅 `googlefree` 显示，自定义主/备端点；留空用内置公开端点 |
 
 ## 3. 各格式请求示例
 
@@ -61,7 +65,7 @@ Content-Type: application/json
 ```json
 {
   "model": "{model}",
-  "max_tokens": 4096,
+  "max_tokens": 8192,
   "system": "你是专业翻译引擎。将用户输入翻译为目标语言，只输出译文，不要解释、不要添加任何额外内容。",
   "messages": [
     { "role": "user", "content": "请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\nHello world\nThis is a test." }
@@ -70,7 +74,7 @@ Content-Type: application/json
 }
 ```
 
-响应取 `content[0].text`。
+响应取 `content[0].text`。`max_tokens` 随批量输入长度动态调整（4096～8192）；模型输出上限恰为 4096（如 claude-3-haiku）被 400 拒绝时自动降回 4096 重试。
 
 ### 3.3 Google Gemini（gemini）
 
@@ -119,9 +123,11 @@ Content-Type: application/json
 
 ## 4. 批量翻译协议（各格式通用）
 
-- 插件将多个段落合并为一次请求，原文段落**每行一条**（文本已规范为单行），提示词要求「每行一个译文，保持顺序」
-- 响应按换行拆分（模型加编号时自动剥离「数字. 」前缀），与请求段落一一对应
-- 若行数不匹配或请求超长，自动降级为逐段请求（并发受限）
+- 插件将多个段落合并为一次请求（默认每批 ≤30 段 / ≤60 个句子分块），重复携带的「系统提示词 + 页面上下文」开销随批量增大而摊薄
+- **逐行协议（默认）**：原文段落**每行一条**（文本已规范为单行），提示词要求「每行一个译文，保持顺序」；响应按换行拆分（模型加编号时自动剥离「数字. 」前缀）
+- **哨兵协议（可选，`batchMode: "separator"`）**：段落间用单独一行 `===IT_SEP===` 分隔，模型按哨兵逐段输出；段落含换行时更可靠。原文本身含该哨兵字符串时自动强制逐行
+- **三级降级**：整批解析失败 → 拆 ≤8 段小批量重试（仅「响应正常但解析失败」触发，API 报错不放大）→ 仍失败的组才逐段请求（并发受限 + 请求启动限速），不会形成请求风暴
+- 整页翻译会在 system 提示词附带页面标题/描述/正文摘要（仅用于理解语境，可在设置关闭）
 
 ## 5. 错误处理与重试策略
 
@@ -130,7 +136,7 @@ Content-Type: application/json
 | 401 / 403 | Key 无效或权限不足 | 不重试，提示用户检查配置 |
 | 404 | BaseURL 或路径错误 | 不重试，提示检查 BaseURL 与格式选择 |
 | 400 模型不存在 | 模型名错误 | 不重试，提示检查模型名称 |
-| 429 | 触发限流 | 指数退避重试，最多 3 次 |
+| 429 | 触发限流 | 指数退避重试（尊重 Retry-After 头）；同时全队列冷却，冷却结束先放 1 个探针请求 |
 | 5xx | 服务端错误 | 指数退避重试，最多 3 次 |
 | 超时 | 无响应 | 中断并指数退避重试，最多 3 次 |
 
