@@ -15,6 +15,8 @@ export const DEFAULT_SETTINGS: Settings = {
     // 默认并发保守取 2：叠加后台"请求启动限速"，避免瞬时高并发触发服务商限流/封号。
     // 用户可在设置页按自己服务商的额度上调。
     maxConcurrency: 2,
+    // 请求启动限速的间隔（毫秒）：默认 500 ≈ 2 请求/秒，可在设置页按中转站额度调整
+    minRequestIntervalMs: 500,
     batchMode: "lines",
     freeEndpoint: "",
     freeBackupEndpoint: "",

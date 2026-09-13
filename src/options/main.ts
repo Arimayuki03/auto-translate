@@ -86,6 +86,7 @@ async function loadForm(): Promise<void> {
   input("temperature").value = String(api.temperature);
   input("timeout").value = String(Math.round(api.timeoutMs / 1000));
   input("concurrency").value = String(api.maxConcurrency);
+  input("request-interval").value = String(api.minRequestIntervalMs ?? 500);
   if (s.backupApi) {
     select("backup-format").value = s.backupApi.format;
     input("backup-base-url").value = s.backupApi.baseUrl;
@@ -117,6 +118,11 @@ async function readForm(): Promise<Settings> {
     timeoutMs: (parseInt(($("timeout") as HTMLInputElement).value, 10) || 60) * 1000,
     // 兜底与默认值一致（2），并钳制 ≥1
     maxConcurrency: Math.max(1, parseInt(($("concurrency") as HTMLInputElement).value, 10) || 2),
+    // 请求启动间隔：默认 500ms，钳制 50–10000，适配限流严格的中转站可调大
+    minRequestIntervalMs: Math.min(
+      10000,
+      Math.max(50, parseInt(($("request-interval") as HTMLInputElement).value, 10) || 500)
+    ),
     batchMode: select("batch-mode").value as BatchMode,
     // 免费端点仅 googlefree 使用：非免费通道保留原值，避免误清
     freeEndpoint: (select("api-format").value as ApiFormat) === "googlefree"

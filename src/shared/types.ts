@@ -16,6 +16,8 @@ export interface ApiConfig {
   temperature: number;
   timeoutMs: number;
   maxConcurrency: number;
+  /** 相邻两个请求的最小启动间隔（毫秒）：请求启动限速。中转站/服务商限额严格时调大 */
+  minRequestIntervalMs?: number;
   /** 第三方 LLM 默认使用旧版逐行协议；Google 免费通道内部固定使用安全哨兵协议 */
   batchMode?: BatchMode;
   /** Google 免费通道可选主/备用端点；留空使用内置公开端点 */

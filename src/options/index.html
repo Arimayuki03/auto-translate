@@ -68,8 +68,12 @@
           <label for="concurrency">最大并发</label>
           <input type="number" id="concurrency" min="1" max="10" />
         </div>
+        <div>
+          <label for="request-interval">请求间隔（毫秒）</label>
+          <input type="number" id="request-interval" min="50" max="10000" step="50" />
+        </div>
       </div>
-      <p class="hint">温度：越低译文越稳定准确（默认 0.3）。并发：同时发出的 API 请求数，越大翻译越快，但更易触发限流（默认 6）。</p>
+      <p class="hint">温度：越低译文越稳定准确（默认 0.3）。并发：同时发出的 API 请求数（默认 2）。请求间隔：相邻请求的最小启动间隔（默认 500 毫秒，≈2 请求/秒）——中转站/服务商限额严格时调大，如 1000～2000。</p>
     </section>
 
     <section class="card">

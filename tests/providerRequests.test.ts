@@ -495,3 +495,62 @@ describe("会话中止打断在途请求（F-3：signal 接线到 fetch）", () 
     }
   });
 });
+
+describe("降级放大上限（批量解析失败 → 先拆 8 段小批量，而非直接逐段）", () => {
+  it("20 段整批解析失败 → 1 次整批 + 3 次小批量成功，请求量 4 而非 21", async () => {
+    mockStorage(openAiSettings());
+    const { calls } = stubFetch((_url, init) => {
+      const body = JSON.parse(init.body as string);
+      const user = body.messages[1].content as string;
+      const lines = user.split("\n");
+      const count = lines.length - 1; // 第一行是逐行指令前缀
+      if (count > 8) {
+        // 大批量被模型弄乱：只回一行 → 行数不符 → 解析失败
+        return jsonResponse({ choices: [{ message: { content: "模型输出乱掉了" } }] });
+      }
+      const texts = lines.slice(1);
+      return jsonResponse({
+        choices: [{ message: { content: texts.map((t: string) => `译${t}`).join("\n") } }],
+      });
+    });
+    const { TranslateService } = await import("../src/background/translate");
+    const svc = new TranslateService();
+    const texts = Array.from({ length: 20 }, (_, i) => `段落${i}`);
+    const results = await svc.translate(texts, "zh-CN");
+    expect(results).toEqual(texts.map((t) => `译${t}`));
+    // 1 次整批（解析失败）+ ⌈20/8⌉=3 次小批量（成功）= 4 次；逐段风暴（+20）不应发生
+    expect(calls).toHaveLength(4);
+  });
+
+  it("API 报错（非解析失败）不触发小批量重试：整批 401 → 直接逐段（与旧行为一致）", async () => {
+    // minRequestIntervalMs: 50 同时验证「请求间隔设置」贯通到限速器（21 个请求 ≈1s 跑完）
+    mockStorage(openAiSettings({ api: { minRequestIntervalMs: 50 } }));
+    const { calls } = stubFetch(() => jsonResponse({ error: "unauthorized" }, 401));
+    const { TranslateService } = await import("../src/background/translate");
+    const svc = new TranslateService();
+    const texts = Array.from({ length: 20 }, (_, i) => `段落${i}`);
+    try {
+      await svc.translate(texts, "zh-CN");
+      expect.unreachable("401 应抛出");
+    } catch (err) {
+      expect((err as ApiError).code).toBe("auth");
+    }
+    // 1 次整批 + 20 次逐段 = 21；不应有额外的小批量请求
+    expect(calls).toHaveLength(21);
+  });
+
+  it("minRequestIntervalMs 生效：间隔 1000ms 时第 3 个请求须等待令牌补充", async () => {
+    mockStorage(openAiSettings({ api: { minRequestIntervalMs: 1000, maxConcurrency: 2 } }));
+    const { calls } = stubFetch(() => jsonResponse({ choices: [{ message: { content: "ok" } }] }));
+    const { TranslateService } = await import("../src/background/translate");
+    const svc = new TranslateService();
+    const t1 = Date.now();
+    await svc.translate(["a"], "zh-CN");
+    await svc.translate(["b"], "zh-CN");
+    await svc.translate(["c"], "zh-CN");
+    const span = Date.now() - t1;
+    expect(calls).toHaveLength(3);
+    // 容量 2 允许前 2 个突发；第 3 个须等 ~1 个令牌周期（1000ms）
+    expect(span).toBeGreaterThanOrEqual(900);
+  });
+});

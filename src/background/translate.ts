@@ -38,6 +38,10 @@ export class TranslationCancelledError extends Error {
 /** 批量分隔哨兵：模型按此分隔符逐段输出，解析按哨兵 split（比按行数匹配鲁棒得多） */
 export const BATCH_SEPARATOR = "===IT_SEP===";
 
+/** 批量解析失败时的二次降级组大小：先拆成 ≤8 段的小批量重试——小批量输出短、
+ *  解析成功率高，把最坏情况的请求数从 N 压到约 N/8；仍失败的组才逐段。 */
+const SUB_BATCH_SIZE = 8;
+
 /** 构造批量提示词里的哨兵分隔行 */
 export function batchSeparatorLine(): string {
   return BATCH_SEPARATOR;
@@ -109,10 +113,9 @@ async function withRetry<T>(
 
 export class TranslateService {
   /** 相邻两个 provider 请求的最小启动间隔（毫秒）＝请求启动限速。
-   *  此前 LLM 通道只限"并发数"不限"速率"：并发 6 个、响应一快就每秒几十个请求，
-   *  极易触发服务商限流甚至封号。用限速把"请求启动速率"钳制住——无论并发多少，
-   *  启动间隔都不小于此值（参照 read-frog 的限流思路）。 */
-  private static readonly REQUEST_MIN_INTERVAL_MS = 500;
+   *  默认 500（≈2 请求/秒），可在设置页按中转站/服务商额度调整
+   *  （settings.api.minRequestIntervalMs，每次 translate 调用时刷新）。 */
+  private minRequestIntervalMs = 500;
 
   private cache = new TranslationCache();
   private cacheEnabled = true;
@@ -120,9 +123,9 @@ export class TranslateService {
   /** 等待队列：用指针索引代替 shift()（shift 是 O(n)） */
   private pending: Array<() => void> = [];
   private pendingHead = 0;
-  /** 请求启动限速：令牌桶。rate = 每 500ms 一个令牌（长期平均速率的底线），
+  /** 请求启动限速：令牌桶。rate = 每 minRequestIntervalMs 一个令牌（长期平均速率的底线），
    *  capacity = 并发上限，允许短时突发但长期速率被钳制（借鉴 read-frog RequestQueue）。 */
-  private bucket = new TokenBucket(1000 / TranslateService.REQUEST_MIN_INTERVAL_MS, 1);
+  private bucket = new TokenBucket(2, 1);
   /** 429 限流暂停：此时间点之前不放行任何新请求（队列级冷却） */
   private pausedUntil = 0;
   /** 设置缓存：避免每次翻译请求都读 chrome.storage + 解密 API Key。
@@ -141,8 +144,11 @@ export class TranslateService {
     const settings = await this.getSettingsCached();
     this.applyCacheSettings(settings);
     const limit = Math.max(1, settings.api.maxConcurrency || 3);
-    // 容量 = 并发上限（允许短突发），速率保持每 500ms 一个令牌
-    this.bucket.configure(1000 / TranslateService.REQUEST_MIN_INTERVAL_MS, Math.min(limit, 16));
+    // 请求启动限速：速率 = 1/间隔（默认 500ms ≈ 2 请求/秒），容量 = 并发上限（允许短突发）。
+    // 间隔按设置刷新（用户可按中转站额度调大），钳制下限防除零。
+    const interval = Math.max(50, settings.api.minRequestIntervalMs ?? 500);
+    this.minRequestIntervalMs = interval;
+    this.bucket.configure(1000 / interval, Math.min(limit, 16));
     const results: string[] = new Array(texts.length);
     const toFetch: number[] = [];
 
@@ -160,52 +166,104 @@ export class TranslateService {
     }
     if (toFetch.length === 0) return results;
 
-    const joined = toFetch.map((i) => texts[i]);
     // 记录批量/逐段遇到的首个可诊断错误：全部失败时向上抛出，让内容与工具条拿到具体错误类型
     let firstError: unknown;
-    if (joined.length > 1) {
+    /** 待请求段落（{结果下标, 原文}）：整批 → 小批量 → 逐段 三级降级，逐级收窄 */
+    let pending: Array<{ idx: number; text: string }> = toFetch.map((idx) => ({
+      idx,
+      text: texts[idx],
+    }));
+    if (pending.length > 1) {
       if (signal?.aborted) throw new TranslationCancelledError();
-      try {
-        // 按配置的批量协议合并请求。默认逐行（旧版，第三方兼容性最好）：
-        //   - lines：失败即逐段降级（哨兵协议不支持时不应反复试探）。
-        //   - separator：解析失败先回退一次旧版逐行协议（仍是一次请求），
-        //     两者都不行才走逐段降级，避免批量失败直接炸成大量单段请求。
-        // 原文里若本身含哨兵字符串，哨兵分段必然产生歧义 → 强制逐行协议，避免切错段
-        const sentinelCollision = joined.some((t) => t.includes(BATCH_SEPARATOR));
-        const configured = !sentinelCollision && (settings.api.batchMode ?? "lines") === "separator";
-        const modes = configured ? (["separator", "lines"] as BatchMode[]) : (["lines"] as BatchMode[]);
+      // 按配置的批量协议合并请求。默认逐行（旧版，第三方兼容性最好）：
+      //   - lines：解析失败直接进入小批量/逐段降级（哨兵协议不支持时不应反复试探）。
+      //   - separator：解析失败先回退一次旧版逐行协议（仍是一次请求），两者都不行才降级。
+      // 原文里若本身含哨兵字符串，哨兵分段必然产生歧义 → 强制逐行协议，避免切错段
+      const sentinelCollision = pending.some((p) => p.text.includes(BATCH_SEPARATOR));
+      const configured = !sentinelCollision && (settings.api.batchMode ?? "lines") === "separator";
+      const modes = configured ? (["separator", "lines"] as BatchMode[]) : (["lines"] as BatchMode[]);
+      /** 按当前 modes 顺序尝试一次批量。返回 null = 响应成功但解析失败（模型/格式问题，
+       *  值得拆小批量重试）；抛错 = API 失败（服务问题，拆小批量无济于事，不应重试）。 */
+      const attemptBatch = async (
+        items: Array<{ idx: number; text: string }>
+      ): Promise<string[] | null> => {
         for (const mode of modes) {
           const batch = await this.runConcurrent(limit, () =>
-            this.callApi(settings, joined, targetLang, { batch: true, batchMode: mode, context, signal })
+            this.callApi(
+              settings,
+              items.map((p) => p.text),
+              targetLang,
+              { batch: true, batchMode: mode, context, signal }
+            )
           );
-          const parts = splitBatch(batch, joined.length);
-          if (parts) {
-            for (let k = 0; k < joined.length; k++) {
-              const t = parts[k];
-              results[toFetch[k]] = t;
-              await this.storeCache(targetLang, joined[k], t);
-            }
-            return results;
-          }
+          const parts = splitBatch(batch, items.length);
+          if (parts) return parts;
+        }
+        return null;
+      };
+      const commitBatch = async (
+        items: Array<{ idx: number; text: string }>,
+        parts: string[]
+      ): Promise<void> => {
+        for (let k = 0; k < items.length; k++) {
+          results[items[k].idx] = parts[k];
+          await this.storeCache(targetLang, items[k].text, parts[k]);
+        }
+      };
+
+      let batchParseFailed = false;
+      try {
+        // 整批一次请求（批量越大越省 token：系统提示词 + 页面上下文不重复携带）
+        const parts = await attemptBatch(pending);
+        if (parts) {
+          await commitBatch(pending, parts);
+          pending = [];
+        } else {
+          batchParseFailed = true;
         }
       } catch (err) {
-        // 批量失败，降级逐段重试；错误先记下，若逐段也全失败则上抛
-        firstError = err;
+        // API 失败：错误先记下，若降级后仍全失败则上抛
+        if (!firstError) firstError = err;
+      }
+
+      // 仅「响应正常但解析失败」才值得拆小批量；API 报错（鉴权/网络/限流）拆了也没用
+      if (batchParseFailed && pending.length > SUB_BATCH_SIZE) {
+        const groups: Array<Array<{ idx: number; text: string }>> = [];
+        for (let s = 0; s < pending.length; s += SUB_BATCH_SIZE) {
+          groups.push(pending.slice(s, s + SUB_BATCH_SIZE));
+        }
+        const failed = await Promise.all(
+          groups.map(async (group) => {
+            try {
+              if (signal?.aborted) throw new TranslationCancelledError();
+              const parts = await attemptBatch(group);
+              if (parts) {
+                await commitBatch(group, parts);
+                return [] as Array<{ idx: number; text: string }>;
+              }
+              return group;
+            } catch (err) {
+              if (!firstError) firstError = err;
+              return group;
+            }
+          })
+        );
+        pending = failed.flat();
       }
     }
 
-    // 逐段降级：并发受限（一次最多 limit 个请求在途），显著快于串行
+    // 逐段降级（最后兜底）：并发受限（一次最多 limit 个请求在途），显著快于串行
     if (signal?.aborted) throw new TranslationCancelledError();
     await Promise.all(
-      toFetch.map((idx) =>
+      pending.map(({ idx, text }) =>
         this.runConcurrent(limit, () => {
           if (signal?.aborted) return Promise.reject(new TranslationCancelledError());
-          return this.callApi(settings, [texts[idx]], targetLang, { context, signal });
+          return this.callApi(settings, [text], targetLang, { context, signal });
         })
-          .then(async (text) => {
-            const t = text.trim();
+          .then(async (raw) => {
+            const t = raw.trim();
             results[idx] = t;
-            await this.storeCache(targetLang, texts[idx], t);
+            await this.storeCache(targetLang, text, t);
           })
           .catch((err) => {
             results[idx] = "";
@@ -216,7 +274,7 @@ export class TranslateService {
     // 会话被中止 → 抛中止错误（不触发重试/备用/失败上报）
     if (signal?.aborted) throw new TranslationCancelledError();
     // 需要请求的段落全部失败 → 抛出带错误类型/诊断的错误，而不是静默返回空串
-    const allFailed = toFetch.length > 0 && toFetch.every((idx) => results[idx] === "");
+    const allFailed = pending.length > 0 && pending.every(({ idx }) => results[idx] === "");
     if (allFailed && firstError && !(firstError instanceof TranslationCancelledError)) {
       throw firstError;
     }
@@ -373,7 +431,7 @@ export class TranslateService {
   private pauseRateLimit(pauseMs: number): void {
     const now = Date.now();
     this.pausedUntil = Math.max(this.pausedUntil, now + pauseMs);
-    this.bucket.configure(1000 / TranslateService.REQUEST_MIN_INTERVAL_MS, 1);
+    this.bucket.configure(1000 / this.minRequestIntervalMs, 1);
   }
 
   /** 令牌桶取令牌：取到返回；取不到睡到凑够一个令牌再取。 */
