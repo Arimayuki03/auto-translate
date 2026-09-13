@@ -156,11 +156,10 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
 
     await engine.translateAll();
     await flush();
-    // 仅译文模式：译文元素存在且被隐藏（原文被原位替换）
+    // 仅译文模式：译文元素可见（包裹容器用纯 CSS 切换，译文顶替原文位置）
     expect(document.querySelectorAll(".it-translated.it-done").length).toBeGreaterThan(0);
-    expect(document.querySelectorAll(".it-translated.it-done").length).toBe(
-      document.querySelectorAll(".it-translated-hidden").length
-    );
+    // 原文被隐藏
+    expect(document.querySelectorAll("[data-it-orig-hidden]").length).toBeGreaterThan(0);
   });
 
   it("自动翻译本身不写入 per-site 设置（无写冲突）", async () => {

@@ -1,4 +1,4 @@
-import { postJson } from "./http";
+import { ApiError, buildApiUrl, postJson } from "./http";
 import type { ChatMessage, ChatOptions, ChatResult, Provider } from "./types";
 
 interface OllamaChatResponse {
@@ -9,8 +9,9 @@ interface OllamaChatResponse {
 export const ollamaProvider: Provider = {
   format: "ollama",
   async chat(messages: ChatMessage[], options: ChatOptions): Promise<ChatResult> {
-    const data = await postJson<OllamaChatResponse>(
-      `${options.baseUrl}/api/chat`,
+    const url = buildApiUrl(options.baseUrl, "/api/chat");
+    const { data, diagnostic } = await postJson<OllamaChatResponse>(
+      url,
       {},
       {
         model: options.model,
@@ -18,12 +19,17 @@ export const ollamaProvider: Provider = {
         messages,
         options: { temperature: options.temperature },
       },
-      options.timeoutMs
+      options.timeoutMs,
+      "ollama",
+      options.signal
     );
     const text = data?.message?.content;
     if (typeof text !== "string") {
-      throw new Error("响应格式异常：未找到 message.content");
+      throw new ApiError("bad_response", "响应格式异常：未找到 message.content", {
+        ...diagnostic,
+        code: "bad_response",
+      });
     }
-    return { text };
+    return { text, diagnostic };
   },
 };

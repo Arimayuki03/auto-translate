@@ -3,8 +3,8 @@ import type {
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
 } from "../shared/messages";
-import { getSettings, saveSettings } from "../shared/storage";
-import type { ApiConfig, ApiFormat, Settings } from "../shared/types";
+import { exportSettings, getSettings, importSettings, saveSettings } from "../shared/storage";
+import type { ApiConfig, ApiFormat, BatchMode, Settings } from "../shared/types";
 
 const FORMAT_INFO: Record<ApiFormat, { url: string; model: string; hint: string }> = {
   openai: {
@@ -26,6 +26,11 @@ const FORMAT_INFO: Record<ApiFormat, { url: string; model: string; hint: string 
     url: "http://127.0.0.1:11434",
     model: "qwen2.5",
     hint: "Ollama 原生：插件自动拼接 /api/chat",
+  },
+  googlefree: {
+    url: "（无需填写）",
+    model: "（无需填写）",
+    hint: "Google 免费通道：无需 BaseURL / Key / 模型，开箱即用。免费但有频率限制，适合无 Key 或备用兜底。",
   },
 };
 
@@ -49,10 +54,23 @@ function updateFormatHint(): void {
   const fmt = select("api-format").value as ApiFormat;
   const info = FORMAT_INFO[fmt];
   $("format-hint").textContent = info.hint;
+  const isFree = fmt === "googlefree";
   const baseUrl = $("base-url") as HTMLInputElement;
   const model = $("model") as HTMLInputElement;
-  if (!baseUrl.value) baseUrl.placeholder = info.url;
-  if (!model.value) model.placeholder = info.model;
+  const apiKey = $("api-key") as HTMLInputElement;
+  const batchMode = $("batch-mode") as HTMLSelectElement;
+  // 免费通道无需连接参数：禁用但不清空——切回第三方 API 时原有 Key/地址/模型要能直接用
+  baseUrl.disabled = isFree;
+  model.disabled = isFree;
+  apiKey.disabled = isFree;
+  if (!isFree) {
+    if (!baseUrl.value) baseUrl.placeholder = info.url;
+    if (!model.value) model.placeholder = info.model;
+  }
+  // 免费通道内部固定安全哨兵协议，批量协议选项不适用；端点输入只在免费通道显示
+  batchMode.disabled = isFree;
+  $("free-endpoint-row").style.display = isFree ? "" : "none";
+  $("free-backup-endpoint-row").style.display = isFree ? "" : "none";
 }
 
 async function loadForm(): Promise<void> {
@@ -62,6 +80,9 @@ async function loadForm(): Promise<void> {
   input("base-url").value = api.baseUrl;
   input("api-key").value = api.apiKey;
   input("model").value = api.model;
+  select("batch-mode").value = api.batchMode ?? "lines";
+  input("free-endpoint").value = api.freeEndpoint ?? "";
+  input("free-backup-endpoint").value = api.freeBackupEndpoint ?? "";
   input("temperature").value = String(api.temperature);
   input("timeout").value = String(Math.round(api.timeoutMs / 1000));
   input("concurrency").value = String(api.maxConcurrency);
@@ -75,6 +96,8 @@ async function loadForm(): Promise<void> {
   ($("viewport-lazy") as HTMLInputElement).checked = s.translate.viewportLazy;
   ($("translate-on-select") as HTMLInputElement).checked = s.translate.translateOnSelect;
   ($("translate-input") as HTMLInputElement).checked = s.translate.translateInput;
+  ($("context-enabled") as HTMLInputElement).checked = s.translate.contextEnabled ?? true;
+  input("context-max-chars").value = String(s.translate.contextMaxChars ?? 3000);
   ($("sensitive-pages") as HTMLInputElement).checked = s.security.sensitivePages;
   ($("whitelist") as HTMLTextAreaElement).value = s.sites.whitelist.join("\n");
   ($("blacklist") as HTMLTextAreaElement).value = s.sites.blacklist.join("\n");
@@ -83,27 +106,43 @@ async function loadForm(): Promise<void> {
 
 async function readForm(): Promise<Settings> {
   const current = await getSettings();
+  // temperature 允许为 0（parseFloat 结果 NaN 才回退默认值，0 是合法值不能被 || 吞掉）
+  const tempParsed = parseFloat(($("temperature") as HTMLInputElement).value);
   const api: ApiConfig = {
     format: select("api-format").value as ApiFormat,
     baseUrl: ($("base-url") as HTMLInputElement).value.trim(),
     apiKey: ($("api-key") as HTMLInputElement).value.trim(),
     model: ($("model") as HTMLInputElement).value.trim(),
-    temperature: parseFloat(($("temperature") as HTMLInputElement).value) || 0.3,
+    temperature: Number.isNaN(tempParsed) ? 0.3 : tempParsed,
     timeoutMs: (parseInt(($("timeout") as HTMLInputElement).value, 10) || 60) * 1000,
-    maxConcurrency: parseInt(($("concurrency") as HTMLInputElement).value, 10) || 3,
+    // 兜底与默认值一致（2），并钳制 ≥1
+    maxConcurrency: Math.max(1, parseInt(($("concurrency") as HTMLInputElement).value, 10) || 2),
+    batchMode: select("batch-mode").value as BatchMode,
+    // 免费端点仅 googlefree 使用：非免费通道保留原值，避免误清
+    freeEndpoint: (select("api-format").value as ApiFormat) === "googlefree"
+      ? ($("free-endpoint") as HTMLInputElement).value.trim()
+      : current.api.freeEndpoint,
+    freeBackupEndpoint: (select("api-format").value as ApiFormat) === "googlefree"
+      ? ($("free-backup-endpoint") as HTMLInputElement).value.trim()
+      : current.api.freeBackupEndpoint,
   };
   const backupBaseUrl = ($("backup-base-url") as HTMLInputElement).value.trim();
   const backupModel = ($("backup-model") as HTMLInputElement).value.trim();
+  const backupFormat = select("backup-format").value as ApiFormat;
+  const backupFree = backupFormat === "googlefree";
   const backupApi: ApiConfig | undefined =
-    backupBaseUrl && backupModel
+    (backupFree || (backupBaseUrl && backupModel))
       ? {
-          format: select("backup-format").value as ApiFormat,
-          baseUrl: backupBaseUrl,
-          apiKey: ($("backup-api-key") as HTMLInputElement).value.trim(),
-          model: backupModel,
+          format: backupFormat,
+          baseUrl: backupFree ? "" : backupBaseUrl,
+          apiKey: backupFree ? "" : ($("backup-api-key") as HTMLInputElement).value.trim(),
+          model: backupFree ? "" : backupModel,
           temperature: api.temperature,
           timeoutMs: api.timeoutMs,
           maxConcurrency: api.maxConcurrency,
+          batchMode: api.batchMode,
+          freeEndpoint: current.backupApi?.freeEndpoint ?? api.freeEndpoint,
+          freeBackupEndpoint: current.backupApi?.freeBackupEndpoint ?? api.freeBackupEndpoint,
         }
       : undefined;
   return {
@@ -116,6 +155,11 @@ async function readForm(): Promise<Settings> {
       viewportLazy: ($("viewport-lazy") as HTMLInputElement).checked,
       translateOnSelect: ($("translate-on-select") as HTMLInputElement).checked,
       translateInput: ($("translate-input") as HTMLInputElement).checked,
+      contextEnabled: ($("context-enabled") as HTMLInputElement).checked,
+      contextMaxChars: Math.max(
+        0,
+        parseInt(($("context-max-chars") as HTMLInputElement).value, 10) || 3000
+      ),
     },
     sites: {
       whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
@@ -143,8 +187,47 @@ function parseDomainList(el: HTMLTextAreaElement): string[] {
     .filter(Boolean);
 }
 
+function updateBackupFormatFields(): void {
+  const isFree = select("backup-format").value === "googlefree";
+  for (const id of ["backup-base-url", "backup-api-key", "backup-model"]) {
+    const el = $(id) as HTMLInputElement;
+    el.disabled = isFree;
+    // 不清空原值：临时切换免费通道后切回第三方 API 时保留原有配置
+  }
+}
+
+/** 通用测试连接：主 / 备用 API 复用，失败信息带来源前缀便于区分是哪一路出错 */
+async function runTestConnection(api: ApiConfig | undefined, btnId: string, label: string): Promise<void> {
+  if (!api) {
+    setStatus(`未配置${label}，跳过`, "err");
+    return;
+  }
+  if (api.format !== "googlefree" && (!api.baseUrl || !api.model)) {
+    setStatus(`${label}请先填写 BaseURL 和模型`, "err");
+    return;
+  }
+  const btn = $(btnId) as HTMLButtonElement;
+  btn.disabled = true;
+  setStatus(`测试${label}中…`);
+  try {
+    const req: TestConnectionRequestMessage = { type: "test-connection", id: crypto.randomUUID(), api };
+    const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
+    setStatus(
+      res.ok
+        ? `${label}连接成功：${res.message ?? ""}`
+        : `${label}连接失败：${res.error ?? "未知错误"}`,
+      res.ok ? "ok" : "err"
+    );
+  } catch (err) {
+    setStatus(`${label}连接失败：${err instanceof Error ? err.message : String(err)}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function init(): void {
   $("api-format").addEventListener("change", updateFormatHint);
+  $("backup-format").addEventListener("change", updateBackupFormatFields);
   $("btn-save").addEventListener("click", async () => {
     const s = await readForm();
     await saveSettings(s);
@@ -152,29 +235,15 @@ function init(): void {
   });
   $("btn-test").addEventListener("click", async () => {
     const s = await readForm();
-    if (!s.api.baseUrl || !s.api.model) {
-      setStatus("请先填写 BaseURL 和模型", "err");
+    await runTestConnection(s.api, "btn-test", "主 API");
+  });
+  $("btn-test-backup").addEventListener("click", async () => {
+    const s = await readForm();
+    if (!s.backupApi) {
+      setStatus("未配置备用 API（填写备用 BaseURL 和模型，或选择 Google 免费通道）", "err");
       return;
     }
-    const btn = $("btn-test") as HTMLButtonElement;
-    btn.disabled = true;
-    setStatus("测试中…");
-    try {
-      const req: TestConnectionRequestMessage = {
-        type: "test-connection",
-        id: crypto.randomUUID(),
-        api: s.api,
-      };
-      const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
-      setStatus(
-        res.ok ? `连接成功：${res.message ?? ""}` : `连接失败：${res.error ?? "未知错误"}`,
-        res.ok ? "ok" : "err"
-      );
-    } catch (err) {
-      setStatus(`连接失败：${err instanceof Error ? err.message : String(err)}`, "err");
-    } finally {
-      btn.disabled = false;
-    }
+    await runTestConnection(s.backupApi, "btn-test-backup", "备用 API");
   });
   $("btn-clear-cache").addEventListener("click", async () => {
     const res = (await chrome.runtime.sendMessage({ type: "clear-cache" } as ClearCacheMessage)) as {
@@ -185,8 +254,9 @@ function init(): void {
   });
 
   $("btn-export").addEventListener("click", async () => {
-    const stored = await chrome.storage.local.get("settings");
-    const blob = new Blob([JSON.stringify(stored.settings ?? {}, null, 2)], {
+    // 走统一的导出入口：API Key 保持加密态落盘，避免明文泄进导出文件
+    const stored = await exportSettings();
+    const blob = new Blob([JSON.stringify(stored, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
@@ -207,8 +277,9 @@ function init(): void {
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text()) as unknown;
-      if (!parsed || typeof parsed !== "object") throw new Error("不是有效的设置文件");
-      await chrome.storage.local.set({ settings: parsed });
+      // 统一导入入口：校验 provider 格式、兼容 { settings: ... } 包装、导入后立即迁移
+      await importSettings(parsed);
+      await loadForm(); // 刷新表单，否则接着点「保存」会用旧表单值覆盖刚导入的设置
       setStatus("设置已导入 ✔（建议重新测试连接）", "ok");
     } catch (err) {
       setStatus(`导入失败：${err instanceof Error ? err.message : String(err)}`, "err");

@@ -1,4 +1,4 @@
-import { postJson } from "./http";
+import { ApiError, buildApiUrl, postJson } from "./http";
 import type { ChatMessage, ChatOptions, ChatResult, Provider } from "./types";
 
 interface GeminiGenerateContentResponse {
@@ -19,21 +19,33 @@ export const geminiProvider: Provider = {
         role: m.role === "assistant" ? "model" : "user",
         parts: [{ text: m.content }],
       }));
-    const url = `${options.baseUrl}/v1beta/models/${encodeURIComponent(options.model)}:generateContent?key=${encodeURIComponent(options.apiKey)}`;
-    const data = await postJson<GeminiGenerateContentResponse>(
-      url,
+    const url = new URL(
+      buildApiUrl(
+        options.baseUrl,
+        `/v1beta/models/${encodeURIComponent(options.model)}:generateContent`
+      )
+    );
+    url.searchParams.set("key", options.apiKey);
+    const { data, diagnostic } = await postJson<GeminiGenerateContentResponse>(
+      url.toString(),
       {},
       {
         system_instruction: system ? { parts: [{ text: system }] } : undefined,
         contents,
         generationConfig: { temperature: options.temperature },
       },
-      options.timeoutMs
+      options.timeoutMs,
+      "gemini",
+      options.signal
     );
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (typeof text !== "string") {
-      throw new Error("响应格式异常：未找到 candidates[0].content.parts[0].text");
+      throw new ApiError(
+        "bad_response",
+        "响应格式异常：未找到 candidates[0].content.parts[0].text",
+        { ...diagnostic, code: "bad_response" }
+      );
     }
-    return { text };
+    return { text, diagnostic };
   },
 };

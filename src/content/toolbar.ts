@@ -32,6 +32,7 @@ export class Toolbar {
   private toggleBtn: HTMLButtonElement;
   private modeSelect: HTMLSelectElement;
   private statusEl: HTMLElement;
+  private diagBtn: HTMLButtonElement;
 
   constructor(private engine: PageEngine) {
     this.el = document.createElement("div");
@@ -97,6 +98,14 @@ export class Toolbar {
     this.statusEl = document.createElement("span");
     this.statusEl.className = "it-status";
 
+    // 诊断信息复制按钮：仅在有翻译错误时显示，内容脱敏（绝不含 API Key）
+    this.diagBtn = document.createElement("button");
+    this.diagBtn.className = "it-copy-all";
+    this.diagBtn.textContent = "复制诊断信息";
+    this.diagBtn.title = "复制脱敏的错误诊断信息（不含 API Key），便于反馈问题";
+    this.diagBtn.style.display = "none";
+    this.diagBtn.addEventListener("click", () => this.copyDiagnostic());
+
     const closeBtn = document.createElement("button");
     closeBtn.className = "it-close";
     closeBtn.textContent = "✕";
@@ -110,6 +119,7 @@ export class Toolbar {
       langSelect,
       copyBtn,
       this.statusEl,
+      this.diagBtn,
       closeBtn
     );
     this.el.append(this.fab, this.panel);
@@ -125,11 +135,22 @@ export class Toolbar {
     void this.restoreState();
 
     // 窗口缩放变小可能把工具条挤出视口，重新吸附回来
-    window.addEventListener("resize", () => this.clampToViewport());
+    window.addEventListener("resize", this.onResize);
 
     engine.onStateChange = (state, stats) => this.setStatus(state, stats);
     this.setStatus(engine.state, { done: 0, error: 0, total: 0 });
   }
+
+  /** resize 监听用具名方法：destroy 时需精确移除，避免 SPA 换页重建工具条时监听泄漏累积。
+   *  用 rAF 节流，避免高频 resize 时读写布局引起抖动。 */
+  private resizeRaf = 0;
+  private onResize = (): void => {
+    if (this.resizeRaf) return;
+    this.resizeRaf = requestAnimationFrame(() => {
+      this.resizeRaf = 0;
+      this.clampToViewport();
+    });
+  };
 
   /** 快捷键轮换显示模式（双语/仅译文，原文用「还原」） */
   cycleMode(): void {
@@ -164,6 +185,8 @@ export class Toolbar {
 
   destroy(): void {
     this.engine.onStateChange = undefined;
+    window.removeEventListener("resize", this.onResize);
+    if (this.resizeRaf) cancelAnimationFrame(this.resizeRaf);
     this.el.remove();
   }
 
@@ -221,10 +244,43 @@ export class Toolbar {
   private setStatus(state: EngineState, stats: EngineStats): void {
     this.toggleBtn.disabled = state === "translating";
     this.toggleBtn.textContent = state === "off" ? "翻译" : "还原";
-    if (state === "translating") this.statusEl.textContent = "翻译中…";
-    else if (state === "done") this.statusEl.textContent = `共 ${stats.done} 段完成`;
-    else if (state === "partial") this.statusEl.textContent = `共 ${stats.done} 段完成，${stats.error} 段失败`;
-    else this.statusEl.textContent = "未翻译";
+    const err = this.engine.lastError;
+    if (state === "translating") {
+      this.statusEl.textContent = "翻译中…";
+    } else if (state === "done") {
+      this.statusEl.textContent = `共 ${stats.done} 段完成`;
+    } else if (state === "partial") {
+      // 失败原因带上具体错误类型（如「主 API 鉴权失败（401/403）」），不再只显示笼统的失败数
+      this.statusEl.textContent = `共 ${stats.done} 段完成，${stats.error} 段失败${
+        err ? `：${shorten(err.message, 60)}` : ""
+      }`;
+    } else {
+      this.statusEl.textContent = "未翻译";
+    }
+    // 有可诊断的错误时显示「复制诊断信息」按钮
+    this.diagBtn.style.display = state === "partial" && err ? "" : "none";
+  }
+
+  /** 复制脱敏诊断信息：provider / 端点 / 主机 / 状态码 / 错误码，绝不含 API Key */
+  private copyDiagnostic(): void {
+    const err = this.engine.lastError;
+    if (!err) {
+      this.statusEl.textContent = "暂无错误信息";
+      return;
+    }
+    const d = err.diagnostic;
+    const lines = [
+      `[auto-translate 诊断] ${new Date().toISOString()}`,
+      `错误：${err.message}`,
+      ...(err.errorCode ? [`错误码：${err.errorCode}`] : []),
+      ...(d?.provider ? [`通道：${d.provider}`] : []),
+      ...(d?.source ? [`来源：${d.source === "main" ? "主 API" : "备用 API"}`] : []),
+      ...(d?.endpoint ? [`端点：${d.endpoint}`] : []),
+      ...(d?.hostname ? [`主机：${d.hostname}`] : []),
+      ...(d?.status ? [`HTTP 状态：${d.status}`] : []),
+    ];
+    const ok = copyText(lines.join("\n"));
+    this.statusEl.textContent = ok ? "诊断信息已复制" : "复制失败";
   }
 
   private saveState(): void {
@@ -246,4 +302,9 @@ export class Toolbar {
     }
     this.clampToViewport(); // 保存的位置可能超出当前窗口，吸附回来
   }
+}
+
+/** 截断过长文本用于状态行展示 */
+function shorten(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
 }

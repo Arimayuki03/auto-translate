@@ -47,12 +47,12 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
   overflow-anchor: none;
 }
 
-/* 行内译文（导航/页脚/链接标签）：跟在原文同一行，不换行、不撑高布局 */
+/* 行内译文（导航/页脚/链接标签）：跟在原文同一行；允许换行——
+   nowrap 会让长译文在紧凑导航里横向溢出容器 */
 .it-translated.it-inline {
   display: inline;
   margin: 0 0 0 8px;
   vertical-align: baseline;
-  white-space: nowrap;
 }
 
 .it-translated.it-inline::before {
@@ -113,7 +113,25 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
   display: none !important;
 }
 
-.it-mode-original [data-it-unit]:not(.it-wrap) {
+/* 仅译文：包裹容器的原文隐藏（纯 CSS 切换，零 DOM 修改，保持布局不变） */
+.it-mode-translated [data-it-orig-hidden] {
+  display: none;
+}
+
+/* 仅译文：包裹容器内的译文顶替原文位置（覆盖 it-translated-hidden） */
+.it-mode-translated .it-wrap > .it-translated {
+  display: block !important;
+  margin: 0;
+}
+
+/* 仅译文：但被标记隐藏的译文（翻译失败占位等）不能被上面的显示规则顶出来。
+   特异性（4 个类）必须高于上面的显示规则，否则失败块会在仅译文模式强制显示 */
+.it-mode-translated .it-wrap > .it-translated.it-translated-hidden {
+  display: none !important;
+}
+
+/* 原文模式：隐藏所有译文（含包裹层内与行内译文），只保留原文，版面与原网页一致 */
+.it-mode-original .it-translated {
   display: none !important;
 }
 

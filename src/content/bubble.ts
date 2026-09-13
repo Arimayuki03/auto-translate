@@ -18,6 +18,15 @@ export function initBubble(
     bubble = null;
   }
 
+  /** 清理过期的去重条目（超过 DEDUP_WINDOW_MS），避免 Map 无限增长 */
+  function pruneRecent(): void {
+    const now = Date.now();
+    for (const [text, ts] of recent) {
+      if (now - ts >= DEDUP_WINDOW_MS) recent.delete(text);
+      else break; // Map 迭代序 = 插入序，遇到未过期的即可停（近似 LRU）
+    }
+  }
+
   document.addEventListener("mouseup", (e) => {
     if (isSensitive?.()) return; // 敏感页（登录/密码/2FA 等）不提供划词翻译
     if (isInsideOurUI(e.target as Element)) return;
@@ -31,10 +40,15 @@ export function initBubble(
     if (!rect) return;
 
     const now = Date.now();
+    pruneRecent();
     const last = recent.get(text);
     if (last && now - last < DEDUP_WINDOW_MS) return; // 短时内同文本不重复请求
     recent.set(text, now);
-    if (recent.size > MAX_RECENT) recent.delete(recent.keys().next().value as string);
+    // 超限时删除最老条目（Map 迭代序 = 插入序）
+    if (recent.size > MAX_RECENT) {
+      const oldest = recent.keys().next().value as string | undefined;
+      if (oldest) recent.delete(oldest);
+    }
 
     if (translateOnSelect) {
       bubble = buildBubble();
@@ -66,7 +80,19 @@ export function initBubble(
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") close();
   });
-  window.addEventListener("scroll", close, true);
+  // 滚动关闭气泡：用 rAF 节流，避免高频滚动事件
+  let scrollRaf = 0;
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        close();
+      });
+    },
+    true
+  );
 }
 
 /** 翻译并渲染到气泡主体：loading → 译文 / 失败+重试 */

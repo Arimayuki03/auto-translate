@@ -1,4 +1,5 @@
 /** 文本节点提取与分块（阶段 3） */
+import { createWorkPacer, pauseIfBudgetSpent } from "./scheduler";
 
 export interface TranslationUnit {
   /** 自增 id（内容脚本在 http 页面上不能用 crypto.randomUUID） */
@@ -9,6 +10,8 @@ export interface TranslationUnit {
   text: string;
   /** 句子分块后的译文请求单元 */
   chunks: string[];
+  /** 交互控件（button/option）：仅文本原位替换，不插入译文元素、不改 DOM 结构 */
+  textOnly?: boolean;
 }
 
 export interface ExtractOptions {
@@ -19,12 +22,13 @@ export interface ExtractOptions {
 
 /**
  * 不参与翻译的标签（文本在这些标签内一律跳过）。
- * BUTTON / SELECT / OPTION 属于交互控件：翻译会改变其标签文字或 DOM 结构，
- * 破坏点击展开/收起等原有交互，因此整体排除。
+ * 注：BUTTON / OPTION / SELECT 不再整体排除——下拉菜单、点击展开的选项
+ * 多为这类控件。它们改走“仅文本原位替换”（见 getControlEl 与 Renderer 的
+ * textOnly 处理）：只改文字不改 DOM 结构，点击展开/选中交互不受影响。
  */
 const EXCLUDED_TAGS = new Set([
   "SCRIPT", "STYLE", "NOSCRIPT", "IFRAME", "SVG", "MATH", "CODE", "PRE",
-  "KBD", "SAMP", "VAR", "TEXTAREA", "INPUT", "SELECT", "OPTION", "BUTTON",
+  "KBD", "SAMP", "VAR", "TEXTAREA", "INPUT",
 ]);
 
 /** 作为“翻译单元容器”候选的块级元素 */
@@ -36,15 +40,21 @@ const BLOCK_TAGS = new Set([
 
 let seq = 0;
 
-/** 遍历 root，返回翻译单元列表（已按容器分组并过滤） */
+/** 遍历 root，返回翻译单元列表（已按容器分组并过滤）。
+ *  性能要点（大页面卡顿修复）：isHiddenElement 依赖 getComputedStyle，代价高；
+ *  同一次扫描内对每个元素的"是否隐藏/是否处于排除区"做记忆化，
+ *  把 O(文本节点数 × 祖先深度) 次样式计算降到 O(去重元素数)。 */
 export function extractUnits(root: HTMLElement, opts: ExtractOptions): TranslationUnit[] {
   const grouped = new Map<HTMLElement, Text[]>();
+  const hiddenCache = new Map<HTMLElement, boolean>();
+  const excludedSubtreeCache = new Map<HTMLElement, boolean>();
+  const idCache = new Map<string, boolean>();
 
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const t = node as Text;
       if (!t.textContent || !t.textContent.trim()) return NodeFilter.FILTER_REJECT;
-      if (isExcluded(t)) return NodeFilter.FILTER_REJECT;
+      if (isExcluded(t, hiddenCache, excludedSubtreeCache, idCache)) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });
@@ -52,8 +62,9 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
   let node: Node | null;
   while ((node = walker.nextNode())) {
     const t = node as Text;
-    // 独立菜单/导航链接 → 锚定到链接自身，避免多个链接合并成一块译文
-    const container = getStandaloneLink(t) ?? nearestBlockContainer(t);
+    // 一次向上遍历同时判定 control / standalone link / block container，
+    // 避免原来三个函数各自独立爬祖先链（O(3×深度) → O(深度)）
+    const container = resolveContainer(t);
     if (container === document.body) continue;
     let list = grouped.get(container);
     if (!list) grouped.set(container, (list = []));
@@ -69,6 +80,73 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
       container,
       text,
       chunks: splitBySentences(text, opts.blockMaxChars),
+      textOnly: isControl(container),
+    });
+  }
+  return units;
+}
+
+/**
+ * extractUnits 的时间片版本（借鉴 read-frog 的 chunked walk）：
+ * 逻辑与 extractUnits 完全一致，但在遍历与构建单元的过程中，每花完一个时间片
+ * 预算就 `yield` 让出主线程，避免超大页面的整页扫描一次性冻结浏览器。
+ * @param shouldContinue 每次让出后检查；返回 false 时中止并返回已收集的单元。
+ */
+export async function extractUnitsChunked(
+  root: HTMLElement,
+  opts: ExtractOptions,
+  shouldContinue: () => boolean = () => true
+): Promise<TranslationUnit[]> {
+  const grouped = new Map<HTMLElement, Text[]>();
+  const hiddenCache = new Map<HTMLElement, boolean>();
+  const excludedSubtreeCache = new Map<HTMLElement, boolean>();
+  const idCache = new Map<string, boolean>();
+  const pacer = createWorkPacer();
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const t = node as Text;
+      if (!t.textContent || !t.textContent.trim()) return NodeFilter.FILTER_REJECT;
+      if (isExcluded(t, hiddenCache, excludedSubtreeCache, idCache)) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const t = node as Text;
+    // 一次向上遍历同时判定 control / standalone link / block container
+    const container = resolveContainer(t);
+    if (container !== document.body) {
+      let list = grouped.get(container);
+      if (!list) grouped.set(container, (list = []));
+      list.push(t);
+    }
+    // 时间片预算花完 → 让出主线程；让出后若会话已失效则中止
+    if (performance.now() >= pacer.deadline) {
+      await pauseIfBudgetSpent(pacer);
+      if (!shouldContinue()) return buildUnitsFromGrouped(grouped, opts);
+    }
+  }
+
+  return buildUnitsFromGrouped(grouped, opts);
+}
+
+/** 把已分组的文本节点构建成翻译单元（供同步/分片两个入口复用） */
+function buildUnitsFromGrouped(
+  grouped: Map<HTMLElement, Text[]>,
+  opts: ExtractOptions
+): TranslationUnit[] {
+  const units: TranslationUnit[] = [];
+  for (const [container, nodes] of grouped) {
+    const text = joinTextNodes(nodes);
+    if (!shouldTranslate(text, opts, container)) continue;
+    units.push({
+      id: `it-${++seq}`,
+      container,
+      text,
+      chunks: splitBySentences(text, opts.blockMaxChars),
+      textOnly: isControl(container),
     });
   }
   return units;
@@ -86,70 +164,127 @@ function isHiddenElement(el: HTMLElement): boolean {
   return false;
 }
 
-/** 文本节点是否位于排除区域（标签 / 属性 / 可编辑 / 站内锚点链接 / 视觉隐藏） */
-function isExcluded(node: Text): boolean {
-  for (
-    let el: HTMLElement | null = node.parentElement;
-    el && el !== document.body;
-    el = el.parentElement
-  ) {
-    if (EXCLUDED_TAGS.has(el.tagName)) return true;
-    if (isHiddenElement(el)) return true;
-    // 仅跳过真正的页内跳转锚点（如 "Skip to content"，目标 ID 存在）；
-    // href="#" 触发 JS 的链接（如 Manage cookies）不跳过，正常翻译
-    if (el.tagName === "A") {
-      const href = el.getAttribute("href") ?? "";
-      if (href.length > 1 && href.startsWith("#") && document.getElementById(href.slice(1))) {
-        return true;
-      }
+/** 文本节点是否位于排除区域（标签 / 属性 / 可编辑 / 站内锚点链接 / 视觉隐藏）。
+ *  性能要点：excludedCache 记忆"该元素自身或任一祖先是否被排除"——
+ *  命中缓存即可立刻返回（大量文本节点共享祖先，避免重复向上爬 + 重复样式计算）。 */
+function isExcluded(
+  node: Text,
+  hiddenCache: Map<HTMLElement, boolean>,
+  excludedCache: Map<HTMLElement, boolean>,
+  idCache: Map<string, boolean>
+): boolean {
+  const chain: HTMLElement[] = [];
+  let el: HTMLElement | null = node.parentElement;
+  let ancestorExcluded = false;
+  while (el && el !== document.body) {
+    const cached = excludedCache.get(el);
+    if (cached !== undefined) {
+      ancestorExcluded = cached;
+      break;
     }
-    if (el.hasAttribute("data-it-unit") || el.hasAttribute("data-it-ui")) return true;
-    if (el.isContentEditable) return true;
-    if (el.getAttribute("aria-hidden") === "true") return true;
-    if (el.hidden) return true;
-    if (el.getAttribute("translate") === "no") return true;
+    chain.push(el);
+    el = el.parentElement;
   }
+  // 自最浅祖先向 node 方向逐层累计并写缓存：cum = 自身被排除 || 更上层已被排除
+  let cum = ancestorExcluded;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const e = chain[i];
+    cum = isSelfExcluded(e, hiddenCache, idCache) || cum;
+    excludedCache.set(e, cum);
+  }
+  return cum;
+}
+
+/** 单个元素自身是否应排除（不含祖先）。隐藏判定走 hiddenCache 记忆化，避免重复 getComputedStyle。
+ *  idCache 记忆 document.getElementById 结果，避免链接密集页面重复全局查找。 */
+function isSelfExcluded(
+  el: HTMLElement,
+  hiddenCache: Map<HTMLElement, boolean>,
+  idCache: Map<string, boolean>
+): boolean {
+  if (EXCLUDED_TAGS.has(el.tagName)) return true;
+  let hidden = hiddenCache.get(el);
+  if (hidden === undefined) {
+    hidden = isHiddenElement(el);
+    hiddenCache.set(el, hidden);
+  }
+  if (hidden) return true;
+  // 我们注入的译文/占位/UI 元素不参与提取
+  if (el.hasAttribute("data-it-unit") || el.hasAttribute("data-it-ui")) return true;
+  // 仅跳过真正的页内跳转锚点（如 "Skip to content"，目标 ID 存在）；
+  // href="#" 触发 JS 的链接（如 Manage cookies）不跳过，正常翻译
+  if (el.tagName === "A") {
+    const href = el.getAttribute("href") ?? "";
+    if (href.length > 1 && href.startsWith("#")) {
+      const id = href.slice(1);
+      let exists = idCache.get(id);
+      if (exists === undefined) {
+        exists = !!document.getElementById(id);
+        idCache.set(id, exists);
+      }
+      if (exists) return true;
+    }
+  }
+  if (el.isContentEditable) return true;
+  if (el.getAttribute("aria-hidden") === "true") return true;
+  if (el.hidden) return true;
+  if (el.getAttribute("translate") === "no") return true;
   return false;
 }
 
-/** 向上找最近的块级容器（不超过 body 的直接子元素） */
-function nearestBlockContainer(node: Text): HTMLElement {
-  let el = node.parentElement;
+/** 一次向上遍历同时判定 control / standalone link / block container。
+ *  替代原来 getControlEl → getStandaloneLink → nearestBlockContainer 三次独立爬祖先。
+ *  返回锚定容器（控件 / 链接 / 块级容器），或 document.body 表示跳过。 */
+function resolveContainer(node: Text): HTMLElement {
+  let el: HTMLElement | null = node.parentElement;
   if (!el) return document.body;
   let current: HTMLElement = el;
+  let foundControl: HTMLElement | null = null;
+  let foundLink: HTMLElement | null = null;
   while (current !== document.body) {
     const parent = current.parentElement;
     if (!parent || parent === document.body) break;
+    if (foundControl === null && isControl(current)) foundControl = current;
+    if (foundLink === null && current.tagName === "A") foundLink = current;
     if (BLOCK_TAGS.has(current.tagName)) break;
     current = parent;
   }
+  // 控件优先：按钮/选项锚定到控件自身
+  if (foundControl) return foundControl;
+  // 独立菜单/导航链接：锚定到链接自身（避免多个链接合并成一块译文）
+  if (foundLink && isStandaloneLink(foundLink)) return foundLink;
+  // 否则锚定到最近的块级容器
   return current;
 }
 
-/**
- * 独立菜单/导航链接：文本在 <a> 内，且该 <a> 平铺在导航容器（nav/ul/ol/header/footer）
- * 或「父级只有 <a> 子元素」的菜单里。这种链接应单独成单元，避免多个链接合并成一块译文
- * 塞进容器末尾，导致页面中间出现多余的译文。
- */
-function getStandaloneLink(node: Text): HTMLElement | null {
-  let a: HTMLElement | null = null;
-  for (let el = node.parentElement; el && el !== document.body; el = el.parentElement) {
-    if (el.tagName === "A") {
-      a = el;
-      break;
+/** 交互控件：按钮 / 下拉选项（菜单选项、点击展开的条目多为这类） */
+function isControl(el: HTMLElement): boolean {
+  return el.tagName === "BUTTON" || el.tagName === "OPTION";
+}
+
+/** 判断 <a> 是否为独立菜单/导航链接（应单独成单元）。
+ *  父级为 nav/ul/ol/header/footer，或父级只含链接（和空白文本）→ 是菜单 */
+function isStandaloneLink(a: HTMLElement): boolean {
+  const parent = a.parentElement;
+  if (!parent) return false;
+  if (NAV_PARENT_TAGS.has(parent.tagName)) return true;
+  // 父级只含链接（和空白文本）→ 是菜单，拆开每个链接
+  const kids = parent.childNodes;
+  let linkCount = 0;
+  let onlyLinksAndWhitespace = true;
+  for (const c of kids) {
+    if (c.nodeName === "A") {
+      linkCount++;
+    } else if (c.nodeType === 3) {
+      if (c.textContent?.trim()) onlyLinksAndWhitespace = false;
+    } else {
+      onlyLinksAndWhitespace = false;
     }
   }
-  if (!a || !a.parentElement) return null;
-  const parent = a.parentElement;
-  if (["NAV", "UL", "OL", "HEADER", "FOOTER"].includes(parent.tagName)) return a;
-  // 父级只含链接（和空白文本）→ 是菜单，拆开每个链接
-  const kids = Array.from(parent.childNodes);
-  const links = kids.filter((c) => c.nodeName === "A");
-  const onlyLinks =
-    links.length >= 2 &&
-    kids.every((c) => c.nodeName === "A" || (c.nodeType === 3 && !c.textContent?.trim()));
-  return onlyLinks ? a : null;
+  return linkCount >= 2 && onlyLinksAndWhitespace;
 }
+
+const NAV_PARENT_TAGS = new Set(["NAV", "UL", "OL", "HEADER", "FOOTER"]);
 
 /** 拼接容器内文本节点；相邻换行标签（br / 块级）转成空格 */
 function joinTextNodes(nodes: Text[]): string {
@@ -179,8 +314,8 @@ function shouldTranslate(
   opts: ExtractOptions,
   container?: HTMLElement | null
 ): boolean {
-  // 链接里的英文短词（FAQ/AI/API 等）门槛放低到 2 字符；正文仍按 minTextLength
-  const minLen = container && isLinkLike(container) ? 2 : opts.minTextLength;
+  // 链接与控件（按钮/选项）里的短词（FAQ/AI/Save/Delete 等）门槛放低到 2 字符；正文仍按 minTextLength
+  const minLen = container && (isLinkLike(container) || isControl(container)) ? 2 : opts.minTextLength;
   if (text.length < minLen) return false;
   if (!LETTER_RE.test(text)) return false;
   if (isTargetLanguage(text, opts.targetLang)) return false;

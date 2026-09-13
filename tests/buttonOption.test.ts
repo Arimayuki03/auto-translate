@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * 交互控件翻译策略：
- * - <button> / <select> / <option> 属于交互控件，翻译会改变其标签文字或 DOM 结构、
- *   破坏点击展开/收起等原有交互 → 整体排除，不翻译（回归：侧边按钮翻译后无法收起 bug）。
+ * - <button> / <option>（下拉选项、点击展开的菜单条目）改走「仅文本原位替换」：
+ *   只改文本节点，不插入元素、不改 DOM 结构，点击展开/收起与选中交互不受影响，
+ *   图标等子元素原样保留；翻译失败保留原文。
  * - <details>/<summary> 折叠菜单：<summary> 仍翻译，但作为紧凑行内标签渲染（译文跟在后面、
  *   绝不包裹），保住 details>summary 结构，菜单照常可收起。
  */
@@ -79,8 +80,8 @@ function makeEngine(mode: "bilingual" | "translated") {
   return new PageEngine(renderer, makeSettings());
 }
 
-describe("交互控件翻译策略", () => {
-  it("提取：按钮与下拉选项文字被排除（不参与翻译）", () => {
+describe("交互控件翻译策略（仅文本原位替换）", () => {
+  it("提取：按钮与下拉选项文字被提取为 textOnly 单元，正文不受影响", () => {
     document.body.innerHTML = `
       <p>Edit your public profile.</p>
       <button id="toggle">Show more options</button>
@@ -91,30 +92,69 @@ describe("交互控件翻译策略", () => {
       blockMaxChars: 1200,
       targetLang: "zh-CN",
     });
-    expect(units.some((u) => u.container.tagName === "BUTTON")).toBe(false);
-    expect(units.some((u) => u.container.tagName === "OPTION")).toBe(false);
+    const btnUnit = units.find((u) => u.container.tagName === "BUTTON");
+    const optUnit = units.find((u) => u.container.tagName === "OPTION");
+    expect(btnUnit?.text).toBe("Show more options");
+    expect(btnUnit?.textOnly).toBe(true);
+    expect(optUnit?.text).toBe("English");
+    expect(optUnit?.textOnly).toBe(true);
     expect(units.some((u) => u.text === "Edit your public profile.")).toBe(true); // 正文仍正常提取
   });
 
-  it("按钮不被翻译（交互逻辑保持不变）", async () => {
+  it("按钮原位翻译：文字被替换、结构零改动（图标保留、不插元素、不包裹）", async () => {
+    document.body.innerHTML = `
+      <button id="toggle"><span id="icon"></span>Show more options</button>
+    `;
     const engine = makeEngine("bilingual");
     await engine.translateAll();
     await flush();
 
     const btn = document.querySelector("#toggle") as HTMLButtonElement;
-    expect(btn.textContent?.trim()).toBe("Show more options"); // 原文保留
-    expect(btn.nextElementSibling?.classList.contains("it-translated")).toBe(false); // 无译文插入
+    expect(btn.textContent?.trim()).toBe("【译】Show more options");
+    expect(btn.querySelector("#icon")).not.toBeNull(); // 图标子元素保留
+    expect(btn.children.length).toBe(1); // 未插入任何译文元素
+    expect(btn.nextElementSibling?.classList.contains("it-translated") ?? false).toBe(false);
     expect(btn.closest(".it-wrap")).toBeNull(); // 不被包裹
   });
 
-  it("下拉选项不被翻译", async () => {
+  it("下拉选项原位翻译（结构不变，选中交互不受影响）", async () => {
     const engine = makeEngine("bilingual");
     await engine.translateAll();
     await flush();
 
     const opts = Array.from(document.querySelectorAll<HTMLOptionElement>("#lang option"));
-    expect(opts[0].textContent).toBe("English");
-    expect(opts[1].textContent).toBe("Chinese");
+    expect(opts[0].textContent).toBe("【译】English");
+    expect(opts[1].textContent).toBe("【译】Chinese");
+    expect(opts[0].parentElement?.tagName).toBe("SELECT"); // 结构不变
+  });
+
+  it("显示模式切换：原文模式恢复控件原文，切回后重新显示译文", async () => {
+    const engine = makeEngine("bilingual");
+    await engine.translateAll();
+    await flush();
+
+    const btn = document.querySelector("#toggle") as HTMLButtonElement;
+    expect(btn.textContent?.trim()).toBe("【译】Show more options");
+
+    engine.renderer.setMode("original");
+    expect(btn.textContent?.trim()).toBe("Show more options");
+
+    engine.renderer.setMode("translated");
+    expect(btn.textContent?.trim()).toBe("【译】Show more options");
+  });
+
+  it("一键还原：控件文字恢复原文且标记清除", async () => {
+    const engine = makeEngine("bilingual");
+    await engine.translateAll();
+    await flush();
+
+    const btn = document.querySelector("#toggle") as HTMLButtonElement;
+    expect(btn.textContent?.trim()).toBe("【译】Show more options");
+
+    engine.restore();
+    expect(btn.textContent?.trim()).toBe("Show more options");
+    expect(btn.hasAttribute("data-it-ctl-orig")).toBe(false);
+    expect(btn.hasAttribute("data-it-src")).toBe(false);
   });
 
   it("details/summary 折叠菜单：summary 翻译但保持直接子元素（可收起）", async () => {

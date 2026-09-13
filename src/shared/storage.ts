@@ -12,7 +12,12 @@ export const DEFAULT_SETTINGS: Settings = {
     model: "",
     temperature: 0.3,
     timeoutMs: 60000,
-    maxConcurrency: 6,
+    // 默认并发保守取 2：叠加后台"请求启动限速"，避免瞬时高并发触发服务商限流/封号。
+    // 用户可在设置页按自己服务商的额度上调。
+    maxConcurrency: 2,
+    batchMode: "lines",
+    freeEndpoint: "",
+    freeBackupEndpoint: "",
   },
   translate: {
     targetLang: "zh-CN",
@@ -25,6 +30,8 @@ export const DEFAULT_SETTINGS: Settings = {
     translateInput: true,
     viewportLazy: true,
     terminology: [],
+    contextEnabled: true,
+    contextMaxChars: 3000,
   },
   sites: { whitelist: [], blacklist: [] },
   security: { encryptApiKey: true, sensitivePages: false },
@@ -69,7 +76,8 @@ export async function getSettings(): Promise<Settings> {
     if (!saved.version || saved.version < 2) {
       merged.translate.autoTranslate = DEFAULT_SETTINGS.translate.autoTranslate;
     }
-    // v2 → v3：加大默认并发以提速
+    // v2 → v3：默认并发改为 2（叠加请求启动限速防服务商限流/封号，E-005）。
+    // 注意：无法区分「用户自定义值」与「旧默认值」，该迁移会按新默认值覆盖 v2 设置的并发数。
     if (!saved.version || saved.version < 3) {
       merged.api.maxConcurrency = DEFAULT_SETTINGS.api.maxConcurrency;
     }
@@ -93,6 +101,36 @@ export async function saveSettings(settings: Settings): Promise<void> {
     toStore.backupApi.apiKey = encryptApiKey(toStore.backupApi.apiKey);
   }
   await chrome.storage.local.set({ settings: toStore });
+}
+
+/** 导出磁盘中的原始设置（API Key 保持加密态，避免导出时泄露明文） */
+export async function exportSettings(): Promise<Record<string, unknown>> {
+  const stored = await chrome.storage.local.get("settings");
+  const raw = stored.settings;
+  return raw && typeof raw === "object" ? (structuredClone(raw) as Record<string, unknown>) : {};
+}
+
+/** 导入设置。兼容直接设置对象以及 { settings: ... } 包装；密钥可为本插件导出的密文或明文。 */
+export async function importSettings(input: unknown): Promise<void> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("不是有效的设置文件");
+  }
+  const wrapper = input as Record<string, unknown>;
+  const raw = wrapper.settings ?? input;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("设置内容格式无效");
+  }
+  const candidate = raw as Partial<Settings>;
+  const formats = new Set(["openai", "anthropic", "gemini", "ollama", "googlefree"]);
+  if (candidate.api?.format && !formats.has(candidate.api.format)) {
+    throw new Error(`不支持的 API 格式：${String(candidate.api.format)}`);
+  }
+  if (candidate.backupApi?.format && !formats.has(candidate.backupApi.format)) {
+    throw new Error(`不支持的备用 API 格式：${String(candidate.backupApi.format)}`);
+  }
+  await chrome.storage.local.set({ settings: structuredClone(raw) });
+  // 立即走一次完整读取/迁移，确保导入内容可用；不会覆盖原始导入数据。
+  await getSettings();
 }
 
 function mergeSettings(base: Settings, patch: Partial<Settings>): Settings {

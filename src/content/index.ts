@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   });
 
   initBubble(engine, settings.translate.translateOnSelect, isSensitive);
-  initInput(engine, settings.translate.translateInput);
+  initInput(engine, settings.translate.translateInput, isSensitive);
   const observer = new PageObserver(engine); // 构造即开始监听 SPA 动态内容
   observer.isSensitive = isSensitive;
   observer.isPageDisabled = isPageDisabled;

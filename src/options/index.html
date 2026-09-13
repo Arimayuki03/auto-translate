@@ -19,6 +19,7 @@
           <option value="anthropic">Anthropic Claude</option>
           <option value="gemini">Google Gemini</option>
           <option value="ollama">Ollama 原生</option>
+          <option value="googlefree">Google 免费（无需 Key）</option>
         </select>
         <p class="hint" id="format-hint"></p>
       </div>
@@ -35,6 +36,24 @@
       <div class="form-row">
         <label for="model">模型</label>
         <input type="text" id="model" placeholder="deepseek-chat" />
+      </div>
+      <div class="form-row" id="free-endpoint-row" style="display: none">
+        <label for="free-endpoint">免费通道端点（留空用内置公开端点）</label>
+        <input type="text" id="free-endpoint" placeholder="https://translate.googleapis.com/translate_a/single" />
+        <p class="hint">Google 免费通道的翻译接口地址；被限流或不可用时可换备用端点。</p>
+      </div>
+      <div class="form-row" id="free-backup-endpoint-row" style="display: none">
+        <label for="free-backup-endpoint">备用端点（可选）</label>
+        <input type="text" id="free-backup-endpoint" placeholder="留空则不使用备用端点" />
+        <p class="hint">主端点失败（限流 / 不可达）时自动切换的第二个免费端点。</p>
+      </div>
+      <div class="form-row">
+        <label for="batch-mode">批量翻译协议</label>
+        <select id="batch-mode">
+          <option value="lines">逐行协议（默认，第三方兼容性最好）</option>
+          <option value="separator">哨兵协议（适合明确支持严格分隔输出的模型）</option>
+        </select>
+        <p class="hint">逐行：一次请求多段、按行返回，兼容性最好。哨兵：用 ===IT_SEP=== 分隔输入输出，段落内含换行时更可靠，但对模型指令服从度要求高；解析失败会自动回退逐行。</p>
       </div>
       <div class="form-row form-inline">
         <div>
@@ -62,6 +81,7 @@
           <option value="anthropic">Anthropic Claude</option>
           <option value="gemini">Google Gemini</option>
           <option value="ollama">Ollama 原生</option>
+          <option value="googlefree">Google 免费（无需 Key）</option>
         </select>
       </div>
       <div class="form-row">
@@ -107,6 +127,18 @@
       </div>
       <div class="form-row">
         <label class="checkbox-row">
+          <input type="checkbox" id="context-enabled" />
+          <span>整页翻译携带页面上下文（标题/描述/正文摘要，帮助模型理解语境）</span>
+        </label>
+        <p class="hint">仅整页翻译携带；划词 / 输入框翻译不携带，避免额外 token。部分 API 有 token 上限时可关闭。</p>
+      </div>
+      <div class="form-row">
+        <label for="context-max-chars">上下文最大字符数</label>
+        <input type="number" id="context-max-chars" min="0" max="20000" step="200" />
+        <p class="hint">正文摘要的最大长度（标题/描述另有固定上限）。设得越小越省 token。</p>
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row">
           <input type="checkbox" id="sensitive-pages" />
           <span>敏感页面不翻译（登录 / 密码 / 2FA / 支付等页面跳过翻译）</span>
         </label>
@@ -143,7 +175,8 @@
     </section>
 
     <div class="actions">
-      <button id="btn-test" class="btn btn-secondary">测试连接</button>
+      <button id="btn-test" class="btn btn-secondary">测试主 API</button>
+      <button id="btn-test-backup" class="btn btn-secondary">测试备用 API</button>
       <button id="btn-save" class="btn">保存设置</button>
     </div>
     <p id="status" class="status"></p>

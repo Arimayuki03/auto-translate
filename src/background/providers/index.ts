@@ -1,6 +1,7 @@
 import type { ApiConfig } from "../../shared/types";
 import { anthropicProvider } from "./anthropic";
 import { geminiProvider } from "./gemini";
+import { googleFreeProvider } from "./googlefree";
 import { ollamaProvider } from "./ollama";
 import { openaiProvider } from "./openai";
 import type { Provider } from "./types";
@@ -10,6 +11,7 @@ const providers: Record<ApiConfig["format"], Provider> = {
   anthropic: anthropicProvider,
   gemini: geminiProvider,
   ollama: ollamaProvider,
+  googlefree: googleFreeProvider,
 };
 
 export function createProvider(api: ApiConfig): Provider {

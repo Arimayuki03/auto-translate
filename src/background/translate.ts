@@ -1,14 +1,67 @@
-import type { ApiConfig, Settings } from "../shared/types";
+import type { ApiConfig, BatchMode, Settings } from "../shared/types";
+import type { TranslationContext } from "../shared/messages";
 import { getSettings } from "../shared/storage";
 import { TranslationCache } from "./cache";
-import { ApiError } from "./providers/http";
+import { TokenBucket } from "./rateLimiter";
+import { ApiError, withErrorSource } from "./providers/http";
 import { createProvider } from "./providers";
-import type { ChatMessage } from "./providers/types";
+import type { ChatMessage, ChatOptions } from "./providers/types";
 
 const MAX_RETRIES = 3;
+/** 普通可重试错误（网络/超时/5xx）的退避上限：指数退避封顶，防止无限拉长 */
+const MAX_RETRY_DELAY_MS = 60_000;
+/** 429 无 Retry-After 头时的固定冷却窗口：并发重试不必各自加倍，一个稳妥窗口足够 */
+const RATE_LIMIT_BASE_PAUSE_MS = 1_000;
+/** 尊重服务端 Retry-After 的上限（超长冷却兜底） */
+const MAX_RETRY_AFTER_MS = 5 * 60_000;
+
+/** 批量/免费通道相关的透传参数（主备通道共用，协议在调用侧决定、provider 侧执行） */
+type BatchChatOptions = Pick<
+  ChatOptions,
+  | "batchMode"
+  | "batchSeparator"
+  | "batchSize"
+  | "freeEndpoint"
+  | "freeBackupEndpoint"
+  | "targetLang"
+  | "signal"
+>;
+
+/** 翻译会话被中止（还原/换页）：区别于 API 错误，不应触发重试/备用切换，也不上报为失败 */
+export class TranslationCancelledError extends Error {
+  constructor() {
+    super("翻译已取消");
+    this.name = "TranslationCancelledError";
+  }
+}
+
+/** 批量分隔哨兵：模型按此分隔符逐段输出，解析按哨兵 split（比按行数匹配鲁棒得多） */
+export const BATCH_SEPARATOR = "===IT_SEP===";
+
+/** 构造批量提示词里的哨兵分隔行 */
+export function batchSeparatorLine(): string {
+  return BATCH_SEPARATOR;
+}
 
 function systemPrompt(targetLang: string): string {
   return `你是专业翻译引擎。将用户输入翻译为${targetLang}，只输出译文，不要解释、不要添加任何额外内容。`;
+}
+
+/** 批量哨兵模式的系统提示词：在原规则之上追加哨兵规则（仅 batchMode="separator" 使用；
+ *  第三方模型对自定义协议的服从度参差，默认逐行协议兼容性最好） */
+function sentinelSystemPrompt(targetLang: string): string {
+  return `${systemPrompt(targetLang)}
+
+## 批量分段规则（必须严格遵守）
+1. 输入由多个待译片段组成，片段之间用单独一行的 ${BATCH_SEPARATOR} 分隔。
+2. 逐段翻译，段数与输入完全一致，输出也用单独一行的 ${BATCH_SEPARATOR} 分隔各段译文。
+3. 绝对不要增加、删除、修改、合并或移动 ${BATCH_SEPARATOR} 分隔行；不要给它编号。
+4. 每段译文内部不要出现 ${BATCH_SEPARATOR}。`;
+}
+
+/** 旧版逐行批量协议的 user 内容（默认兼容模式，请求格式与历史版本完全一致） */
+function linesBatchUserContent(texts: string[]): string {
+  return `请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\n${texts.join("\n")}`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -19,7 +72,17 @@ function isRetryable(err: unknown): boolean {
   return err instanceof ApiError && err.retryable;
 }
 
-async function withRetry<T>(task: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
+/** 指数退避 + 抖动：带 ±10% 随机抖动，避免并发重试在同一时刻齐发再次触发限流 */
+function backoffDelayMs(attempt: number): number {
+  const base = 500 * 2 ** attempt;
+  return Math.min(base + Math.random() * 0.1 * base, MAX_RETRY_DELAY_MS);
+}
+
+async function withRetry<T>(
+  task: () => Promise<T>,
+  retries = MAX_RETRIES,
+  onRateLimit?: (pauseMs: number) => void
+): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -29,26 +92,66 @@ async function withRetry<T>(task: () => Promise<T>, retries = MAX_RETRIES): Prom
       if (!isRetryable(err) || attempt === retries) {
         throw err;
       }
-      await sleep(500 * 2 ** attempt);
+      // 429：尊重服务端 Retry-After（有头用头，无头用固定冷却窗口）；
+      // 其余可重试错误：指数退避 + 抖动
+      const retryAfterMs = err instanceof ApiError ? err.retryAfterMs : undefined;
+      const isRateLimit = err instanceof ApiError && err.code === "rate_limit";
+      const delay = isRateLimit
+        ? Math.min(retryAfterMs ?? RATE_LIMIT_BASE_PAUSE_MS, MAX_RETRY_AFTER_MS)
+        : backoffDelayMs(attempt);
+      // 429 时通知服务把整个限速器暂停（队列级冷却），避免并发兄弟请求继续冲击已限流的 provider
+      if (isRateLimit) onRateLimit?.(delay);
+      await sleep(delay);
     }
   }
   throw lastError;
 }
 
 export class TranslateService {
-  private cache = new TranslationCache();
-  private active = 0;
-  private pending: Array<() => void> = [];
+  /** 相邻两个 provider 请求的最小启动间隔（毫秒）＝请求启动限速。
+   *  此前 LLM 通道只限"并发数"不限"速率"：并发 6 个、响应一快就每秒几十个请求，
+   *  极易触发服务商限流甚至封号。用限速把"请求启动速率"钳制住——无论并发多少，
+   *  启动间隔都不小于此值（参照 read-frog 的限流思路）。 */
+  private static readonly REQUEST_MIN_INTERVAL_MS = 500;
 
-  /** 批量翻译：缓存命中 + 批量合并 + 并发限制 + 主备切换 */
-  async translate(texts: string[], targetLang: string): Promise<string[]> {
-    const settings = await getSettings();
+  private cache = new TranslationCache();
+  private cacheEnabled = true;
+  private active = 0;
+  /** 等待队列：用指针索引代替 shift()（shift 是 O(n)） */
+  private pending: Array<() => void> = [];
+  private pendingHead = 0;
+  /** 请求启动限速：令牌桶。rate = 每 500ms 一个令牌（长期平均速率的底线），
+   *  capacity = 并发上限，允许短时突发但长期速率被钳制（借鉴 read-frog RequestQueue）。 */
+  private bucket = new TokenBucket(1000 / TranslateService.REQUEST_MIN_INTERVAL_MS, 1);
+  /** 429 限流暂停：此时间点之前不放行任何新请求（队列级冷却） */
+  private pausedUntil = 0;
+  /** 设置缓存：避免每次翻译请求都读 chrome.storage + 解密 API Key。
+   *  监听 chrome.storage.onChanged 自动刷新，设置页改动即时生效。 */
+  private cachedSettings: Settings | null = null;
+
+  /** 批量翻译：缓存命中 + 批量合并 + 并发限制 + 主备切换。
+   *  signal：翻译会话中止信号（还原/换页时由 background 触发），中止后尽快停手。 */
+  async translate(
+    texts: string[],
+    targetLang: string,
+    context?: TranslationContext,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    if (signal?.aborted) throw new TranslationCancelledError();
+    const settings = await this.getSettingsCached();
+    this.applyCacheSettings(settings);
     const limit = Math.max(1, settings.api.maxConcurrency || 3);
+    // 容量 = 并发上限（允许短突发），速率保持每 500ms 一个令牌
+    this.bucket.configure(1000 / TranslateService.REQUEST_MIN_INTERVAL_MS, Math.min(limit, 16));
     const results: string[] = new Array(texts.length);
     const toFetch: number[] = [];
 
+    // 并发查缓存：Promise.all 代替串行 await，避免 N 条文本 = N 次串行 IPC
+    const cacheChecks = await Promise.all(
+      texts.map((t) => (this.cacheEnabled ? this.cache.get(targetLang, t) : Promise.resolve(undefined)))
+    );
     for (let i = 0; i < texts.length; i++) {
-      const cached = await this.cache.get(targetLang, texts[i]);
+      const cached = cacheChecks[i];
       if (cached !== undefined) {
         results[i] = cached;
       } else {
@@ -58,37 +161,66 @@ export class TranslateService {
     if (toFetch.length === 0) return results;
 
     const joined = toFetch.map((i) => texts[i]);
+    // 记录批量/逐段遇到的首个可诊断错误：全部失败时向上抛出，让内容与工具条拿到具体错误类型
+    let firstError: unknown;
     if (joined.length > 1) {
+      if (signal?.aborted) throw new TranslationCancelledError();
       try {
-        const batch = await this.runConcurrent(limit, () => this.callApi(settings, joined, targetLang));
-        const parts = splitBatch(batch, joined.length);
-        if (parts) {
-          for (let k = 0; k < joined.length; k++) {
-            const t = parts[k];
-            results[toFetch[k]] = t;
-            await this.cache.set(targetLang, joined[k], t);
+        // 按配置的批量协议合并请求。默认逐行（旧版，第三方兼容性最好）：
+        //   - lines：失败即逐段降级（哨兵协议不支持时不应反复试探）。
+        //   - separator：解析失败先回退一次旧版逐行协议（仍是一次请求），
+        //     两者都不行才走逐段降级，避免批量失败直接炸成大量单段请求。
+        // 原文里若本身含哨兵字符串，哨兵分段必然产生歧义 → 强制逐行协议，避免切错段
+        const sentinelCollision = joined.some((t) => t.includes(BATCH_SEPARATOR));
+        const configured = !sentinelCollision && (settings.api.batchMode ?? "lines") === "separator";
+        const modes = configured ? (["separator", "lines"] as BatchMode[]) : (["lines"] as BatchMode[]);
+        for (const mode of modes) {
+          const batch = await this.runConcurrent(limit, () =>
+            this.callApi(settings, joined, targetLang, { batch: true, batchMode: mode, context, signal })
+          );
+          const parts = splitBatch(batch, joined.length);
+          if (parts) {
+            for (let k = 0; k < joined.length; k++) {
+              const t = parts[k];
+              results[toFetch[k]] = t;
+              await this.storeCache(targetLang, joined[k], t);
+            }
+            return results;
           }
-          return results;
         }
-      } catch {
-        // 批量失败，降级逐段重试
+      } catch (err) {
+        // 批量失败，降级逐段重试；错误先记下，若逐段也全失败则上抛
+        firstError = err;
       }
     }
 
     // 逐段降级：并发受限（一次最多 limit 个请求在途），显著快于串行
+    if (signal?.aborted) throw new TranslationCancelledError();
     await Promise.all(
       toFetch.map((idx) =>
-        this.runConcurrent(limit, () => this.callApi(settings, [texts[idx]], targetLang))
+        this.runConcurrent(limit, () => {
+          if (signal?.aborted) return Promise.reject(new TranslationCancelledError());
+          return this.callApi(settings, [texts[idx]], targetLang, { context, signal });
+        })
           .then(async (text) => {
             const t = text.trim();
             results[idx] = t;
-            await this.cache.set(targetLang, texts[idx], t);
+            await this.storeCache(targetLang, texts[idx], t);
           })
-          .catch(() => {
+          .catch((err) => {
             results[idx] = "";
+            if (!firstError) firstError = err;
           })
       )
     );
+    // 会话被中止 → 抛中止错误（不触发重试/备用/失败上报）
+    if (signal?.aborted) throw new TranslationCancelledError();
+    // 需要请求的段落全部失败 → 抛出带错误类型/诊断的错误，而不是静默返回空串
+    const allFailed = toFetch.length > 0 && toFetch.every((idx) => results[idx] === "");
+    if (allFailed && firstError && !(firstError instanceof TranslationCancelledError)) {
+      throw firstError;
+    }
+    if (firstError instanceof TranslationCancelledError) throw firstError;
     return results;
   }
 
@@ -99,36 +231,131 @@ export class TranslateService {
 
   /** 返回一批文本中命中缓存的条数（用于内容侧决定整页直译还是视口懒翻译） */
   async checkCache(targetLang: string, texts: string[]): Promise<number> {
-    let cached = 0;
-    for (const t of texts) {
-      if ((await this.cache.get(targetLang, t)) !== undefined) cached++;
-    }
-    return cached;
+    this.applyCacheSettings(await this.getSettingsCached());
+    if (!this.cacheEnabled) return 0;
+    // 并发查缓存：Promise.all 代替串行 await
+    const checks = await Promise.all(
+      texts.map((t) => this.cache.get(targetLang, t))
+    );
+    return checks.filter((v) => v !== undefined).length;
   }
 
-  /** 单次 API 调用：主 API 重试 → 可重试错误时切换备用 API */
-  private async callApi(settings: Settings, texts: string[], targetLang: string): Promise<string> {
-    const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt(targetLang) },
-      {
-        role: "user",
-        content:
-          texts.length === 1
-            ? texts[0]
-            : `请逐行翻译以下内容，每行一个译文，保持顺序，不要编号，不要任何额外文字：\n${texts.join("\n")}`,
-      },
-    ];
+  /** 应用缓存设置（开关 / 内存条目上限）：每次请求前刷新，设置页改动即时生效 */
+  private applyCacheSettings(settings: Settings): void {
+    this.cacheEnabled = settings.cache.enabled;
+    this.cache.maxEntries = Math.max(1, settings.cache.maxEntries || 5000);
+  }
+
+  /** 带缓存的 getSettings：避免每次翻译请求都读 chrome.storage + 解密 API Key。
+   *  设置页保存后通过 chrome.storage.onChanged 事件自动刷新缓存。 */
+  private async getSettingsCached(): Promise<Settings> {
+    if (this.cachedSettings) return this.cachedSettings;
+    const settings = await getSettings();
+    this.cachedSettings = settings;
+    // 首次调用时注册 storage 变更监听（只注册一次）
+    if (!this.storageListenerRegistered) {
+      this.storageListenerRegistered = true;
+      try {
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area === "local" && changes.settings) {
+            this.cachedSettings = null; // 失效，下次 getSettingsCached 重新读
+          }
+        });
+      } catch {
+        // 某些环境可能没有 onChanged，忽略
+      }
+    }
+    return settings;
+  }
+  private storageListenerRegistered = false;
+
+  /** 写缓存：关闭缓存时不写；磁盘写入失败（如存储配额超限）不影响翻译结果 */
+  private async storeCache(
+    targetLang: string,
+    text: string,
+    translation: string
+  ): Promise<void> {
+    if (!this.cacheEnabled) return;
+    await this.cache.set(targetLang, text, translation);
+  }
+
+  /** 单次 API 调用：主 API 重试 → 可重试错误时切换备用 API。
+   *  协议按「通道」决定：googlefree 固定哨兵（不支持逐行指令前缀），第三方 LLM 按配置。 */
+  private async callApi(
+    settings: Settings,
+    texts: string[],
+    targetLang: string,
+    opts?: {
+      batch?: boolean;
+      batchMode?: BatchMode;
+      context?: TranslationContext;
+      signal?: AbortSignal;
+    }
+  ): Promise<string> {
+    const contextText = opts?.context
+      ? `\n\n页面上下文（仅用于理解语境，不要翻译或复述这段上下文）：\n标题：${opts.context.title ?? ""}\n描述：${opts.context.description ?? ""}\n正文摘要：${opts.context.content ?? ""}`
+      : "";
+    const chatOpts = (mode: BatchMode) => ({
+      batchMode: mode,
+      batchSeparator: BATCH_SEPARATOR,
+      batchSize: texts.length,
+      freeEndpoint: settings.api.freeEndpoint,
+      freeBackupEndpoint: settings.api.freeBackupEndpoint,
+      // 免费通道显式拿目标语言，避免从中文提示词正则反解（P3-5）；signal 供会话中止打断在途 fetch
+      targetLang,
+      signal: opts?.signal,
+    });
+
+    const attempt = (api: ApiConfig): Promise<string> => {
+      const isBatch = (opts?.batch ?? false) && texts.length > 1;
+      // googlefree provider 无法执行逐行协议（会把逐行指令前缀当作待译段发给 Google）：
+      // 其内部固定使用安全哨兵协议，与 ApiConfig.batchMode 的文档约定一致；第三方 LLM 按配置（默认逐行）。
+      const mode: BatchMode =
+        api.format === "googlefree" ? "separator" : (opts?.batchMode ?? "lines");
+      let system: string;
+      let user: string;
+      if (!isBatch) {
+        system = systemPrompt(targetLang);
+        user = texts[0];
+      } else if (mode === "separator") {
+        system = sentinelSystemPrompt(targetLang);
+        user = texts.join(`\n${BATCH_SEPARATOR}\n`);
+      } else {
+        // 旧版逐行协议：system/user 与历史版本逐字一致，第三方站点兼容性最好
+        system = systemPrompt(targetLang);
+        user = linesBatchUserContent(texts);
+      }
+      const messages: ChatMessage[] = [
+        { role: "system", content: system + contextText },
+        { role: "user", content: user },
+      ];
+      return withRetry(
+        () => this.request(api, messages, chatOpts(mode)),
+        MAX_RETRIES,
+        (pauseMs) => this.pauseRateLimit(pauseMs)
+      );
+    };
+
     try {
-      return await withRetry(() => this.request(settings.api, messages));
+      return await attempt(settings.api);
     } catch (err) {
       if (settings.backupApi && isRetryable(err)) {
-        return await withRetry(() => this.request(settings.backupApi!, messages));
+        try {
+          return await attempt(settings.backupApi);
+        } catch (backupErr) {
+          // 主备都失败：上抛备用通道的错误并标注来源，工具条才能区分是哪一路出的问题
+          throw withErrorSource(backupErr, "backup");
+        }
       }
-      throw err;
+      // 仅主 API 失败（不可重试或未配置备用）：标注「主 API」，避免误报为备用/免费通道错误
+      throw withErrorSource(err, "main");
     }
   }
 
-  private async request(api: ApiConfig, messages: ChatMessage[]): Promise<string> {
+  private async request(api: ApiConfig, messages: ChatMessage[], chatOpts: BatchChatOptions): Promise<string> {
+    // 启动限速：令牌桶把"请求启动速率"钳制住——允许短突发（≤并发数），
+    // 但长期平均间隔不小于 REQUEST_MIN_INTERVAL_MS，防止瞬时高并发触发服务商限流/封号。
+    await this.acquireStartSlot();
     const provider = createProvider(api);
     const result = await provider.chat(messages, {
       baseUrl: api.baseUrl,
@@ -136,8 +363,28 @@ export class TranslateService {
       model: api.model,
       temperature: api.temperature,
       timeoutMs: api.timeoutMs,
+      ...chatOpts,
     });
     return result.text;
+  }
+
+  /** 429 队列级冷却：暂停整个限速器，暂停窗口后最多恢复 1 个令牌（后探针），
+   *  避免恢复瞬间 burst 一堆请求冲击仍受限的 provider（借鉴 read-frog）。 */
+  private pauseRateLimit(pauseMs: number): void {
+    const now = Date.now();
+    this.pausedUntil = Math.max(this.pausedUntil, now + pauseMs);
+    this.bucket.configure(1000 / TranslateService.REQUEST_MIN_INTERVAL_MS, 1);
+  }
+
+  /** 令牌桶取令牌：取到返回；取不到睡到凑够一个令牌再取。 */
+  private async acquireStartSlot(): Promise<void> {
+    for (;;) {
+      const pauseWait = this.pausedUntil - Date.now();
+      if (pauseWait > 0) await sleep(pauseWait);
+      const wait = this.bucket.tryAcquire();
+      if (wait === 0) return;
+      await sleep(wait);
+    }
   }
 
   private async runConcurrent<T>(limit: number, task: () => Promise<T>): Promise<T> {
@@ -149,22 +396,55 @@ export class TranslateService {
       return await task();
     } finally {
       this.active--;
-      this.pending.shift()?.();
+      // 用指针索引代替 shift()（shift 是 O(n)，指针是 O(1)）
+      const resolver = this.pending[this.pendingHead];
+      if (resolver) {
+        this.pending[this.pendingHead++] = undefined as unknown as () => void;
+        resolver();
+      }
+      // 队列消费完后重置，避免数组无限增长
+      if (this.pendingHead > 0 && this.pendingHead >= this.pending.length) {
+        this.pending = [];
+        this.pendingHead = 0;
+      }
     }
   }
 }
 
 /**
- * 拆分批量译文：先剥离编号（模型可能输出 "1. 译文"），再按行数匹配。
+ * 拆分批量译文：优先按哨兵 ${BATCH_SEPARATOR} 分段（鲁棒）；哨兵缺失时退回按行匹配。
  * 都不匹配返回 null，走逐段并发降级。（导出供单元测试）
  */
 export function splitBatch(batch: string, expected: number): string[] | null {
-  const lines = batch.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  // ① 哨兵分段：模型按 ===IT_SEP=== 分隔输出，段数应与输入一致
+  if (batch.includes(BATCH_SEPARATOR)) {
+    const parts = batch
+      .split(BATCH_SEPARATOR)
+      .map((s) => stripIndex(s.trim()))
+      .filter((s) => s !== "");
+    if (parts.length === expected) return parts;
+    // 哨兵段数不符：可能是模型在译文里误带哨兵，放弃哨兵路线继续走行匹配兜底
+  }
+
+  // ② 兜底：按行匹配（兼容旧行为 / 模型忽略哨兵时）。先剔除哨兵行，避免分隔符漏进译文
+  const lines = batch
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "" && s !== BATCH_SEPARATOR);
   const numbered = lines.map((l) => l.match(/^\d+[.、．:：]\s*(.+)$/)?.[1]?.trim());
   // 若全部带编号，用剥离后的内容
   if (numbered.every((n) => n !== undefined && n !== "")) {
     if (numbered.length === expected) return numbered as string[];
   }
-  if (lines.length === expected) return lines;
+  if (lines.length === expected) {
+    // 部分行带编号（模型只给部分行编号）：逐行剥离，避免 "1." 残留进译文
+    if (numbered.some((n) => n)) return lines.map((l, i) => numbered[i] || l);
+    return lines;
+  }
   return null;
+}
+
+/** 剥掉段首可能残留的编号（"1. 译文" → "译文"） */
+function stripIndex(s: string): string {
+  return s.replace(/^\d+[.、．:：]\s*/, "");
 }

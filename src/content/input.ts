@@ -2,7 +2,11 @@
 import type { PageEngine } from "./engine";
 import { isInsideOurUI } from "./ui";
 
-export function initInput(engine: PageEngine, enabled: boolean): void {
+export function initInput(
+  engine: PageEngine,
+  enabled: boolean,
+  isSensitive?: () => boolean
+): void {
   if (!enabled) return;
   let btn: HTMLElement | null = null;
   let field: HTMLElement | null = null;
@@ -11,7 +15,9 @@ export function initInput(engine: PageEngine, enabled: boolean): void {
   function hide(): void {
     btn?.remove();
     btn = null;
-    // 保留 field：点击已聚焦的输入框时可重新显示按钮
+    // 释放 field 引用：若输入框已被页面移除，避免持有已脱离 DOM 的元素引用阻碍 GC。
+    // 仍连接的 field 保留，以便点击已聚焦输入框时重新显示按钮。
+    if (field && !field.isConnected) field = null;
   }
 
   /** 定位按钮到输入框上方/下方（视口坐标） */
@@ -70,6 +76,10 @@ export function initInput(engine: PageEngine, enabled: boolean): void {
 
   document.addEventListener("focusin", (e) => {
     clearTimeout(hideTimer);
+    if (isSensitive?.()) {
+      hide(); // 敏感页（登录/密码/2FA 等）不提供输入框翻译
+      return;
+    }
     const el = e.target as HTMLElement;
     if (!isTranslatableField(el) || isInsideOurUI(el)) return;
     showButton(el);
@@ -84,7 +94,7 @@ export function initInput(engine: PageEngine, enabled: boolean): void {
 
   // 点击输入框以外的区域隐藏；点击已聚焦的输入框时重新显示（滚动隐藏后焦点未变，不会触发 focusin）
   document.addEventListener("mousedown", (e) => {
-    if (!field) return;
+    if (!field || isSensitive?.()) return;
     const target = e.target as Node;
     const onField = target === field || field.contains(target);
     const fieldFocused = !!document.activeElement && field.contains(document.activeElement);

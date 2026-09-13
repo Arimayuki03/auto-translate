@@ -1,4 +1,5 @@
 import type {
+  CancelTranslationMessage,
   CheckCacheMessage,
   ItCommandMessage,
   TestConnectionRequestMessage,
@@ -8,11 +9,31 @@ import type {
 } from "../shared/messages";
 import type { ApiConfig } from "../shared/types";
 import { createProvider } from "./providers";
-import { TranslateService } from "./translate";
+import { TranslateService, TranslationCancelledError } from "./translate";
+import { ApiError } from "./providers/http";
 
 console.log("[auto-translate] background service worker 已启动");
 
 const translateService = new TranslateService();
+
+/** 翻译会话 → 该会话在途请求的 AbortController。还原/换页时按会话批量中止，避免浪费额度。
+ *  无 sessionId 的旧式请求（划词/输入框等）不参与会话中止。 */
+const sessionControllers = new Map<number, Set<AbortController>>();
+
+function registerController(sessionId: number | undefined, controller: AbortController): void {
+  if (sessionId === undefined) return;
+  let set = sessionControllers.get(sessionId);
+  if (!set) sessionControllers.set(sessionId, (set = new Set()));
+  set.add(controller);
+}
+
+function unregisterController(sessionId: number | undefined, controller: AbortController): void {
+  if (sessionId === undefined) return;
+  const set = sessionControllers.get(sessionId);
+  if (!set) return;
+  set.delete(controller);
+  if (set.size === 0) sessionControllers.delete(sessionId);
+}
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[auto-translate] 安装/更新:", details.reason);
@@ -31,19 +52,42 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "translate") {
     const req = message as TranslateRequestMessage;
+    const controller = new AbortController();
+    registerController(req.sessionId, controller);
     translateService
-      .translate(req.texts, req.targetLang)
+      .translate(req.texts, req.targetLang, req.context, controller.signal)
       .then(
         (results) =>
           sendResponse({ id: req.id, ok: true, results } as TranslateResponseMessage),
-        (err) =>
+        (err) => {
+          // 会话中止是用户主动还原/换页，属预期行为：静默返回，不当作失败上报
+          if (err instanceof TranslationCancelledError) {
+            sendResponse({ id: req.id, ok: false, error: "cancelled" } as TranslateResponseMessage);
+            return;
+          }
           sendResponse({
             id: req.id,
             ok: false,
             error: err instanceof Error ? err.message : String(err),
-          } as TranslateResponseMessage)
-      );
+            // 错误类型 + 脱敏诊断，供内容侧工具条区分「主 API 鉴权失败 / 限流 / 免费通道」等
+            ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
+            ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
+          } as TranslateResponseMessage);
+        }
+      )
+      .finally(() => unregisterController(req.sessionId, controller));
     return true;
+  }
+
+  // 中止某个翻译会话的全部在途请求（content 还原/换页时发出）
+  if (message?.type === "cancel-translation") {
+    const req = message as CancelTranslationMessage;
+    const set = sessionControllers.get(req.sessionId);
+    if (set) {
+      for (const controller of set) controller.abort();
+      sessionControllers.delete(req.sessionId);
+    }
+    return false;
   }
 
   if (message?.type === "test-connection") {
@@ -57,6 +101,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             id: req.id,
             ok: false,
             error: err instanceof Error ? err.message : String(err),
+            ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
+            ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
           } as TestConnectionResponseMessage)
       );
     return true;
@@ -88,15 +134,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function testConnection(api: ApiConfig): Promise<string> {
   const provider = createProvider(api);
-  const result = await provider.chat(
-    [{ role: "user", content: "请只回复：连接成功" }],
-    {
-      baseUrl: api.baseUrl,
-      apiKey: api.apiKey,
-      model: api.model,
-      temperature: 0,
-      timeoutMs: api.timeoutMs,
-    }
-  );
+  // 免费通道的系统提示词约定与翻译一致（「翻译为X」），便于从中解析目标语言
+  const prompt =
+    api.format === "googlefree"
+      ? [
+          { role: "system" as const, content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+          { role: "user" as const, content: "Connection test" },
+        ]
+      : [{ role: "user" as const, content: "请只回复：连接成功" }];
+  const result = await provider.chat(prompt, {
+    baseUrl: api.baseUrl,
+    apiKey: api.apiKey,
+    model: api.model,
+    temperature: 0,
+    timeoutMs: api.timeoutMs,
+  });
   return result.text.trim();
 }
