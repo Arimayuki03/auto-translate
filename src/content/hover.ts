@@ -56,9 +56,18 @@ function isHoverHidden(el: Element): boolean {
 }
 
 /** 与引擎调度完全相同的去重口径预判：对候选做一次单元素提取，
- *  过滤已译/在途/失败/已调度/同文已译后还有新鲜单元，角标才值得显示 */
+ *  过滤已译/在途/失败/已调度/同文已译后还有新鲜单元，角标才值得显示。
+ *  提取含 shadow 收集与样式读取，悬停扫过大 div/section 开销可观——
+ *  结果按元素缓存 1s：鼠标在同一块内反复进出不再重复提取；
+ *  已译/在途元素在此之前已被 isHoverExcluded 的 data-it-src/processing 拦下，不受缓存影响。 */
+const freshUnitsCache = new WeakMap<HTMLElement, { at: number; ok: boolean }>();
+const FRESH_CACHE_TTL_MS = 1000;
+
 function hasFreshUnits(el: HTMLElement, engine: PageEngine): boolean {
-  return extractUnits(el, engine.extractOptions).some(
+  const cached = freshUnitsCache.get(el);
+  const now = Date.now();
+  if (cached && now - cached.at < FRESH_CACHE_TTL_MS) return cached.ok;
+  const ok = extractUnits(el, engine.extractOptions).some(
     (u) =>
       !u.container.hasAttribute("data-it-src") &&
       !u.container.hasAttribute("data-it-processing") &&
@@ -66,6 +75,8 @@ function hasFreshUnits(el: HTMLElement, engine: PageEngine): boolean {
       !engine.isScheduled(u.container) &&
       !engine.isSkipped(u.text)
   );
+  freshUnitsCache.set(el, { at: now, ok });
+  return ok;
 }
 
 /** 候选是否可出角标：敏感页 / 整页翻译状态 / 排除规则 / 引擎同口径预判 */

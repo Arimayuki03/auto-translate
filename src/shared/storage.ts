@@ -116,7 +116,93 @@ export async function exportSettings(): Promise<Record<string, unknown>> {
   return raw && typeof raw === "object" ? (structuredClone(raw) as Record<string, unknown>) : {};
 }
 
-/** 导入设置。兼容直接设置对象以及 { settings: ... } 包装；密钥可为本插件导出的密文或明文。 */
+const SUPPORTED_FORMATS = ["openai", "anthropic", "gemini", "ollama", "googlefree", "microsoft"] as const;
+
+/** 导入设置的逐字段校验：只接受已知字段与正确类型，非法字段剔除（回退默认值）。
+ *  此前只校验 api.format：手工编辑的导入文件若把 sites.blacklist 写成字符串等，
+ *  落盘后 content 侧 shouldTranslatePage 调 .some 会抛错，导致所有页面注入失败。 */
+function sanitizeImportSettings(raw: unknown): Settings {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const bool = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
+  const strArr = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : undefined;
+  const enumOf =
+    <T extends string>(allowed: readonly T[]) =>
+    (v: unknown): T | undefined =>
+      allowed.includes(v as T) ? (v as T) : undefined;
+  /** 按 spec 挑选对象里的已知字段（类型不符的丢弃） */
+  const pick = (value: unknown, spec: Record<string, (v: unknown) => unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    if (!value || typeof value !== "object") return out;
+    const obj = value as Record<string, unknown>;
+    for (const [k, coerce] of Object.entries(spec)) {
+      const v = coerce(obj[k]);
+      if (v !== undefined) out[k] = v;
+    }
+    return out;
+  };
+
+  const apiSpec = {
+    format: enumOf(SUPPORTED_FORMATS),
+    baseUrl: str,
+    apiKey: str,
+    model: str,
+    temperature: num,
+    timeoutMs: num,
+    maxConcurrency: num,
+    minRequestIntervalMs: num,
+    batchMode: enumOf(["lines", "separator"] as const),
+    customSystemPrompt: str,
+    freeEndpoint: str,
+    freeBackupEndpoint: str,
+  };
+  const patch: SettingsPatch = {
+    api: pick(r.api, apiSpec) as unknown as Partial<ApiConfig>,
+    translate: pick(r.translate, {
+      targetLang: str,
+      displayMode: enumOf(["bilingual", "translated", "original"] as const),
+      autoTranslate: bool,
+      autoDetectSource: bool,
+      minTextLength: num,
+      blockMaxChars: num,
+      translateOnSelect: bool,
+      translateInput: bool,
+      viewportLazy: bool,
+      terminology: strArr,
+      contextEnabled: bool,
+      contextMaxChars: num,
+      style: enumOf(["gray", "outline", "underline", "blur"] as const),
+      customCss: str,
+      translateAttributes: bool,
+    }) as unknown as Partial<Settings["translate"]>,
+    sites: pick(r.sites, {
+      whitelist: strArr,
+      blacklist: strArr,
+    }) as unknown as Partial<Settings["sites"]>,
+    security: pick(r.security, {
+      encryptApiKey: bool,
+      sensitivePages: bool,
+    }) as unknown as Partial<Settings["security"]>,
+    cache: pick(r.cache, {
+      enabled: bool,
+      maxEntries: num,
+      ttlDays: num,
+    }) as unknown as Partial<Settings["cache"]>,
+  };
+  // 备用 API 显式给出对象时才存在（沿用主备字段继承语义：缺的字段拿主 API 补）
+  if (r.backupApi && typeof r.backupApi === "object") {
+    patch.backupApi = { ...patch.api, ...pick(r.backupApi, apiSpec) } as unknown as Partial<ApiConfig>;
+  }
+  const merged = mergeSettings(DEFAULT_SETTINGS, patch);
+  merged.version = SETTINGS_VERSION;
+  return merged;
+}
+
+/** 导入设置。兼容直接设置对象以及 { settings: ... } 包装；密钥可为本插件导出的密文或明文。
+ *  内容经逐字段校验后合并出完整设置落盘：缺失段回退默认值，类型错乱字段被剔除。 */
 export async function importSettings(input: unknown): Promise<void> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("不是有效的设置文件");
@@ -127,19 +213,32 @@ export async function importSettings(input: unknown): Promise<void> {
     throw new Error("设置内容格式无效");
   }
   const candidate = raw as Partial<Settings>;
-  const formats = new Set(["openai", "anthropic", "gemini", "ollama", "googlefree", "microsoft"]);
+  const formats = new Set<string>(SUPPORTED_FORMATS);
   if (candidate.api?.format && !formats.has(candidate.api.format)) {
     throw new Error(`不支持的 API 格式：${String(candidate.api.format)}`);
   }
   if (candidate.backupApi?.format && !formats.has(candidate.backupApi.format)) {
     throw new Error(`不支持的备用 API 格式：${String(candidate.backupApi.format)}`);
   }
-  await chrome.storage.local.set({ settings: structuredClone(raw) });
+  const merged = sanitizeImportSettings(raw);
+  await chrome.storage.local.set({ settings: structuredClone(merged) });
   // 立即走一次完整读取/迁移，确保导入内容可用；不会覆盖原始导入数据。
   await getSettings();
 }
 
-function mergeSettings(base: Settings, patch: Partial<Settings>): Settings {
+/** 设置补丁类型：各段均可只给部分字段（getSettings 的存储读取 / importSettings 的
+ *  导入校验共用），mergeSettings 负责把缺失字段补齐为默认值 */
+type SettingsPatch = {
+  version?: number;
+  api?: Partial<ApiConfig>;
+  backupApi?: Partial<ApiConfig>;
+  translate?: Partial<Settings["translate"]>;
+  sites?: Partial<Settings["sites"]>;
+  security?: Partial<Settings["security"]>;
+  cache?: Partial<Settings["cache"]>;
+};
+
+function mergeSettings(base: Settings, patch: SettingsPatch): Settings {
   const api: ApiConfig = { ...base.api, ...(patch.api ?? {}) };
   return {
     ...base,

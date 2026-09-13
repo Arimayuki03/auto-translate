@@ -1,5 +1,6 @@
 import type { ApiDiagnostic } from "../../shared/messages";
 import { ApiError, makeDiagnostic } from "./http";
+import { extractSegments, extractTargetLang } from "./segments";
 import type { ChatMessage, ChatOptions, ChatResult, Provider } from "./types";
 
 /**
@@ -25,26 +26,6 @@ function toMicrosoftLang(lang: string): string {
   if (/^zh-?(cn|hans|sg)/i.test(l)) return "zh-Hans";
   if (/^zh-?(tw|hk|mo|hant)/i.test(l)) return "zh-Hant";
   return l.split(/[-_]/)[0].toLowerCase() || "en";
-}
-
-/** 从消息里提取目标语言：系统提示词含「翻译为X」，失败回退中文 */
-function extractTargetLang(messages: ChatMessage[]): string {
-  const sys = messages.find((m) => m.role === "system")?.content ?? "";
-  const m = sys.match(/翻译为([^，。\s]+)/);
-  return m?.[1] ?? "zh-CN";
-}
-
-/** 从消息里提取待译片段；分隔协议由 TranslateService 显式传入，避免猜测正文内容。 */
-function extractSegments(messages: ChatMessage[], options: ChatOptions): string[] {
-  const user = messages.find((m) => m.role === "user")?.content ?? "";
-  if ((options.batchSize ?? 1) <= 1) return [user];
-  if (options.batchMode === "separator" && options.batchSeparator) {
-    return user
-      .split(options.batchSeparator)
-      .map((s) => s.trim())
-      .filter((s) => s !== "");
-  }
-  return user.split(/\r?\n/).map((s) => s.trim());
 }
 
 /** HTML 实体转义：防裸 < 被端点的标签对齐器吃掉（& 必须最先转义） */

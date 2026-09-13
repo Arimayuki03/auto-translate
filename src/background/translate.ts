@@ -46,11 +46,6 @@ export const NO_TRANSLATION_SENTINEL = "{{NO_TRANSLATION_NEEDED}}";
  *  解析成功率高，把最坏情况的请求数从 N 压到约 N/8；仍失败的组才逐段。 */
 const SUB_BATCH_SIZE = 8;
 
-/** 构造批量提示词里的哨兵分隔行 */
-export function batchSeparatorLine(): string {
-  return BATCH_SEPARATOR;
-}
-
 /** 免 key 免费通道集合：同一时刻主用其一，另一个作为自动互切的备份 */
 const FREE_FORMATS = ["googlefree", "microsoft"] as const;
 
@@ -154,6 +149,13 @@ async function withRetry<T>(
   throw lastError;
 }
 
+/** 单个通道（API 格式 + 端点）的限速状态：令牌桶 + 429 队列级冷却 */
+interface ChannelLimiter {
+  bucket: TokenBucket;
+  /** 429 限流暂停：此时间点之前不放行该通道任何新请求（队列级冷却） */
+  pausedUntil: number;
+}
+
 export class TranslateService {
   /** 相邻两个 provider 请求的最小启动间隔（毫秒）＝请求启动限速。
    *  默认 500（≈2 请求/秒），可在设置页按中转站/服务商额度调整
@@ -162,15 +164,21 @@ export class TranslateService {
 
   private cache = new TranslationCache();
   private cacheEnabled = true;
+  /** 缓存变体：掺入影响译文结果的配置（通道格式/模型/自定义提示词）。
+   *  切换模型或修改 prompt 后旧缓存不再命中，避免「改了设置却像是没生效」的困惑；
+   *  术语表不参与——术语占位在 content 侧完成，后台缓存的原文本身已含 ⟦n⟧ token。 */
+  private cacheVariant = "";
   private active = 0;
   /** 等待队列：用指针索引代替 shift()（shift 是 O(n)） */
   private pending: Array<() => void> = [];
   private pendingHead = 0;
   /** 请求启动限速：令牌桶。rate = 每 minRequestIntervalMs 一个令牌（长期平均速率的底线），
-   *  capacity = 并发上限，允许短时突发但长期速率被钳制（借鉴 read-frog RequestQueue）。 */
-  private bucket = new TokenBucket(2, 1);
-  /** 429 限流暂停：此时间点之前不放行任何新请求（队列级冷却） */
-  private pausedUntil = 0;
+   *  capacity = 并发上限，允许短时突发但长期速率被钳制（借鉴 read-frog RequestQueue）。
+   *  按通道（格式+端点）分桶：免费通道被 429 冷却时不再连带冻结主/备 API 的请求。 */
+  private channels = new Map<string, ChannelLimiter>();
+  /** 通道新建时套用的默认速率/容量（设置刷新时同步到全部已建通道，见 configureChannels） */
+  private channelRate = 2;
+  private channelCapacity = 2;
   /** 设置缓存：避免每次翻译请求都读 chrome.storage + 解密 API Key。
    *  监听 chrome.storage.onChanged 自动刷新，设置页改动即时生效。 */
   private cachedSettings: Settings | null = null;
@@ -228,13 +236,15 @@ export class TranslateService {
     // 间隔按设置刷新（用户可按中转站额度调大），钳制下限防除零。
     const interval = Math.max(50, settings.api.minRequestIntervalMs ?? 500);
     this.minRequestIntervalMs = interval;
-    this.bucket.configure(1000 / interval, Math.min(limit, 16));
+    this.configureChannels(1000 / interval, Math.min(limit, 16));
     const results: string[] = new Array(texts.length);
     const toFetch: number[] = [];
 
     // 并发查缓存：Promise.all 代替串行 await，避免 N 条文本 = N 次串行 IPC
     const cacheChecks = await Promise.all(
-      texts.map((t) => (this.cacheEnabled ? this.cache.get(targetLang, t) : Promise.resolve(undefined)))
+      texts.map((t) =>
+        this.cacheEnabled ? this.cache.get(targetLang, t, this.cacheVariant) : Promise.resolve(undefined)
+      )
     );
     for (let i = 0; i < texts.length; i++) {
       const cached = cacheChecks[i];
@@ -380,13 +390,13 @@ export class TranslateService {
     const settings = await this.getSettingsCached();
     this.applyCacheSettings(settings);
     // 缓存命中直接整段返回（不发请求、不产增量）
-    const cached = this.cacheEnabled ? await this.cache.get(targetLang, text) : undefined;
+    const cached = this.cacheEnabled ? await this.cache.get(targetLang, text, this.cacheVariant) : undefined;
     if (cached !== undefined) return cached;
 
     const limit = Math.max(1, settings.api.maxConcurrency || 3);
     const interval = Math.max(50, settings.api.minRequestIntervalMs ?? 500);
     this.minRequestIntervalMs = interval;
-    this.bucket.configure(1000 / interval, Math.min(limit, 16));
+    this.configureChannels(1000 / interval, Math.min(limit, 16));
 
     let emitted = false;
     const emit = (delta: string): void => {
@@ -419,9 +429,10 @@ export class TranslateService {
         } catch (err) {
           lastError = err;
           if (emitted || !isRetryable(err) || signal?.aborted) break;
-          // 429 与整页翻译同样做队列级冷却，避免气泡重试继续冲击已限流的通道
+          // 429 与整页翻译同样做队列级冷却（仅限当前通道），避免气泡重试继续冲击已限流的通道
           if (err instanceof ApiError && err.code === "rate_limit") {
             this.pauseRateLimit(
+              api,
               Math.min(err.retryAfterMs ?? RATE_LIMIT_BASE_PAUSE_MS, MAX_RETRY_AFTER_MS)
             );
           }
@@ -489,7 +500,7 @@ export class TranslateService {
     freeEndpoint?: string,
     freeBackupEndpoint?: string
   ): Promise<string> {
-    await this.acquireStartSlot();
+    await this.acquireStartSlot(api);
     const provider = createProvider(api);
     const chars = messages.reduce((n, m) => n + m.content.length, 0);
     const result = await provider.chat(messages, {
@@ -529,16 +540,19 @@ export class TranslateService {
     if (!this.cacheEnabled) return 0;
     // 并发查缓存：Promise.all 代替串行 await
     const checks = await Promise.all(
-      texts.map((t) => this.cache.get(targetLang, t))
+      texts.map((t) => this.cache.get(targetLang, t, this.cacheVariant))
     );
     return checks.filter((v) => v !== undefined).length;
   }
 
-  /** 应用缓存设置（开关 / 内存条目上限 / 过期天数）：每次请求前刷新，设置页改动即时生效 */
+  /** 应用缓存设置（开关 / 内存条目上限 / 过期天数 / 变体）：每次请求前刷新，设置页改动即时生效 */
   private applyCacheSettings(settings: Settings): void {
     this.cacheEnabled = settings.cache.enabled;
     this.cache.maxEntries = Math.max(1, settings.cache.maxEntries || 5000);
     this.cache.ttlDays = Math.max(0, settings.cache.ttlDays ?? 7);
+    this.cacheVariant = fnv1aHex(
+      [settings.api.format, settings.api.model, settings.api.customSystemPrompt ?? ""].join("|")
+    );
   }
 
   /** 带缓存的 getSettings：避免每次翻译请求都读 chrome.storage + 解密 API Key。
@@ -571,7 +585,7 @@ export class TranslateService {
     translation: string
   ): Promise<void> {
     if (!this.cacheEnabled) return;
-    await this.cache.set(targetLang, text, translation);
+    await this.cache.set(targetLang, text, translation, this.cacheVariant);
   }
 
   /** 单次 API 调用：主 API 重试 → 可重试错误时切换备用 API。
@@ -635,7 +649,7 @@ export class TranslateService {
       return withRetry(
         () => this.request(api, messages, chatOpts(mode)),
         MAX_RETRIES,
-        (pauseMs) => this.pauseRateLimit(pauseMs)
+        (pauseMs) => this.pauseRateLimit(api, pauseMs)
       );
     };
 
@@ -676,7 +690,7 @@ export class TranslateService {
   private async request(api: ApiConfig, messages: ChatMessage[], chatOpts: BatchChatOptions): Promise<string> {
     // 启动限速：令牌桶把"请求启动速率"钳制住——允许短突发（≤并发数），
     // 但长期平均间隔不小于 REQUEST_MIN_INTERVAL_MS，防止瞬时高并发触发服务商限流/封号。
-    await this.acquireStartSlot();
+    await this.acquireStartSlot(api);
     const provider = createProvider(api);
     // 批量请求的生成时间随字符数增长：超时按字符数缩放（封顶 120s），
     // 避免「还在正常生成」的大批被误判超时重试、反而放大请求量
@@ -692,20 +706,44 @@ export class TranslateService {
     return result.text;
   }
 
-  /** 429 队列级冷却：暂停整个限速器，暂停窗口后最多恢复 1 个令牌（后探针），
-   *  避免恢复瞬间 burst 一堆请求冲击仍受限的 provider（借鉴 read-frog）。 */
-  private pauseRateLimit(pauseMs: number): void {
-    const now = Date.now();
-    this.pausedUntil = Math.max(this.pausedUntil, now + pauseMs);
-    this.bucket.configure(1000 / this.minRequestIntervalMs, 1);
+  /** 通道标识：同格式同端点视为同一 provider（主备即使格式相同、端点不同也互相独立） */
+  private static channelKey(api: ApiConfig): string {
+    return `${api.format}|${api.baseUrl}`;
   }
 
-  /** 令牌桶取令牌：取到返回；取不到睡到凑够一个令牌再取。 */
-  private async acquireStartSlot(): Promise<void> {
+  private channelOf(api: ApiConfig): ChannelLimiter {
+    const key = TranslateService.channelKey(api);
+    let ch = this.channels.get(key);
+    if (!ch) {
+      ch = { bucket: new TokenBucket(this.channelRate, this.channelCapacity), pausedUntil: 0 };
+      this.channels.set(key, ch);
+    }
+    return ch;
+  }
+
+  /** 设置刷新（请求间隔/并发变化）时同步到全部已建通道；新通道按新值创建 */
+  private configureChannels(rate: number, capacity: number): void {
+    this.channelRate = rate;
+    this.channelCapacity = capacity;
+    for (const ch of this.channels.values()) ch.bucket.configure(rate, capacity);
+  }
+
+  /** 429 队列级冷却（仅限触发限流的通道）：暂停窗口内不放行该通道新请求，
+   *  窗口后容量钳到 1（后探针），避免恢复瞬间 burst 一堆请求冲击仍受限的 provider
+   *  （借鉴 read-frog）。其余通道（主/备/免费互切目标）不受牵连。 */
+  private pauseRateLimit(api: ApiConfig, pauseMs: number): void {
+    const ch = this.channelOf(api);
+    ch.pausedUntil = Math.max(ch.pausedUntil, Date.now() + pauseMs);
+    ch.bucket.configure(this.channelRate, 1);
+  }
+
+  /** 令牌桶取令牌（按通道）：取到返回；取不到睡到凑够一个令牌再取。 */
+  private async acquireStartSlot(api: ApiConfig): Promise<void> {
+    const ch = this.channelOf(api);
     for (;;) {
-      const pauseWait = this.pausedUntil - Date.now();
+      const pauseWait = ch.pausedUntil - Date.now();
       if (pauseWait > 0) await sleep(pauseWait);
-      const wait = this.bucket.tryAcquire();
+      const wait = ch.bucket.tryAcquire();
       if (wait === 0) return;
       await sleep(wait);
     }

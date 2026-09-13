@@ -8,6 +8,8 @@ import { extractUnits, extractUnitsChunked } from "./extractor";
 import type { TranslationUnit } from "./extractor";
 
 const DEBOUNCE_MS = 300;
+/** 点击探测（全文档兜底扫描）的最小间隔：连续点击/选中文字不再每次都全量扫描 */
+const CLICK_SCAN_MIN_INTERVAL_MS = 1000;
 /** off / hidden / 敏感页期间 roots 不被消费（run 早退）：设上限丢弃最老的根，
  *  防止长期挂着动态页面时无界积累已脱离 DOM 的节点引用（内存泄漏）。 */
 const MAX_PENDING_ROOTS = 300;
@@ -34,7 +36,18 @@ export class PageObserver {
   /** 点击探测：点击触发的组件（下拉菜单/弹出选项等）常通过 style/class/attribute
    *  切换显隐而不产生子节点突变，childList 观察器收不到通知——点击后主动补一次扫描，
    *  让"点击之后才出现的选项"也能被翻译 */
-  private onClick = (): void => this.schedule();
+  private lastClickScan = 0;
+  private onClick = (e: MouseEvent): void => {
+    // 我们自己的 UI（工具条/气泡/角标/译文按钮）上的点击不触发扫描
+    const t = e.target;
+    if (t instanceof Element && t.closest("[data-it-ui]")) return;
+    // 兜底扫描是大页面上的大开销：限流到约每秒一次，连点不再反复全量扫描；
+    // 真实新增内容仍走 mutation 增量路径，不受此限流影响
+    const now = Date.now();
+    if (now - this.lastClickScan < CLICK_SCAN_MIN_INTERVAL_MS) return;
+    this.lastClickScan = now;
+    this.schedule();
+  };
 
   constructor(private engine: PageEngine) {
     this.lastBody = document.body;

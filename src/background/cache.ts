@@ -48,6 +48,8 @@ function parseEntryForCleanup(value: unknown): CacheEntry | undefined {
  * 译文缓存：内存（快速层）+ chrome.storage.local（磁盘持久层）。
  *  磁盘层跨会话复用，刷新/重启浏览器后仍能命中，节省 API token。
  *  条目带写入时间戳，按 ttlDays 过期（0 = 永不过期）；每日清理见 cleanupExpired。
+ *  缓存键掺入变体（通道格式/模型/自定义提示词的哈希）：影响译文结果的配置变更后
+ *  旧条目自然未命中并随每日清理淘汰，不会把旧配置的译文继续返回给用户。
  */
 export class TranslationCache {
   private memory = new Map<string, CacheEntry>();
@@ -69,8 +71,8 @@ export class TranslationCache {
     return Date.now() - ts > this.ttlDays * 24 * 60 * 60 * 1000;
   }
 
-  async get(targetLang: string, text: string): Promise<string | undefined> {
-    const key = this.cacheKey(targetLang, text);
+  async get(targetLang: string, text: string, variant = ""): Promise<string | undefined> {
+    const key = this.cacheKey(targetLang, text, variant);
     const hit = this.memory.get(key);
     if (hit) {
       // 内存层同样校验：哈希碰撞时后写的条目覆盖先写的，先写的必须判未命中
@@ -86,9 +88,9 @@ export class TranslationCache {
     return undefined;
   }
 
-  async set(targetLang: string, text: string, translation: string): Promise<void> {
+  async set(targetLang: string, text: string, translation: string, variant = ""): Promise<void> {
     if (!translation.trim()) return; // 空译文视为无效结果，不缓存（避免永久命中空串）
-    const key = this.cacheKey(targetLang, text);
+    const key = this.cacheKey(targetLang, text, variant);
     const entry: CacheEntry = { src: text, val: translation, ts: Date.now() };
     if (this.memory.size >= this.maxEntries && !this.memory.has(key)) {
       // 软上限：超出时淘汰最老一条（Map 迭代序 = 插入序）
@@ -96,9 +98,15 @@ export class TranslationCache {
       if (oldest) this.memory.delete(oldest);
     }
     this.memory.set(key, entry);
-    // 磁盘层写入失败（如 chrome.storage 配额超限）不影响翻译主流程，仅丢失持久化
-    await chrome.storage.local.set({ [key]: entry }).catch(() => undefined);
-    this.diskKeys.push(key);
+    try {
+      await chrome.storage.local.set({ [key]: entry });
+      this.diskKeys.push(key);
+    } catch {
+      // 磁盘写入失败（多为 chrome.storage.local 10MB 配额超限）：不推进 diskKeys，
+      // 否则 clear 的定点删除会遗漏从未写成功的 key。内存层照常命中，本次翻译不受影响；
+      // 每日 cleanupExpired 会收缩磁盘层，后续写入有概率恢复。
+      console.warn("[auto-translate] 译文缓存磁盘写入失败（可能已达存储配额上限）");
+    }
   }
 
   async clear(): Promise<void> {
@@ -152,7 +160,7 @@ export class TranslationCache {
     return Object.keys(all).filter((k) => k.startsWith(CACHE_PREFIX)).length;
   }
 
-  private cacheKey(targetLang: string, text: string): string {
-    return CACHE_PREFIX + fnv1aHex(`${targetLang}|${text}`);
+  private cacheKey(targetLang: string, text: string, variant: string): string {
+    return CACHE_PREFIX + fnv1aHex(`${targetLang}|${variant}|${text}`);
   }
 }

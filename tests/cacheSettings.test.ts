@@ -238,3 +238,16 @@ describe("缓存 TTL 与清理", () => {
     expect(await cache.diskCount()).toBe(1);
   });
 });
+
+describe("缓存变体（format/model/customSystemPrompt 参与缓存键）", () => {
+  it("变体不同互不命中：切换模型/修改 prompt 后旧缓存不再返回", async () => {
+    mockChrome(true);
+    const { fnv1aHex } = await import("../src/background/cache");
+    const cache = new TranslationCache();
+    const variantA = fnv1aHex("openai|model-a|");
+    const variantB = fnv1aHex("openai|model-b|");
+    await cache.set("zh-CN", "hello", "旧配置的译文", variantA);
+    expect(await cache.get("zh-CN", "hello", variantA)).toBe("旧配置的译文");
+    expect(await cache.get("zh-CN", "hello", variantB)).toBeUndefined();
+  });
+});

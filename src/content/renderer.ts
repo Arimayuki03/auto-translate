@@ -242,9 +242,13 @@ export class Renderer {
     document.body.classList.toggle("it-mode-translated", mode === "translated");
     document.body.classList.toggle("it-mode-original", mode === "original");
     // 包裹层 display 随模式更新（避免仅译文布局跳动）——用 byContainer 迭代代替 querySelectorAll
-    for (const container of this.byContainer.keys()) {
-      const transEl = this.byContainer.get(container);
-      const wrap = transEl?.closest?.(".it-wrap") as HTMLElement | null;
+    for (const [container, transEl] of this.byContainer) {
+      // 脱离文档的容器/译文及时清掉：无限滚动、虚拟列表等长会话页面下 Map 不再无界增长
+      if (!container.isConnected || !transEl.isConnected) {
+        this.byContainer.delete(container);
+        continue;
+      }
+      const wrap = transEl.closest?.(".it-wrap") as HTMLElement | null;
       if (wrap) this.applyWrapDisplay(wrap);
     }
     this.syncShadowStyles(); // body 模式类不跨 shadow 边界，shadow 内样式文本需按新模式重建
@@ -253,7 +257,10 @@ export class Renderer {
   /** 控件（按钮/选项）文字随模式切换：双语/仅译文显示译文，原文模式恢复原文 */
   private applyTextOnlyMode(): void {
     for (const c of this.controlContainers) {
-      if (!c.isConnected) continue;
+      if (!c.isConnected) {
+        this.controlContainers.delete(c); // 同 byContainer：失连即清，防泄漏
+        continue;
+      }
       if (this.mode === "original") {
         const raw = c.getAttribute("data-it-ctl-orig");
         if (raw) restoreTextNodes(c, raw);
@@ -267,7 +274,10 @@ export class Renderer {
   /** 仅译文：把每个译文块的原文文字原位替换为译文，保留结构（链接可点击、样式不变） */
   private applyTranslatedMode(): void {
     for (const [container, transEl] of this.byContainer) {
-      if (!container.isConnected || !transEl.isConnected) continue;
+      if (!container.isConnected || !transEl.isConnected) {
+        this.byContainer.delete(container);
+        continue;
+      }
       // 失败占位（双语下产生的）切到仅译文时隐藏：原文未被替换，红字错误块不该混在译文里
       if (transEl.classList.contains("it-error")) {
         transEl.classList.add("it-translated-hidden");
@@ -310,10 +320,12 @@ export class Renderer {
 
   /** 离开仅译文：还原原文文字（仅恢复文本节点，不重建 DOM 元素），显示译文元素 */
   private clearTranslatedMode(): void {
-    // 用 byContainer 迭代代替多次 querySelectorAll 全文档扫描。
-    // byContainer 覆盖了所有已翻译容器；少数遗留属性（旧版 data-it-orig-html）兜底全局扫一次。
+    // 用 byContainer 迭代代替多次 querySelectorAll 全文档扫描（byContainer 覆盖所有已翻译容器）
     for (const [container, transEl] of this.byContainer) {
-      if (!container.isConnected) continue;
+      if (!container.isConnected) {
+        this.byContainer.delete(container); // 失连即清：恢复流程无从处理，留着只会泄漏
+        continue;
+      }
       // 包裹容器：恢复原文可见，隐藏译文
       if (container.hasAttribute("data-it-orig-hidden")) {
         container.removeAttribute("data-it-orig-hidden");
@@ -336,7 +348,6 @@ export class Renderer {
         const raw = target.getAttribute("data-it-orig-text");
         if (raw) restoreTextNodes(target, raw);
         target.removeAttribute("data-it-orig-text");
-        target.removeAttribute("data-it-orig-html");
         target.removeAttribute("data-it-inplace");
       }
       // 显示译文元素（离开仅译文）
@@ -344,13 +355,7 @@ export class Renderer {
         transEl.classList.remove("it-translated-hidden");
       }
     }
-    // 兼容旧版：仍在用 data-it-orig-html 的元素（升级前已进入仅译文模式的页面）
-    document.querySelectorAll("[data-it-orig-html]").forEach((el) => {
-      el.innerHTML = el.getAttribute("data-it-orig-html") ?? "";
-      el.removeAttribute("data-it-orig-html");
-      el.removeAttribute("data-it-inplace");
-    });
-    // 修复非包裹容器的 byContainer 引用：innerHTML 恢复后译文元素是新建节点，
+    // 修复非包裹容器的 byContainer 引用：仅译文替换后译文元素是新建节点，
     // 旧引用已脱离 DOM，不更新会导致下次切换到仅译文时 in-place 替换失效
     for (const [container, transEl] of this.byContainer) {
       if (!transEl.isConnected) {
@@ -497,11 +502,6 @@ export class Renderer {
     if (raw) {
       restoreTextNodes(target, raw);
       target.removeAttribute("data-it-orig-text");
-    }
-    // 兼容旧版 data-it-orig-html
-    if (target.hasAttribute("data-it-orig-html")) {
-      target.innerHTML = target.getAttribute("data-it-orig-html") ?? "";
-      target.removeAttribute("data-it-orig-html");
     }
     target.removeAttribute("data-it-inplace");
     container.removeAttribute("data-it-src");

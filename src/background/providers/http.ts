@@ -135,8 +135,27 @@ export async function postJson<T = Record<string, unknown>>(
     console.warn("[auto-translate] API 请求失败", error.diagnostic, error.message);
     throw error;
   }
+  const raw = await res.text().catch(() => "");
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    // 中转站返回 HTML/空体等非 JSON 内容：包成 bad_response 走统一错误分级与脱敏诊断
+    // （此前裸抛 SyntaxError，无诊断、不归类，用户只看到 "Unexpected token ..."）
+    throw new ApiError(
+      "bad_response",
+      "响应不是有效 JSON（请检查 BaseURL 是否指向正确的 API 端点）",
+      {
+        ...makeDiagnostic(provider, url, {
+          status: res.status,
+          responsePreview: redactSecrets(raw, url, headers).slice(0, 300),
+        }),
+        code: "bad_response",
+      }
+    );
+  }
   return {
-    data: (await res.json()) as T,
+    data: data as T,
     diagnostic: makeDiagnostic(provider, url, { status: res.status }),
   };
 }

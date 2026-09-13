@@ -213,6 +213,32 @@ describe("导出 / 导入往返", () => {
     await expect(importSettings(null)).rejects.toThrow("不是有效的设置文件");
     await expect(importSettings([1, 2])).rejects.toThrow("不是有效的设置文件");
   });
+
+  it("导入含类型错乱字段时不投毒：非法字段剔除、缺失段回退默认值", async () => {
+    // 此前导入只校验 api.format：手工编辑的文件若把 sites.blacklist 写成字符串等，
+    // 落盘后 content 侧 shouldTranslatePage 调 .some 抛错，所有页面注入失败
+    mockStorage();
+    await importSettings({
+      api: {
+        format: "openai",
+        baseUrl: "https://api.example.com/v1",
+        model: "m",
+        temperature: "hot", // 非数字 → 剔除
+      },
+      translate: { targetLang: "ja", minTextLength: "3" }, // 字符串数字 → 剔除
+      sites: { whitelist: "docs.example.com", blacklist: [42, "ok.example.com"] },
+      cache: "invalid",
+    });
+    const s = await getSettings();
+    expect(s.api.baseUrl).toBe("https://api.example.com/v1");
+    expect(s.api.model).toBe("m");
+    expect(s.api.temperature).toBe(0.3); // 默认值
+    expect(s.translate.targetLang).toBe("ja");
+    expect(s.translate.minTextLength).toBe(4); // 默认值
+    expect(s.sites.whitelist).toEqual([]); // 字符串名单整体剔除
+    expect(s.sites.blacklist).toEqual(["ok.example.com"]); // 非字符串项被过滤
+    expect(s.cache.enabled).toBe(true); // cache 段无效 → 整段默认
+  });
 });
 
 describe("自定义翻译 prompt（api.customSystemPrompt）兼容性", () => {
