@@ -19,6 +19,11 @@ const URL_POLL_MS = 1000;
 /** 同一 URL 在这段时间内的第二次换页信号视为重复触发（pushState 与 body 替换会前后脚触发） */
 const DEDUP_MS = 1000;
 
+/** 去掉 hash 后的 URL：用于识别「仅锚点/hash 变化」的同页跳转 */
+function stripHash(url: string): string {
+  return url.replace(/#.*$/, "");
+}
+
 export interface SpaNavigationOptions {
   engine: PageEngine;
   renderer: Renderer;
@@ -42,6 +47,13 @@ export function setupSpaNavigation(opts: SpaNavigationOptions): void {
     const sameUrl = location.href === lastNavUrl;
     // 非强制（pushState/replaceState/popstate/轮询）：同 URL 的微调不算换页
     if (!force && sameUrl) return;
+    // 仅 hash 变化（已译页点击 #toc 锚点、hash 路由的浅层跳转）：页面主体未换，
+    // 清空整页译文只会闪回原文并浪费 token。hash 路由真正换内容时 <body> 或子树会被
+    // 整体替换，observer 的 force 信号 / mutation 增量路径会兜底重置与补译。
+    if (!force && stripHash(location.href) === stripHash(lastNavUrl)) {
+      lastNavUrl = location.href; // 吸收 hash 变化，URL 轮询不再反复进入本函数
+      return;
+    }
     // 强制（observer 上报 body 替换）：同一 URL 短期内已被处理过 → 同一导航的重复信号，
     // 不重复 reset（避免清掉刚译好的内容闪回原文），但仍兜底重译一次
     const duplicate = force && sameUrl && Date.now() - lastNavAt < DEDUP_MS;

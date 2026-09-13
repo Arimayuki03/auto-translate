@@ -65,6 +65,20 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
+/** 轮询等待条件成立：engine 的提取/调度是多层异步链（chunked 提取按时间片让出），
+ *  固定轮数的 flush 在系统高负载下会提前返回，造成偶发失败 */
+async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+function translateCallCount(): number {
+  return sendMessage.mock.calls.filter((c) => c[0]?.type === "translate").length;
+}
+
 function cancelCalls(): { type: string; sessionId: number }[] {
   return sendMessage.mock.calls
     .map((c) => c[0])
@@ -75,7 +89,7 @@ describe("会话取消", () => {
   it("translate 请求携带 sessionId（= 引擎 generation）", async () => {
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll();
-    await flush();
+    await waitFor(() => translateCallCount() > 0);
     const translateMsgs = sendMessage.mock.calls.map((c) => c[0]).filter((m) => m?.type === "translate");
     expect(translateMsgs.length).toBeGreaterThan(0);
     for (const m of translateMsgs) {
@@ -86,10 +100,11 @@ describe("会话取消", () => {
   it("还原时发出 cancel-translation，sessionId 为还原前的会话", async () => {
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll();
-    await flush();
+    await waitFor(() => translateCallCount() > 0);
     expect(cancelCalls()).toHaveLength(0);
 
     engine.restore();
+    await waitFor(() => cancelCalls().length > 0);
     const cancels = cancelCalls();
     expect(cancels.length).toBeGreaterThan(0);
     expect(typeof cancels[0].sessionId).toBe("number");
@@ -98,9 +113,10 @@ describe("会话取消", () => {
   it("SPA 换页（resetForNavigation）也发出 cancel-translation", async () => {
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll();
-    await flush();
+    await waitFor(() => translateCallCount() > 0);
 
     engine.resetForNavigation();
+    await waitFor(() => cancelCalls().length > 0);
     expect(cancelCalls().length).toBeGreaterThan(0);
   });
 
@@ -112,6 +128,21 @@ describe("会话取消", () => {
 
     engine.restore();
     expect(engine["generation"]).toBe(genBefore + 1);
+  });
+
+  it("SPA 换页打断在途翻译：state 兜底回到 done（工具条按钮不永久卡死）", async () => {
+    // 在途请求永不完成：模拟翻译进行中换页（在途批次因代次作废不会走 afterGroup）
+    sendMessage.mockImplementation(async (msg: { type: string; texts?: string[]; id?: string }) => {
+      if (msg?.type === "check-cache") return { cachedCount: 0 };
+      if (msg?.type === "translate") return new Promise(() => undefined);
+      return undefined;
+    });
+    const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
+    await engine.translateAll();
+    await waitFor(() => engine.state === "translating");
+
+    engine.resetForNavigation();
+    expect(engine.state).toBe("done");
   });
 
   it("还原时在途批次完成：不污染 doneTexts、无 data-it-processing 残留，重新翻译不缺段（F-2）", async () => {
@@ -131,7 +162,7 @@ describe("会话取消", () => {
 
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll(); // 返回时 fetchBatch 已发起、响应未到
-    await flush();
+    await waitFor(() => resolveDeferred !== undefined); // 高负载下异步链可能长于固定 flush
     expect(resolveDeferred).toBeTruthy();
 
     engine.restore(); // generation++，doneTexts 清空，清理处理标记
@@ -145,11 +176,12 @@ describe("会话取消", () => {
 
     // 重新翻译：之前在途的段落必须能再次被调度并完成
     await engine.translateAll();
+    await waitFor(() => translateCallCount() >= 2); // 第二轮确实重新发起了请求
     await flush();
     expect(engine.isSkipped("Hello world paragraph.")).toBe(true);
     const translateMsgs = sendMessage.mock.calls
       .map((c) => c[0])
       .filter((m) => m?.type === "translate");
-    expect(translateMsgs.length).toBeGreaterThanOrEqual(2); // 第二轮确实重新发起了请求
+    expect(translateMsgs.length).toBeGreaterThanOrEqual(2);
   });
 });

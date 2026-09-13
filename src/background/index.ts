@@ -14,6 +14,7 @@ import type { ApiConfig } from "../shared/types";
 import { createProvider } from "./providers";
 import { TranslateService, TranslationCancelledError } from "./translate";
 import { ApiError } from "./providers/http";
+import { beginKeepAlive, endKeepAlive } from "./keepAlive";
 
 console.log("[auto-translate] background service worker 已启动");
 
@@ -78,6 +79,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const req = message as TranslateRequestMessage;
     const controller = new AbortController();
     registerController(req.sessionId, controller);
+    // 整批翻译可能远超 SW 空闲回收窗口（30s）：在途期间周期性重置空闲计时器，
+    // 否则 sendResponse 通道随 worker 一起被回收，整批结果丢失
+    beginKeepAlive();
     translateService
       .translate(req.texts, req.targetLang, req.context, controller.signal)
       .then(
@@ -99,7 +103,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           } as TranslateResponseMessage);
         }
       )
-      .finally(() => unregisterController(req.sessionId, controller));
+      .finally(() => {
+        endKeepAlive();
+        unregisterController(req.sessionId, controller);
+      });
     return true;
   }
 
@@ -196,6 +203,8 @@ chrome.runtime.onConnect.addListener((port) => {
     const msg = raw as StreamStartMessage;
     if (msg?.type !== "stream-start") return;
     started = true;
+    // 流式首 delta 前可能长时间静默（排队限速/模型生成）：同样需要保活
+    beginKeepAlive();
     translateService
       .translateStream(
         msg.text,
@@ -229,7 +238,8 @@ chrome.runtime.onConnect.addListener((port) => {
             // 同上
           }
         }
-      );
+      )
+      .finally(() => endKeepAlive());
   });
   port.onDisconnect.addListener(() => controller.abort());
 });

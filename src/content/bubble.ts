@@ -91,7 +91,10 @@ export function initBubble(
   let scrollRaf = 0;
   window.addEventListener(
     "scroll",
-    () => {
+    (e) => {
+      // 捕获阶段会收到子元素的滚动事件：长译文在 .it-bubble-body（overflow:auto）内
+      // 滚动阅读时不能把气泡关掉，只有页面本身滚动才关闭
+      if (bubble && e.target instanceof Node && bubble.contains(e.target)) return;
       if (scrollRaf) return;
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = 0;

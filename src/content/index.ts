@@ -152,11 +152,12 @@ async function main(): Promise<void> {
   }
 }
 
-/** 域名匹配：精确，或互为子域名（github.com ↔ gist.github.com 等） */
+/** 域名匹配：精确，或 host 是条目的子域（条目 github.com 覆盖 gist.github.com）。
+ *  只做单向匹配：条目是 host 的子域时不匹配——黑名单条目 a.example.com 不应封禁整个
+ *  example.com，白名单同理（否则给一个子域放行等于给整个主域放行）。 */
 function matchesDomain(host: string, entry: string): boolean {
   const d = entry.toLowerCase().replace(/^www\./, "");
-  if (host === d) return true;
-  return host.endsWith("." + d) || d.endsWith("." + host);
+  return host === d || host.endsWith("." + d);
 }
 
 /** 页面级守卫：黑白名单（命中则整页禁用；敏感页判断改为动态，见 isSensitive） */

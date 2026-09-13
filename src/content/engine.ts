@@ -347,6 +347,10 @@ export class PageEngine {
     this.scheduledContainers.clear();
     this.lazyPending = [];
     clearTimeout(this.lazyTimer);
+    // 在途批次因代次作废提前返回时不会走 afterGroup，state 会永久卡在 translating
+    // （工具条「翻译/还原」按钮禁用且无恢复路径）。兜底回到 done：保留「翻译态」语义
+    // （SPA 重译判定 state !== "off" 依然成立），同时解除按钮禁用；新页敏感/后台时用户仍可手动还原。
+    if (this.state === "translating") this.setState("done");
   }
 
   /** 一键还原 */
