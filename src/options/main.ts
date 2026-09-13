@@ -111,6 +111,9 @@ async function loadForm(): Promise<void> {
   select("style-theme").value = s.translate.style ?? "gray";
   ($("custom-css") as HTMLTextAreaElement).value = s.translate.customCss ?? "";
   ($("translate-attributes") as HTMLInputElement).checked = s.translate.translateAttributes ?? true;
+  ($("tts-enabled") as HTMLInputElement).checked = s.tts.enabled;
+  select("tts-voice").value = s.tts.voice;
+  select("tts-rate").value = String(s.tts.rate);
   ($("sensitive-pages") as HTMLInputElement).checked = s.security.sensitivePages;
   ($("whitelist") as HTMLTextAreaElement).value = s.sites.whitelist.join("\n");
   ($("blacklist") as HTMLTextAreaElement).value = s.sites.blacklist.join("\n");
@@ -200,6 +203,12 @@ async function readForm(): Promise<Settings> {
     sites: {
       whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
       blacklist: parseDomainList($("blacklist") as HTMLTextAreaElement),
+    },
+    tts: {
+      ...current.tts,
+      enabled: ($("tts-enabled") as HTMLInputElement).checked,
+      voice: select("tts-voice").value,
+      rate: parseInt(select("tts-rate").value, 10) || 0,
     },
     security: {
       ...current.security,

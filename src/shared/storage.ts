@@ -40,6 +40,7 @@ export const DEFAULT_SETTINGS: Settings = {
     translateAttributes: true,
   },
   sites: { whitelist: [], blacklist: [] },
+  tts: { enabled: true, voice: "", rate: 0 },
   security: { encryptApiKey: true, sensitivePages: false },
   cache: { enabled: true, maxEntries: 5000, ttlDays: 7 },
 };
@@ -182,6 +183,11 @@ function sanitizeImportSettings(raw: unknown): Settings {
       whitelist: strArr,
       blacklist: strArr,
     }) as unknown as Partial<Settings["sites"]>,
+    tts: pick(r.tts, {
+      enabled: bool,
+      voice: str,
+      rate: num,
+    }) as unknown as Partial<Settings["tts"]>,
     security: pick(r.security, {
       encryptApiKey: bool,
       sensitivePages: bool,
@@ -234,6 +240,7 @@ type SettingsPatch = {
   backupApi?: Partial<ApiConfig>;
   translate?: Partial<Settings["translate"]>;
   sites?: Partial<Settings["sites"]>;
+  tts?: Partial<Settings["tts"]>;
   security?: Partial<Settings["security"]>;
   cache?: Partial<Settings["cache"]>;
 };
@@ -247,6 +254,7 @@ function mergeSettings(base: Settings, patch: SettingsPatch): Settings {
     backupApi: patch.backupApi ? { ...api, ...patch.backupApi } : undefined,
     translate: { ...base.translate, ...(patch.translate ?? {}) },
     sites: { ...base.sites, ...(patch.sites ?? {}) },
+    tts: { ...base.tts, ...(patch.tts ?? {}) },
     security: { ...base.security, ...(patch.security ?? {}) },
     cache: { ...base.cache, ...(patch.cache ?? {}) },
   };

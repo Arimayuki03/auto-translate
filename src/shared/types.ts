@@ -10,6 +10,16 @@ export type DisplayMode = "bilingual" | "translated" | "original";
 /** 译文样式主题：灰字（默认）/ 描边（空心字）/ 虚线下划线 / 模糊（悬停显形） */
 export type TranslationStyle = "gray" | "outline" | "underline" | "blur";
 
+/** 划词朗读（TTS）设置：Edge TTS 免费合成，无需 API Key */
+export interface TtsSettings {
+  /** 划词气泡显示「朗读」按钮 */
+  enabled: boolean;
+  /** 显式指定 Edge TTS 声音名；空串 = 按目标语言自动选择 */
+  voice: string;
+  /** 语速调整百分比（-50 ~ 100），0 = 正常语速 */
+  rate: number;
+}
+
 /** API 连接配置（主 / 备用共用） */
 export interface ApiConfig {
   format: ApiFormat;
@@ -63,6 +73,8 @@ export interface Settings {
     whitelist: string[];
     blacklist: string[];
   };
+  /** 划词朗读（TTS）：气泡「朗读」按钮的声音/语速 */
+  tts: TtsSettings;
   security: {
     encryptApiKey: boolean;
     sensitivePages: boolean;

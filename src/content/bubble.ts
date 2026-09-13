@@ -1,8 +1,10 @@
-/** 划词翻译气泡（F-010）：选中文本 → 流式译文气泡（逐字增量），可拖动/复制/关闭/重试 */
+/** 划词翻译气泡（F-010）：选中文本 → 流式译文气泡（逐字增量），可拖动/复制/关闭/重试/朗读 */
 import type { PageEngine } from "./engine";
+import type { TtsSettings } from "../shared/types";
 import { getSettings } from "../shared/storage";
 import { translateTextStream } from "./translate";
 import { copyText, isInsideOurUI, makeDraggable } from "./ui";
+import { TtsController } from "./tts";
 
 const DEDUP_WINDOW_MS = 3000;
 const MAX_RECENT = 100;
@@ -10,14 +12,42 @@ const MAX_RECENT = 100;
 export function initBubble(
   engine: PageEngine,
   translateOnSelect: boolean,
-  isSensitive?: () => boolean
+  isSensitive?: () => boolean,
+  tts?: TtsSettings
 ): void {
   let bubble: HTMLElement | null = null;
   const recent = new Map<string, number>();
   /** 在途流式翻译的取消函数：气泡任何形式的关闭都断开 Port → background 中止在途请求 */
   let activeCancel: (() => void) | null = null;
+  /** 朗读控制器：全局同一时刻至多一条播放（关闭气泡即停止）；状态直接刷到当前气泡按钮上 */
+  let speakBtn: HTMLButtonElement | null = null;
+  const ttsCtl = new TtsController((state, err) => {
+    if (!speakBtn) return;
+    speakBtn.textContent =
+      state === "fetching" ? "生成中…" : state === "playing" ? "停止" : state === "error" ? "朗读失败" : "朗读";
+    speakBtn.title = state === "error" ? err || "朗读失败" : "朗读译文";
+  });
+
+  /** 挂「朗读」按钮（tts.enabled 时）：读气泡最终译文，流式未结束/失败态不可读 */
+  function attachSpeakButton(bubbleEl: HTMLElement, eng: PageEngine): void {
+    if (!tts?.enabled) return;
+    const actions = bubbleEl.querySelector(".it-bubble-actions");
+    if (!actions) return;
+    const speak = document.createElement("button");
+    speak.textContent = "朗读";
+    speak.title = "朗读译文";
+    speak.addEventListener("click", () => {
+      if (bubbleEl.classList.contains("it-bubble-loading")) return; // 流式翻译尚未结束
+      const body = bubbleEl.querySelector(".it-bubble-body");
+      if (body?.querySelector(".it-retry")) return; // 失败态没有可读的译文
+      void ttsCtl.toggle(body?.textContent ?? "", eng.targetLanguage);
+    });
+    actions.prepend(speak);
+    speakBtn = speak;
+  }
 
   function close(): void {
+    ttsCtl.stop();
     activeCancel?.();
     activeCancel = null;
     bubble?.remove();
@@ -31,6 +61,15 @@ export function initBubble(
       if (now - ts >= DEDUP_WINDOW_MS) recent.delete(text);
       else break; // Map 迭代序 = 插入序，遇到未过期的即可停（近似 LRU）
     }
+  }
+
+  /** 构建气泡、定位、挂朗读按钮、发起流式翻译（两条划词路径共用） */
+  function openBubble(rect: DOMRect, text: string, eng: PageEngine): void {
+    bubble = buildBubble(close);
+    position(bubble, rect);
+    makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
+    attachSpeakButton(bubble, eng);
+    void renderTranslation(bubble, text, eng, () => (activeCancel = null));
   }
 
   document.addEventListener("mouseup", (e) => {
@@ -58,10 +97,7 @@ export function initBubble(
 
     if (translateOnSelect) {
       close(); // 连续划词：取消上一条仍在途的流式请求，再开新气泡
-      bubble = buildBubble(close);
-      position(bubble, rect);
-      makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
-      void renderTranslation(bubble, text, engine, () => (activeCancel = null));
+      openBubble(rect, text, engine);
     } else {
       // 先显示一个小「译」按钮，点击才翻译
       const btn = document.createElement("button");
@@ -73,10 +109,7 @@ export function initBubble(
       position(btn, rect);
       btn.addEventListener("click", () => {
         btn.remove();
-        bubble = buildBubble(close);
-        position(bubble, rect);
-        makeDraggable(bubble, bubble.querySelector(".it-bubble-header") as HTMLElement);
-        void renderTranslation(bubble, text, engine, () => (activeCancel = null));
+        openBubble(rect, text, engine);
       });
     }
   });

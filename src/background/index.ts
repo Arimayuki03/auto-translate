@@ -6,15 +6,20 @@ import type {
   StreamStartMessage,
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
+  TtsPlayMessage,
+  TtsSynthesizeMessage,
   TranslateRequestMessage,
   TranslateResponseMessage,
 } from "../shared/messages";
 import { STREAM_PORT_NAME } from "../shared/messages";
 import type { ApiConfig } from "../shared/types";
+import { getSettings } from "../shared/storage";
 import { createProvider } from "./providers";
 import { TranslateService, TranslationCancelledError } from "./translate";
 import { ApiError } from "./providers/http";
 import { beginKeepAlive, endKeepAlive } from "./keepAlive";
+import { synthesizeSpeech } from "./edgeTts";
+import { ttsPlay, ttsStop } from "./ttsPlayback";
 
 console.log("[auto-translate] background service worker 已启动");
 
@@ -177,6 +182,54 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) =>
         sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
       );
+    return true;
+  }
+
+  // ===== 划词朗读 TTS =====
+
+  // 合成：Edge TTS 免费（无 Key）；声音/语速按设置解析（用户显式声音 > 目标语言自动）
+  if (message?.type === "tts-synthesize") {
+    const req = message as TtsSynthesizeMessage;
+    getSettings()
+      .then((settings) =>
+        synthesizeSpeech(req.text, req.targetLang, {
+          userVoice: settings.tts.voice,
+          rate: settings.tts.rate,
+        })
+      )
+      .then(
+        ({ audioBase64, contentType }) =>
+          sendResponse({ id: req.id, ok: true, audioBase64, contentType }),
+        (err) =>
+          sendResponse({
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          })
+      );
+    return true;
+  }
+
+  // 播放：转发 offscreen 文档，播放结束/被停时回包
+  if (message?.type === "tts-play") {
+    const req = message as TtsPlayMessage;
+    ttsPlay(req).then(
+      ({ finished }) => sendResponse({ id: req.id, ok: true, finished }),
+      (err) =>
+        sendResponse({
+          id: req.id,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        })
+    );
+    return true;
+  }
+
+  // 停止当前播放（气泡关闭 / 点「停止」）：无在途播放时 no-op，同步回包
+  if (message?.type === "tts-stop") {
+    ttsStop()
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: true }));
     return true;
   }
 

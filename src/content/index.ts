@@ -78,7 +78,7 @@ async function main(): Promise<void> {
       viewportLazy: settings.translate.viewportLazy,
     });
 
-    initBubble(engine, settings.translate.translateOnSelect, isSensitive);
+    initBubble(engine, settings.translate.translateOnSelect, isSensitive, settings.tts);
     initInput(engine, settings.translate.translateInput, isSensitive);
     // 悬停翻译：仅顶层 frame；整页未翻译时悬停块级容器出「译」角标，点击只译该段
     initHoverTranslate({ engine, isSensitive });

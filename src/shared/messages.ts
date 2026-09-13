@@ -145,3 +145,50 @@ export type StreamPortMessage =
   | StreamDeltaMessage
   | StreamDoneMessage
   | StreamErrorMessage;
+
+// ===== 划词朗读 TTS（content → background → offscreen 播放）=====
+
+/** 合成一段语音（Edge TTS 免费，background 完成；声音/语速按设置解析） */
+export interface TtsSynthesizeMessage {
+  type: "tts-synthesize";
+  id: string;
+  text: string;
+  /** 目标语言（气泡译文的语言，用于自动选声音）：zh-CN / en / ja / ko … */
+  targetLang: string;
+}
+
+export interface TtsSynthesizeResponseMessage {
+  id: string;
+  ok: boolean;
+  /** MP3 音频的 base64（audio-24khz-48kbitrate-mono-mp3） */
+  audioBase64?: string;
+  contentType?: string;
+  error?: string;
+}
+
+/** 播放已合成的音频（background 转发到 offscreen 文档；响应在播放结束/被停止时回） */
+export interface TtsPlayMessage {
+  type: "tts-play";
+  id: string;
+  /** 播放请求 id：仅用于标识一次播放，停止时全局只停当前一条 */
+  requestId: string;
+  audioBase64: string;
+  contentType: string;
+}
+
+export interface TtsPlayResponseMessage {
+  id: string;
+  ok: boolean;
+  /** true = 播放完成；false + error = 播放失败 */
+  finished?: boolean;
+  error?: string;
+}
+
+/** 停止当前播放（气泡关闭 / 点「停止」时发出；无在途播放时为 no-op） */
+export interface TtsStopMessage {
+  type: "tts-stop";
+}
+
+export interface TtsStopResponseMessage {
+  ok: boolean;
+}
