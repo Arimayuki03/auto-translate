@@ -20,3 +20,7 @@ npm-debug.log*
 .idea/
 .DS_Store
 Thumbs.db
+
+# 参考资料 / 测试产物（勿提交）
+read-frog-main/
+.qa/
