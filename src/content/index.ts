@@ -2,7 +2,13 @@
 import type { ItCommandMessage } from "../shared/messages";
 import { getSettings } from "../shared/storage";
 import type { Settings } from "../shared/types";
-import { currentHost, currentPageKey, getDisabledPages, getPerSite, setPageDisabled } from "./perSite";
+import {
+  currentHost,
+  currentPageKey,
+  getDisabledPages,
+  getPerSite,
+  setPageDisabled,
+} from "./perSite";
 import { PageEngine } from "./engine";
 import { PageObserver } from "./observer";
 import { Renderer } from "./renderer";
@@ -26,7 +32,8 @@ async function main(): Promise<void> {
 
   // 当前 URL 是否为凭据/敏感页（登录/密码/2FA/支付等）。换页后动态重新判断（不是只判断一次）。
   const isSensitive = (): boolean =>
-    settings.security.sensitivePages && CREDENTIAL_RE.test(location.hostname + " " + location.pathname);
+    settings.security.sensitivePages &&
+    CREDENTIAL_RE.test(location.hostname + " " + location.pathname);
 
   // 按站点还原上次的翻译设置（目标语言 / 显示模式）；换页后动态重新判断
   const per = await getPerSite(currentHost());
@@ -40,7 +47,7 @@ async function main(): Promise<void> {
   const disabledPages = await getDisabledPages();
   const isPageDisabled = (): boolean => disabledPages.has(currentPageKey());
 
-  const renderer = new Renderer(settings.translate.displayMode);
+  const renderer = new Renderer(settings.translate.displayMode, settings.translate.targetLang);
   renderer.setMode(settings.translate.displayMode);
   const engine = new PageEngine(renderer, settings);
   let toolbar = new Toolbar(engine);

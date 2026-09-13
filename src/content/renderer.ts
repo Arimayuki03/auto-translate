@@ -8,8 +8,16 @@ import type { TranslationUnit } from "./extractor";
 
 /** 父级为这些标签时译文插到容器内部（块级兄弟会破坏列表/表格结构） */
 const RESTRICTED_PARENTS = new Set([
-  "TABLE", "THEAD", "TBODY", "TFOOT", "TR", "COLGROUP",
-  "UL", "OL", "DL", "MENU",
+  "TABLE",
+  "THEAD",
+  "TBODY",
+  "TFOOT",
+  "TR",
+  "COLGROUP",
+  "UL",
+  "OL",
+  "DL",
+  "MENU",
 ]);
 
 /** 元素自身是列表/表格项，不能包（包裹层会成为其父级的非法子元素） */
@@ -19,6 +27,8 @@ const NON_WRAPPABLE = new Set(["LI", "TD", "TH", "DD", "DT", "TR", "CAPTION"]);
 export interface ContainerStyle {
   width: number;
   fontSize: string;
+  /** computed line-height（可能是 "normal"，解析失败走 fallback） */
+  lineHeight: string;
   fontWeight: string;
   fontStyle: string;
   fontFamily: string;
@@ -38,6 +48,7 @@ export function precomputeStyles(units: TranslationUnit[]): Map<HTMLElement, Con
     map.set(c, {
       width: c.clientWidth,
       fontSize: cs.fontSize,
+      lineHeight: cs.lineHeight,
       fontWeight: cs.fontWeight,
       fontStyle: cs.fontStyle,
       fontFamily: cs.fontFamily,
@@ -50,25 +61,35 @@ export function precomputeStyles(units: TranslationUnit[]): Map<HTMLElement, Con
 
 export class Renderer {
   private mode: DisplayMode;
+  /** 目标语言：占位高度估算与 chunk 分隔符按语言调整 */
+  private targetLang: string;
   /** 容器 → 当前译文/占位元素（包裹内或行内） */
   private byContainer = new Map<HTMLElement, HTMLElement>();
   /** 容器 → 控件原文/译文（data-it-ctl-orig/trans 的镜像，供模式切换快速遍历） */
   private controlContainers = new Set<HTMLElement>();
 
-  constructor(mode: DisplayMode) {
+  constructor(mode: DisplayMode, targetLang = "zh-CN") {
     this.mode = mode;
+    this.targetLang = targetLang;
   }
 
-  /** 预留译文空间：插入不可见占位（估算高度），填充时不引起页面跳动。
+  /** 目标语言切换（工具条换语言时同步，后续填充按新语言渲染） */
+  setTargetLang(lang: string): void {
+    this.targetLang = lang;
+  }
+
+  /** 预留译文空间：插入占位（骨架屏 + 估算高度），填充时不引起页面跳动。
    *  style：调用方在写 DOM 前预读的样式信息，避免循环里读 getComputedStyle 触发整页重排。 */
   reserve(unit: TranslationUnit, style?: ContainerStyle): void {
     if (!unit.container.isConnected) return; // 容器已被页面移除，丢弃
     if (unit.textOnly) return; // 控件原位替换文字，无需占位
     if (this.byContainer.has(unit.container)) return;
+    const inline = isCompactUILabel(unit);
     const el = document.createElement("span");
     el.className = "it-translated it-pending";
+    if (inline) el.classList.add("it-inline"); // 行内占位与填充后的 it-inline 同构，不撑破行
     el.setAttribute("data-it-unit", unit.id);
-    el.style.minHeight = estimateHeight(unit, style);
+    el.style.minHeight = estimateHeight(unit, style, this.targetLang, inline);
     this.matchSourceFont(el, style);
     this.insert(unit, el, style);
     this.byContainer.set(unit.container, el);
@@ -101,12 +122,16 @@ export class Renderer {
       el.classList.add("it-inline");
       el.textContent = chunkResults.map((c) => c.trim()).join(" / ");
     } else {
-      for (const chunk of chunkResults) {
+      // 多 chunk 流式拼接为一个自然段（与原文块的阅读形态一致）：
+      // 非 CJK 目标语言在句子块之间补空格（CJK 无词间空格的习惯）
+      const needsSpace = !CJK_TARGET_RE.test(this.targetLang);
+      chunkResults.forEach((chunk, i) => {
+        if (i > 0 && needsSpace) el.appendChild(document.createTextNode(" "));
         const s = document.createElement("span");
         s.className = "it-chunk";
         s.textContent = chunk.trim();
         el.appendChild(s);
-      }
+      });
     }
     this.applyToContainer(unit.container);
   }
@@ -147,7 +172,10 @@ export class Renderer {
    *  译文存 data-it-ctl-trans，供模式切换与还原使用。 */
   private fillTextOnly(unit: TranslationUnit, chunkResults: string[]): void {
     const c = unit.container;
-    const trans = chunkResults.map((s) => s.trim()).filter(Boolean).join(" ");
+    const trans = chunkResults
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(" ");
     if (!trans) return; // 空译文保留原文
     if (!c.hasAttribute("data-it-ctl-orig")) {
       c.setAttribute("data-it-ctl-orig", JSON.stringify(captureTextNodes(c)));
@@ -294,7 +322,10 @@ export class Renderer {
         transEl.classList.add("it-translated-hidden");
       }
       // 内部插入 / 行内容器：恢复文本节点
-      if (container.hasAttribute("data-it-inplace") && !container.parentElement?.classList.contains("it-wrap")) {
+      if (
+        container.hasAttribute("data-it-inplace") &&
+        !container.parentElement?.classList.contains("it-wrap")
+      ) {
         const target = getSourceTarget(container);
         const raw = target.getAttribute("data-it-orig-text");
         if (raw) restoreTextNodes(target, raw);
@@ -319,7 +350,7 @@ export class Renderer {
       if (!transEl.isConnected) {
         const unitId = transEl.getAttribute("data-it-unit");
         const newEl = unitId
-          ? (container.querySelector<HTMLElement>(`[data-it-unit="${unitId}"]`))
+          ? container.querySelector<HTMLElement>(`[data-it-unit="${unitId}"]`)
           : null;
         if (newEl) {
           this.byContainer.set(container, newEl);
@@ -499,26 +530,41 @@ function isConstrainedDisplay(d: string): boolean {
 /** 链接/折叠摘要/导航/页脚标签一律行内；正文列表项超过 24 字符仍用块级 */
 function isCompactUILabel(unit: TranslationUnit): boolean {
   const c = unit.container;
-  if (
-    c.tagName === "A" ||
-    c.tagName === "SUMMARY" ||
-    c.closest("nav, header, footer")
-  ) {
+  if (c.tagName === "A" || c.tagName === "SUMMARY" || c.closest("nav, header, footer")) {
     return unit.text.length <= 40;
   }
   if (c.tagName === "LI") return unit.text.length <= 24;
   return false;
 }
 
-/** 估算译文占位高度：按容器宽度与全角字符密度，保证预留空间贴近实际。
- *  style：调用方在写 DOM 前预读的样式；缺省时才回退读 getComputedStyle（会触发重排）。 */
-function estimateHeight(unit: TranslationUnit, style?: ContainerStyle): string {
+/** 目标语言是否为 CJK（中文/日文/韩文）：决定 chunk 间分隔与占位长度估算 */
+const CJK_TARGET_RE = /^(zh|ja|ko)/i;
+const CJK_CHAR_RE = /[\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af\u4e00-\u9fff]/g;
+
+/** 按目标语言估算译文字符数：拉丁文本 → 中文约 2 字/词；同语系按长度微放大。
+ *  比直接用原文长度更贴近真实译文，占位高度更准、填充时几乎不再跳动。 */
+function estimateTranslatedLength(text: string, targetLang: string): number {
+  if (!CJK_TARGET_RE.test(targetLang)) return Math.ceil(text.length * 1.08);
+  const latinWords = (text.match(/[A-Za-zÀ-ɏ0-9]+(?:['’-][A-Za-zÀ-ɏ0-9]+)*/g) ?? []).length;
+  const cjkChars = (text.match(CJK_CHAR_RE) ?? []).length;
+  return Math.ceil(latinWords * 2.1 + cjkChars * 1.1);
+}
+
+/** 估算译文占位高度：按容器宽度、真实行高与目标语言密度，保证预留空间贴近实际。
+ *  style：调用方在写 DOM 前预读的样式；缺省时才回退读 getComputedStyle（会触发重排）。
+ *  inline：行内控件（链接/按钮）只占一行——块级占位会在行内元素里撑出整块空白。 */
+function estimateHeight(
+  unit: TranslationUnit,
+  style: ContainerStyle | undefined,
+  targetLang: string,
+  inline: boolean
+): string {
   let fs: number;
   let lh: number;
   let width: number;
   if (style) {
     fs = parseFloat(style.fontSize) || 14;
-    lh = parseFloat(style.fontSize) * 1.5; // lineHeight 不在预读里，用 fontSize*1.5 估算
+    lh = parseFloat(style.lineHeight) || fs * 1.5; // computed 为 "normal" 时按 1.5 估
     width = style.width || Math.max(300, innerWidth - 40);
   } else {
     const cs = getComputedStyle(unit.container);
@@ -526,8 +572,10 @@ function estimateHeight(unit: TranslationUnit, style?: ContainerStyle): string {
     lh = parseFloat(cs.lineHeight) || fs * 1.5;
     width = unit.container.clientWidth || Math.max(300, innerWidth - 40);
   }
+  if (inline) return `${lh}px`;
   const perLine = Math.max(10, Math.floor(width / fs));
-  const lines = Math.max(1, Math.ceil(unit.text.length / perLine));
+  const estimated = estimateTranslatedLength(unit.text, targetLang);
+  const lines = Math.max(1, Math.ceil(estimated / perLine));
   return `${Math.min(lines * lh, 600)}px`;
 }
 
@@ -556,9 +604,26 @@ function getSourceTarget(container: HTMLElement): HTMLElement {
 
 /** 保护元素：文本替换不穿透这些子树（保住链接可点击、图标、表单控件、代码展示） */
 const PROTECTED_TAGS = new Set([
-  "A", "BUTTON", "SELECT", "OPTION", "TEXTAREA", "INPUT",
-  "SVG", "MATH", "CODE", "PRE", "KBD", "SAMP", "VAR",
-  "SCRIPT", "STYLE", "IFRAME", "CANVAS", "IMG", "VIDEO", "AUDIO",
+  "A",
+  "BUTTON",
+  "SELECT",
+  "OPTION",
+  "TEXTAREA",
+  "INPUT",
+  "SVG",
+  "MATH",
+  "CODE",
+  "PRE",
+  "KBD",
+  "SAMP",
+  "VAR",
+  "SCRIPT",
+  "STYLE",
+  "IFRAME",
+  "CANVAS",
+  "IMG",
+  "VIDEO",
+  "AUDIO",
 ]);
 
 function isProtected(el: HTMLElement): boolean {

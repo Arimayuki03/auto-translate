@@ -19,9 +19,29 @@
   overflow-anchor: none; /* 避免被浏览器选作滚动锚点，减少翻译插入时的页面跳动 */
 }
 
-/* 预留占位：不可见但占据空间，译文就绪后在原位填充 */
+/* 预留占位：骨架屏（低透明度、随页面文字色自适应），译文就绪后在原位填充。
+   opacity 动画走合成器，大页面几百个占位同时呼吸也不占主线程 */
 .it-pending {
-  visibility: hidden;
+  border-radius: 4px;
+  background-color: rgba(107, 114, 128, 0.16); /* 不支持 color-mix 的兜底 */
+  background-color: color-mix(in srgb, currentColor 13%, transparent);
+  animation: it-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes it-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .it-pending {
+    animation: none;
+  }
 }
 
 /* ===== 包裹层：display 由 JS 按模式/父级动态设
@@ -60,21 +80,24 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
   color: var(--it-muted);
 }
 
+/* 行内占位：保持行内（不撑破导航/链接的行盒），不显示「·」前缀，微宽让骨架可见 */
+.it-translated.it-pending.it-inline {
+  display: inline-block;
+  min-width: 2.5em;
+  vertical-align: baseline;
+}
+
+.it-translated.it-pending.it-inline::before {
+  content: none;
+}
+
 .it-translated .it-chunk {
-  display: block;
+  display: inline;
   margin: 0;
-  color: #4b5563;
-}
-
-.it-translated .it-chunk + .it-chunk {
-  margin-top: 4px;
-}
-
-/* 深色页面：译文用更亮的灰，保证可读 */
-@media (prefers-color-scheme: dark) {
-  .it-translated .it-chunk {
-    color: #9ca3af;
-  }
+  /* 灰字主题：从当前文字色派生（跟随页面明暗自适应）。
+     不用 prefers-color-scheme——那是操作系统级开关，深色系统 + 浅色页面时会看不清 */
+  color: #4b5563; /* 不支持 color-mix 的兜底 */
+  color: color-mix(in srgb, currentColor 72%, transparent);
 }
 
 /* 失败：仅文字变色，无底色块 */
@@ -174,7 +197,11 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
   justify-content: center;
   font-size: 16px;
   font-weight: 600;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   user-select: none;
@@ -196,7 +223,11 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
   line-height: 1.4;
   color: #1f2937;
   color-scheme: light;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
   max-width: min(560px, calc(100vw - 16px));
 }
 
@@ -270,7 +301,11 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
   line-height: 1.6;
   color: #1f2937;
   color-scheme: light; /* 深色页面下内部按钮/选择框也用浅色 UA 默认，避免白字白底 */
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
   overflow: hidden;
 }
 

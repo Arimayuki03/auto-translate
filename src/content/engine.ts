@@ -1,5 +1,9 @@
 /** 页面翻译引擎：视口优先 + 滚动懒翻译 / 去重分批 / 顺序渲染 / 段落翻译 / 重试 / 还原 */
-import type { CancelTranslationMessage, CheckCacheMessage, TranslationContext } from "../shared/messages";
+import type {
+  CancelTranslationMessage,
+  CheckCacheMessage,
+  TranslationContext,
+} from "../shared/messages";
 import type { Settings } from "../shared/types";
 import { extractUnitsChunked, isTargetLanguage } from "./extractor";
 import type { ExtractOptions, TranslationUnit } from "./extractor";
@@ -106,6 +110,7 @@ export class PageEngine {
   setTargetLang(lang: string): void {
     this.targetLang = lang;
     this.opts = { ...this.opts, targetLang: lang };
+    this.renderer.setTargetLang(lang); // 占位估算/chunk 分隔按新语言渲染
   }
 
   /** 单条文本翻译（划词 / 输入框），失败 throw */
@@ -144,9 +149,7 @@ export class PageEngine {
     this.lastError = undefined; // 新一轮翻译开始，清掉上一轮的失败信息
     try {
       const gen = this.generation;
-      this.pageContext = this.contextEnabled
-        ? getPageContext(this.contextMaxChars)
-        : undefined;
+      this.pageContext = this.contextEnabled ? getPageContext(this.contextMaxChars) : undefined;
       // 全页扫描用时间片版提取：超大页面不再一次性阻塞主线程（借鉴 read-frog chunked walk）。
       // 让出期间若被还原（generation 变化）则中止本次。
       const extracted = await extractUnitsChunked(
@@ -205,7 +208,7 @@ export class PageEngine {
     const gen = this.generation;
     const els = Array.from(
       document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-        'input[placeholder], textarea[placeholder]'
+        "input[placeholder], textarea[placeholder]"
       )
     ).filter(
       (el) =>
@@ -632,7 +635,15 @@ function getPageContext(maxChars: number): TranslationContext {
   const budget = Math.max(0, maxChars);
   let content = "";
   if (budget > 0 && document.body) {
-    const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "IFRAME", "CANVAS", "TEMPLATE"]);
+    const SKIP_TAGS = new Set([
+      "SCRIPT",
+      "STYLE",
+      "NOSCRIPT",
+      "SVG",
+      "IFRAME",
+      "CANVAS",
+      "TEMPLATE",
+    ]);
     // 记忆已判定过的元素是否处于跳过子树，避免重复向上爬祖先
     const skipSubtreeCache = new Map<Element, boolean>();
     const isSkipSubtree = (el: Element): boolean => {
@@ -640,7 +651,11 @@ function getPageContext(maxChars: number): TranslationContext {
       if (cached !== undefined) return cached;
       let result = false;
       for (let p: Element | null = el; p; p = p.parentElement) {
-        if (SKIP_TAGS.has(p.tagName) || p.hasAttribute("data-it-ui") || p.hasAttribute("data-it-unit")) {
+        if (
+          SKIP_TAGS.has(p.tagName) ||
+          p.hasAttribute("data-it-ui") ||
+          p.hasAttribute("data-it-unit")
+        ) {
           result = true;
           break;
         }
