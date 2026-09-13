@@ -34,10 +34,13 @@ export const DEFAULT_SETTINGS: Settings = {
     terminology: [],
     contextEnabled: true,
     contextMaxChars: 3000,
+    style: "gray",
+    customCss: "",
+    translateAttributes: true,
   },
   sites: { whitelist: [], blacklist: [] },
   security: { encryptApiKey: true, sensitivePages: false },
-  cache: { enabled: true, maxEntries: 5000 },
+  cache: { enabled: true, maxEntries: 5000, ttlDays: 7 },
 };
 
 const KEY_SALT = "at-v1:";
@@ -123,7 +126,7 @@ export async function importSettings(input: unknown): Promise<void> {
     throw new Error("设置内容格式无效");
   }
   const candidate = raw as Partial<Settings>;
-  const formats = new Set(["openai", "anthropic", "gemini", "ollama", "googlefree"]);
+  const formats = new Set(["openai", "anthropic", "gemini", "ollama", "googlefree", "microsoft"]);
   if (candidate.api?.format && !formats.has(candidate.api.format)) {
     throw new Error(`不支持的 API 格式：${String(candidate.api.format)}`);
   }

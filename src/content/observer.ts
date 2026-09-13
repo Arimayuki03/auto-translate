@@ -164,6 +164,6 @@ export class PageObserver {
       units.push(...found);
     }
     if (units.length > 0) this.engine.scheduleUnits(units); // 引擎内部：视口内先译，视口外滚动再译
-    void this.engine.translatePlaceholders(); // 新出现的搜索框 placeholder 也翻译
+    void this.engine.translateAttributes(); // 新出现的搜索框 placeholder 也翻译
   }
 }

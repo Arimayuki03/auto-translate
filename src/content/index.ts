@@ -15,6 +15,7 @@ import { Renderer } from "./renderer";
 import { Toolbar } from "./toolbar";
 import { initBubble } from "./bubble";
 import { initInput } from "./input";
+import { applyTranslationStyle } from "./style";
 import { setupSpaNavigation } from "./navigation";
 
 /**
@@ -49,6 +50,10 @@ async function main(): Promise<void> {
 
   const renderer = new Renderer(settings.translate.displayMode, settings.translate.targetLang);
   renderer.setMode(settings.translate.displayMode);
+  // 译文样式主题 + 自定义 CSS（设置页配置；SPA 换页 body 被替换后也需重挂）
+  const applyStyle = (): void =>
+    applyTranslationStyle(settings.translate.style, settings.translate.customCss ?? "");
+  applyStyle();
   const engine = new PageEngine(renderer, settings);
   let toolbar = new Toolbar(engine);
   toolbar.setSensitive(isSensitive()); // 敏感页隐藏工具条
@@ -81,6 +86,7 @@ async function main(): Promise<void> {
         toolbar = new Toolbar(engine);
       }
       toolbar.setSensitive(isSensitive()); // 换页后按新 URL 决定是否显示
+      applyStyle(); // 新 body 上主题类已丢失，重挂（幂等）
     },
   });
 

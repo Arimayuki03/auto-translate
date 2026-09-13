@@ -79,6 +79,27 @@ export interface ClearCacheMessage {
   type: "clear-cache";
 }
 
+/** 缓存统计（设置页「缓存管理」展示条目数） */
+export interface CacheStatsMessage {
+  type: "cache-stats";
+}
+
+export interface CacheStatsResponseMessage {
+  count: number;
+  error?: string;
+}
+
+/** 手动触发一次过期/超额缓存清理（设置页 → background） */
+export interface CleanupCacheMessage {
+  type: "cleanup-cache";
+}
+
+export interface CleanupCacheResponseMessage {
+  ok: boolean;
+  removed?: number;
+  error?: string;
+}
+
 /** 检查一批文本的缓存命中数（content → background，用于决定整页/懒翻译） */
 export interface CheckCacheMessage {
   type: "check-cache";

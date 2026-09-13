@@ -1,7 +1,7 @@
 import type { ApiConfig, BatchMode, Settings } from "../shared/types";
 import type { TranslationContext } from "../shared/messages";
 import { getSettings } from "../shared/storage";
-import { TranslationCache } from "./cache";
+import { TranslationCache, fnv1aHex } from "./cache";
 import { TokenBucket } from "./rateLimiter";
 import { ApiError, withErrorSource } from "./providers/http";
 import { createProvider } from "./providers";
@@ -45,6 +45,28 @@ const SUB_BATCH_SIZE = 8;
 /** 构造批量提示词里的哨兵分隔行 */
 export function batchSeparatorLine(): string {
   return BATCH_SEPARATOR;
+}
+
+/** 免 key 免费通道集合：同一时刻主用其一，另一个作为自动互切的备份 */
+const FREE_FORMATS = ["googlefree", "microsoft"] as const;
+
+/** 未配置备用 API 且主通道是免费通道时，返回另一个免费通道作为 429/不可达时的自动互切目标。
+ *  用户显式配置了备用 API 则尊重用户选择（备用可能是任意格式），返回 null。 */
+export function freeSiblingApi(settings: Settings): ApiConfig | null {
+  if (settings.backupApi) return null;
+  if (!FREE_FORMATS.includes(settings.api.format as (typeof FREE_FORMATS)[number])) return null;
+  const sibling = FREE_FORMATS.find((f) => f !== settings.api.format)!;
+  return { ...settings.api, format: sibling };
+}
+
+/**
+ * 请求超时按字符数缩放：base + 15ms/字符（封顶 max(base, 120s)）。
+ * 批量请求的生成时间随字符数线性增长，固定 60s 超时会把「还在正常生成」的大批
+ * 误判为超时重试，反而放大请求量（借鉴 read-frog batch-queue）。
+ */
+export function scaleTimeoutMs(baseMs: number, chars: number): number {
+  const base = Math.max(1000, baseMs || 60_000);
+  return Math.min(base + 15 * Math.max(0, chars), Math.max(base, 120_000));
 }
 
 function systemPrompt(targetLang: string): string {
@@ -131,10 +153,47 @@ export class TranslateService {
   /** 设置缓存：避免每次翻译请求都读 chrome.storage + 解密 API Key。
    *  监听 chrome.storage.onChanged 自动刷新，设置页改动即时生效。 */
   private cachedSettings: Settings | null = null;
+  /** 跨标签页在途请求去重：文本+目标语言相同的并发请求共享同一次执行
+   *  （多标签页同时翻同一站点时，后到者直接复用先到者的结果，不重复消耗 API 额度）。
+   *  signal 供「共享请求被其他会话中止时，本会话自行重发」判断使用。 */
+  private inflight = new Map<string, { promise: Promise<string[]>; signal?: AbortSignal }>();
 
-  /** 批量翻译：缓存命中 + 批量合并 + 并发限制 + 主备切换。
-   *  signal：翻译会话中止信号（还原/换页时由 background 触发），中止后尽快停手。 */
+  /** 跨标签页去重键：目标语言 + 文本列表哈希（上下文不参与——同站点多标签页场景收益最大） */
+  private static dedupKey(texts: string[], targetLang: string): string {
+    return `${targetLang}|${fnv1aHex(texts.join("\u0000"))}`;
+  }
+
+  /** 批量翻译入口（跨标签页去重包装）；signal：本会话中止信号（还原/换页）。 */
   async translate(
+    texts: string[],
+    targetLang: string,
+    context?: TranslationContext,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    if (signal?.aborted) throw new TranslationCancelledError();
+    const key = TranslateService.dedupKey(texts, targetLang);
+    const entry = this.inflight.get(key);
+    if (entry && !entry.signal?.aborted) {
+      try {
+        return await entry.promise;
+      } catch (err) {
+        // 共享请求被其他标签页的会话中止、而本会话仍在翻译 → 自己单独重发一次；
+        // 其余错误（或本会话也已中止）原样上抛
+        if (!(err instanceof TranslationCancelledError) || signal?.aborted) throw err;
+      }
+    }
+    const promise = this.translateInner(texts, targetLang, context, signal);
+    this.inflight.set(key, { promise, signal });
+    try {
+      return await promise;
+    } finally {
+      // 仅当条目仍指向本次执行时清除（并发覆盖场景不能误删后发起的请求）
+      if (this.inflight.get(key)?.promise === promise) this.inflight.delete(key);
+    }
+  }
+
+  /** 批量翻译执行体：缓存命中 + 批量合并 + 并发限制 + 主备/免费互切。 */
+  private async translateInner(
     texts: string[],
     targetLang: string,
     context?: TranslationContext,
@@ -287,6 +346,17 @@ export class TranslateService {
     await this.cache.clear();
   }
 
+  /** 清理过期/超额缓存条目（chrome.alarms 每日触发；设置页可手动触发）。返回删除条数 */
+  async cleanupCache(): Promise<number> {
+    this.applyCacheSettings(await this.getSettingsCached());
+    return this.cache.cleanupExpired();
+  }
+
+  /** 磁盘层缓存条目数（设置页「缓存管理」展示） */
+  async cacheStats(): Promise<number> {
+    return this.cache.diskCount();
+  }
+
   /** 返回一批文本中命中缓存的条数（用于内容侧决定整页直译还是视口懒翻译） */
   async checkCache(targetLang: string, texts: string[]): Promise<number> {
     this.applyCacheSettings(await this.getSettingsCached());
@@ -298,10 +368,11 @@ export class TranslateService {
     return checks.filter((v) => v !== undefined).length;
   }
 
-  /** 应用缓存设置（开关 / 内存条目上限）：每次请求前刷新，设置页改动即时生效 */
+  /** 应用缓存设置（开关 / 内存条目上限 / 过期天数）：每次请求前刷新，设置页改动即时生效 */
   private applyCacheSettings(settings: Settings): void {
     this.cacheEnabled = settings.cache.enabled;
     this.cache.maxEntries = Math.max(1, settings.cache.maxEntries || 5000);
+    this.cache.ttlDays = Math.max(0, settings.cache.ttlDays ?? 7);
   }
 
   /** 带缓存的 getSettings：避免每次翻译请求都读 chrome.storage + 解密 API Key。
@@ -366,10 +437,13 @@ export class TranslateService {
 
     const attempt = (api: ApiConfig): Promise<string> => {
       const isBatch = (opts?.batch ?? false) && texts.length > 1;
-      // googlefree provider 无法执行逐行协议（会把逐行指令前缀当作待译段发给 Google）：
-      // 其内部固定使用安全哨兵协议，与 ApiConfig.batchMode 的文档约定一致；第三方 LLM 按配置（默认逐行）。
+      // 免费通道 provider（googlefree/microsoft）无法执行逐行协议（会把逐行指令前缀当作
+      // 待译段发给免费端点）：其内部固定使用安全哨兵协议，与 ApiConfig.batchMode 的文档约定
+      // 一致；第三方 LLM 按配置（默认逐行）。
       const mode: BatchMode =
-        api.format === "googlefree" ? "separator" : (opts?.batchMode ?? "lines");
+        api.format === "googlefree" || api.format === "microsoft"
+          ? "separator"
+          : (opts?.batchMode ?? "lines");
       let system: string;
       let user: string;
       if (!isBatch) {
@@ -397,6 +471,24 @@ export class TranslateService {
     try {
       return await attempt(settings.api);
     } catch (err) {
+      // 免费通道自动互切：主通道是 googlefree/microsoft 之一且未配置备用 API 时，
+      // 可重试失败（限流/网络/服务端）自动切到另一个免费通道再试一次
+      const sibling = freeSiblingApi(settings);
+      if (sibling && isRetryable(err)) {
+        try {
+          return await attempt(sibling);
+        } catch (siblingErr) {
+          // 互切也失败：有备用 API 则继续走备用，否则上抛并标注来源
+          if (settings.backupApi && isRetryable(siblingErr)) {
+            try {
+              return await attempt(settings.backupApi);
+            } catch (backupErr) {
+              throw withErrorSource(backupErr, "backup");
+            }
+          }
+          throw withErrorSource(siblingErr, "main");
+        }
+      }
       if (settings.backupApi && isRetryable(err)) {
         try {
           return await attempt(settings.backupApi);
@@ -415,12 +507,15 @@ export class TranslateService {
     // 但长期平均间隔不小于 REQUEST_MIN_INTERVAL_MS，防止瞬时高并发触发服务商限流/封号。
     await this.acquireStartSlot();
     const provider = createProvider(api);
+    // 批量请求的生成时间随字符数增长：超时按字符数缩放（封顶 120s），
+    // 避免「还在正常生成」的大批被误判超时重试、反而放大请求量
+    const chars = messages.reduce((n, m) => n + m.content.length, 0);
     const result = await provider.chat(messages, {
       baseUrl: api.baseUrl,
       apiKey: api.apiKey,
       model: api.model,
       temperature: api.temperature,
-      timeoutMs: api.timeoutMs,
+      timeoutMs: scaleTimeoutMs(api.timeoutMs, chars),
       ...chatOpts,
     });
     return result.text;

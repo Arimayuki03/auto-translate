@@ -16,6 +16,13 @@ console.log("[auto-translate] background service worker 已启动");
 
 const translateService = new TranslateService();
 
+/** 每日缓存清理 alarm：MV3 service worker 会被休眠，alarms 是唯一可靠的定时手段 */
+const CACHE_CLEANUP_ALARM = "it-cache-cleanup";
+
+function ensureCacheCleanupAlarm(): void {
+  chrome.alarms.create(CACHE_CLEANUP_ALARM, { periodInMinutes: 24 * 60, delayInMinutes: 1 });
+}
+
 /** 翻译会话 → 该会话在途请求的 AbortController。还原/换页时按会话批量中止，避免浪费额度。
  *  无 sessionId 的旧式请求（划词/输入框等）不参与会话中止。 */
 const sessionControllers = new Map<number, Set<AbortController>>();
@@ -37,6 +44,20 @@ function unregisterController(sessionId: number | undefined, controller: AbortCo
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[auto-translate] 安装/更新:", details.reason);
+  ensureCacheCleanupAlarm();
+});
+
+// 浏览器重启后补挂 alarm（已存在时 create 会原样重置周期，幂等）
+chrome.runtime.onStartup.addListener(() => {
+  ensureCacheCleanupAlarm();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== CACHE_CLEANUP_ALARM) return;
+  translateService
+    .cleanupCache()
+    .then((removed) => console.log(`[auto-translate] 每日缓存清理完成，移除 ${removed} 条`))
+    .catch((err) => console.warn("[auto-translate] 缓存清理失败", err));
 });
 
 // 快捷键：把 chrome.commands 命令中继到当前标签页的 content script
@@ -129,19 +150,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  // 设置页「缓存管理」：显示磁盘层条目数
+  if (message?.type === "cache-stats") {
+    translateService
+      .cacheStats()
+      .then((count) => sendResponse({ count }))
+      .catch((err) => sendResponse({ count: 0, error: err instanceof Error ? err.message : String(err) }));
+    return true;
+  }
+
+  // 设置页「立即清理」：手动触发一次过期/超额清理
+  if (message?.type === "cleanup-cache") {
+    translateService
+      .cleanupCache()
+      .then((removed) => sendResponse({ ok: true, removed }))
+      .catch((err) =>
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      );
+    return true;
+  }
+
   return undefined;
 });
 
 async function testConnection(api: ApiConfig): Promise<string> {
   const provider = createProvider(api);
   // 免费通道的系统提示词约定与翻译一致（「翻译为X」），便于从中解析目标语言
-  const prompt =
-    api.format === "googlefree"
-      ? [
-          { role: "system" as const, content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
-          { role: "user" as const, content: "Connection test" },
-        ]
-      : [{ role: "user" as const, content: "请只回复：连接成功" }];
+  const isFree = api.format === "googlefree" || api.format === "microsoft";
+  const prompt = isFree
+    ? [
+        { role: "system" as const, content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+        { role: "user" as const, content: "Connection test" },
+      ]
+    : [{ role: "user" as const, content: "请只回复：连接成功" }];
   const result = await provider.chat(prompt, {
     baseUrl: api.baseUrl,
     apiKey: api.apiKey,

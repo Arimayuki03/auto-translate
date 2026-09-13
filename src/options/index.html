@@ -20,6 +20,7 @@
           <option value="gemini">Google Gemini</option>
           <option value="ollama">Ollama 原生</option>
           <option value="googlefree">Google 免费（无需 Key）</option>
+          <option value="microsoft">Microsoft 免费（无需 Key）</option>
         </select>
         <p class="hint" id="format-hint"></p>
       </div>
@@ -86,6 +87,7 @@
           <option value="gemini">Google Gemini</option>
           <option value="ollama">Ollama 原生</option>
           <option value="googlefree">Google 免费（无需 Key）</option>
+          <option value="microsoft">Microsoft 免费（无需 Key）</option>
         </select>
       </div>
       <div class="form-row">
@@ -142,6 +144,27 @@
         <p class="hint">正文摘要的最大长度（标题/描述另有固定上限）。设得越小越省 token。</p>
       </div>
       <div class="form-row">
+        <label for="style-theme">译文样式</label>
+        <select id="style-theme">
+          <option value="gray">灰字（默认，跟随页面文字色）</option>
+          <option value="outline">描边（空心字）</option>
+          <option value="underline">虚线下划线</option>
+          <option value="blur">模糊（悬停显形）</option>
+        </select>
+        <p class="hint">译文的外观主题；保存后刷新页面生效。</p>
+      </div>
+      <div class="form-row">
+        <label for="custom-css">自定义译文 CSS（可选，叠加在主题之上）</label>
+        <textarea id="custom-css" rows="4" placeholder=".it-translated { opacity: 0.85; font-style: italic; }"></textarea>
+        <p class="hint">面向 .it-translated（译文块）等类名书写，最长 8000 字符；保存后刷新页面生效。</p>
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" id="translate-attributes" />
+          <span>翻译 HTML 属性（输入框 placeholder、链接 title、图片 alt、aria-label）</span>
+        </label>
+      </div>
+      <div class="form-row">
         <label class="checkbox-row">
           <input type="checkbox" id="sensitive-pages" />
           <span>敏感页面不翻译（登录 / 密码 / 2FA / 支付等页面跳过翻译）</span>
@@ -168,8 +191,22 @@
     <section class="card">
       <h2>缓存与数据</h2>
       <div class="form-row">
+        <div class="form-inline">
+          <div>
+            <label for="cache-ttl-days">缓存保留天数</label>
+            <input type="number" id="cache-ttl-days" min="0" max="365" step="1" />
+          </div>
+          <div>
+            <label>缓存条目</label>
+            <p class="hint" id="cache-stats" style="margin: 0">统计中…</p>
+          </div>
+        </div>
+        <p class="hint">过期的缓存条目每天自动清理一次（0 = 永不过期）；也可点「立即清理」手动触发。</p>
+      </div>
+      <div class="form-row">
         <p class="hint">译文缓存保存在本地并跨会话复用（节省 API 额度）。设置可导出为 JSON 备份/迁移。</p>
         <div class="actions-row">
+          <button id="btn-cleanup-cache" class="btn btn-secondary">立即清理</button>
           <button id="btn-clear-cache" class="btn btn-secondary">清空缓存</button>
           <button id="btn-export" class="btn btn-secondary">导出设置</button>
           <button id="btn-import" class="btn btn-secondary">导入设置</button>

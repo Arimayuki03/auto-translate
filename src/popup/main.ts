@@ -19,10 +19,10 @@ function setStatus(text: string, kind: "ok" | "err" | "" = ""): void {
 }
 
 /** 免费通道无需连接参数 */
-const FREE_FORMAT = "googlefree";
+const FREE_FORMATS = new Set(["googlefree", "microsoft"]);
 
 function syncFreeFields(): void {
-  const isFree = ($("p-format") as HTMLSelectElement).value === FREE_FORMAT;
+  const isFree = FREE_FORMATS.has(($("p-format") as HTMLSelectElement).value);
   for (const id of ["p-base-url", "p-api-key", "p-model"]) {
     const el = $(id) as HTMLInputElement;
     el.disabled = isFree;
@@ -57,7 +57,7 @@ async function loadForm(): Promise<void> {
 
 $("p-test").addEventListener("click", async () => {
   const api = await readApi();
-  if (api.format !== FREE_FORMAT && (!api.baseUrl || !api.model)) {
+  if (!FREE_FORMATS.has(api.format) && (!api.baseUrl || !api.model)) {
     setStatus("请填写 BaseURL 和模型", "err");
     return;
   }

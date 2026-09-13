@@ -1,10 +1,12 @@
 import type {
+  CacheStatsResponseMessage,
+  CleanupCacheResponseMessage,
   ClearCacheMessage,
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
 } from "../shared/messages";
 import { exportSettings, getSettings, importSettings, saveSettings } from "../shared/storage";
-import type { ApiConfig, ApiFormat, BatchMode, Settings } from "../shared/types";
+import type { ApiConfig, ApiFormat, BatchMode, Settings, TranslationStyle } from "../shared/types";
 
 const FORMAT_INFO: Record<ApiFormat, { url: string; model: string; hint: string }> = {
   openai: {
@@ -32,6 +34,11 @@ const FORMAT_INFO: Record<ApiFormat, { url: string; model: string; hint: string 
     model: "（无需填写）",
     hint: "Google 免费通道：无需 BaseURL / Key / 模型，开箱即用。免费但有频率限制，适合无 Key 或备用兜底。",
   },
+  microsoft: {
+    url: "（无需填写）",
+    model: "（无需填写）",
+    hint: "Microsoft 免费通道：无需 BaseURL / Key / 模型，端点原生支持批量。与 Google 免费通道互为备份——一方被限流时自动切到另一方（未配置备用 API 时）。",
+  },
 };
 
 function $<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -54,7 +61,8 @@ function updateFormatHint(): void {
   const fmt = select("api-format").value as ApiFormat;
   const info = FORMAT_INFO[fmt];
   $("format-hint").textContent = info.hint;
-  const isFree = fmt === "googlefree";
+  const isFree = fmt === "googlefree" || fmt === "microsoft";
+  const isGoogleFree = fmt === "googlefree";
   const baseUrl = $("base-url") as HTMLInputElement;
   const model = $("model") as HTMLInputElement;
   const apiKey = $("api-key") as HTMLInputElement;
@@ -67,10 +75,10 @@ function updateFormatHint(): void {
     if (!baseUrl.value) baseUrl.placeholder = info.url;
     if (!model.value) model.placeholder = info.model;
   }
-  // 免费通道内部固定安全哨兵协议，批量协议选项不适用；端点输入只在免费通道显示
+  // 免费通道内部固定安全哨兵协议，批量协议选项不适用；自定义端点仅 Google 免费通道支持
   batchMode.disabled = isFree;
-  $("free-endpoint-row").style.display = isFree ? "" : "none";
-  $("free-backup-endpoint-row").style.display = isFree ? "" : "none";
+  $("free-endpoint-row").style.display = isGoogleFree ? "" : "none";
+  $("free-backup-endpoint-row").style.display = isGoogleFree ? "" : "none";
 }
 
 async function loadForm(): Promise<void> {
@@ -99,10 +107,26 @@ async function loadForm(): Promise<void> {
   ($("translate-input") as HTMLInputElement).checked = s.translate.translateInput;
   ($("context-enabled") as HTMLInputElement).checked = s.translate.contextEnabled ?? true;
   input("context-max-chars").value = String(s.translate.contextMaxChars ?? 3000);
+  select("style-theme").value = s.translate.style ?? "gray";
+  ($("custom-css") as HTMLTextAreaElement).value = s.translate.customCss ?? "";
+  ($("translate-attributes") as HTMLInputElement).checked = s.translate.translateAttributes ?? true;
   ($("sensitive-pages") as HTMLInputElement).checked = s.security.sensitivePages;
   ($("whitelist") as HTMLTextAreaElement).value = s.sites.whitelist.join("\n");
   ($("blacklist") as HTMLTextAreaElement).value = s.sites.blacklist.join("\n");
+  input("cache-ttl-days").value = String(s.cache.ttlDays ?? 7);
   updateFormatHint();
+  void refreshCacheStats();
+}
+
+/** 设置页「缓存管理」：展示磁盘层条目数（缓存前缀计数，不读值内容） */
+async function refreshCacheStats(): Promise<void> {
+  const el = $("cache-stats");
+  try {
+    const res = (await chrome.runtime.sendMessage({ type: "cache-stats" })) as CacheStatsResponseMessage;
+    el.textContent = res?.error ? `统计失败：${res.error}` : `${res?.count ?? 0} 条`;
+  } catch (err) {
+    el.textContent = `统计失败：${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 async function readForm(): Promise<Settings> {
@@ -166,6 +190,9 @@ async function readForm(): Promise<Settings> {
         0,
         parseInt(($("context-max-chars") as HTMLInputElement).value, 10) || 3000
       ),
+      style: select("style-theme").value as TranslationStyle,
+      customCss: ($("custom-css") as HTMLTextAreaElement).value.slice(0, 8000),
+      translateAttributes: ($("translate-attributes") as HTMLInputElement).checked,
     },
     sites: {
       whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
@@ -174,6 +201,14 @@ async function readForm(): Promise<Settings> {
     security: {
       ...current.security,
       sensitivePages: ($("sensitive-pages") as HTMLInputElement).checked,
+    },
+    cache: {
+      ...current.cache,
+      // 0 = 永不过期是合法值，不能用 || 兜底吞掉
+      ttlDays: (() => {
+        const parsed = parseInt(($("cache-ttl-days") as HTMLInputElement).value, 10);
+        return Number.isNaN(parsed) ? (current.cache.ttlDays ?? 7) : Math.min(365, Math.max(0, parsed));
+      })(),
     },
   };
 }
@@ -194,7 +229,7 @@ function parseDomainList(el: HTMLTextAreaElement): string[] {
 }
 
 function updateBackupFormatFields(): void {
-  const isFree = select("backup-format").value === "googlefree";
+  const isFree = select("backup-format").value === "googlefree" || select("backup-format").value === "microsoft";
   for (const id of ["backup-base-url", "backup-api-key", "backup-model"]) {
     const el = $(id) as HTMLInputElement;
     el.disabled = isFree;
@@ -208,7 +243,7 @@ async function runTestConnection(api: ApiConfig | undefined, btnId: string, labe
     setStatus(`未配置${label}，跳过`, "err");
     return;
   }
-  if (api.format !== "googlefree" && (!api.baseUrl || !api.model)) {
+  if (api.format !== "googlefree" && api.format !== "microsoft" && (!api.baseUrl || !api.model)) {
     setStatus(`${label}请先填写 BaseURL 和模型`, "err");
     return;
   }
@@ -257,6 +292,16 @@ function init(): void {
       error?: string;
     };
     setStatus(res?.ok ? "缓存已清空 ✔" : `清空失败：${res?.error ?? "未知错误"}`, res?.ok ? "ok" : "err");
+    void refreshCacheStats();
+  });
+
+  $("btn-cleanup-cache").addEventListener("click", async () => {
+    const res = (await chrome.runtime.sendMessage({ type: "cleanup-cache" })) as CleanupCacheResponseMessage;
+    setStatus(
+      res?.ok ? `清理完成 ✔ 移除 ${res.removed ?? 0} 条过期/超额条目` : `清理失败：${res?.error ?? "未知错误"}`,
+      res?.ok ? "ok" : "err"
+    );
+    void refreshCacheStats();
   });
 
   $("btn-export").addEventListener("click", async () => {

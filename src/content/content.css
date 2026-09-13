@@ -94,10 +94,62 @@ body:not(.it-mode-translated) .it-wrap > .it-orig {
 .it-translated .it-chunk {
   display: inline;
   margin: 0;
-  /* 灰字主题：从当前文字色派生（跟随页面明暗自适应）。
-     不用 prefers-color-scheme——那是操作系统级开关，深色系统 + 浅色页面时会看不清 */
+}
+
+/* ===== 译文样式主题（body.it-style-* 切换，见 src/content/style.ts） ===== */
+/* 灰字主题（默认）：从当前文字色派生（跟随页面明暗自适应）。
+   不用 prefers-color-scheme——那是操作系统级开关，深色系统 + 浅色页面时会看不清 */
+body.it-style-gray .it-translated .it-chunk,
+body:not([class*="it-style-"]) .it-translated .it-chunk {
   color: #4b5563; /* 不支持 color-mix 的兜底 */
   color: color-mix(in srgb, currentColor 72%, transparent);
+}
+
+body.it-style-gray .it-translated.it-done.it-inline,
+body:not([class*="it-style-"]) .it-translated.it-done.it-inline {
+  color: #4b5563;
+  color: color-mix(in srgb, currentColor 72%, transparent);
+}
+
+/* 描边主题（空心字）：填充透明 + 细描边，字形仍可辨认且与页面文字色一致 */
+body.it-style-outline .it-translated .it-chunk,
+body.it-style-outline .it-translated.it-done.it-inline {
+  color: inherit;
+  -webkit-text-fill-color: transparent;
+  -webkit-text-stroke: 0.6px currentColor;
+}
+
+/* 虚线下划线主题：全色译文 + 虚线标记（原文/译文一眼可分） */
+body.it-style-underline .it-translated .it-chunk,
+body.it-style-underline .it-translated.it-done.it-inline {
+  color: inherit;
+  text-decoration: underline dashed;
+  text-decoration-color: #4b5563;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 3px;
+}
+
+/* 模糊主题：译文模糊铺底，悬停显形（双语干扰最小的方案） */
+body.it-style-blur .it-translated .it-chunk,
+body.it-style-blur .it-translated.it-done.it-inline {
+  color: inherit;
+  filter: blur(4px);
+  transition: filter 0.2s ease;
+}
+
+body.it-style-blur .it-translated.it-done:hover .it-chunk,
+body.it-style-blur .it-translated.it-done.it-inline:hover {
+  filter: none;
+}
+
+@media (hover: none) {
+  /* 触屏无悬停：模糊主题退化为灰字（保持可读） */
+  body.it-style-blur .it-translated .it-chunk,
+  body.it-style-blur .it-translated.it-done.it-inline {
+    filter: none;
+    color: #4b5563;
+    color: color-mix(in srgb, currentColor 72%, transparent);
+  }
 }
 
 /* 失败：仅文字变色，无底色块 */

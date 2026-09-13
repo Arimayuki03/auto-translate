@@ -5,7 +5,7 @@ import type {
   TranslationContext,
 } from "../shared/messages";
 import type { Settings } from "../shared/types";
-import { extractUnitsChunked, isTargetLanguage } from "./extractor";
+import { extractUnitsChunked, isTargetLanguage, EXCLUDED_TAGS, LETTER_RE } from "./extractor";
 import type { ExtractOptions, TranslationUnit } from "./extractor";
 import { precomputeStyles, Renderer } from "./renderer";
 import { createWorkPacer, pauseIfBudgetSpent } from "./scheduler";
@@ -47,6 +47,8 @@ export class PageEngine {
   /** 页面上下文（标题/描述/正文摘要）仅整页翻译注入，可在设置里关闭或限制长度 */
   private contextEnabled: boolean;
   private contextMaxChars: number;
+  /** HTML 属性翻译开关（placeholder / title / alt / aria-label） */
+  private attributesEnabled: boolean;
   private pageContext: TranslationContext | undefined;
   /** 防止自动翻译/可见性/SPA 信号同时触发时重复扫描并重复计数 */
   private translateAllRunning = false;
@@ -85,6 +87,7 @@ export class PageEngine {
     this.viewportLazy = settings.translate.viewportLazy;
     this.contextEnabled = settings.translate.contextEnabled ?? true;
     this.contextMaxChars = Math.max(200, settings.translate.contextMaxChars ?? 3000);
+    this.attributesEnabled = settings.translate.translateAttributes ?? true;
     this.pageContext = undefined;
 
     // 失败重试：占位里的“重试”按钮
@@ -169,14 +172,14 @@ export class PageEngine {
           !this.doneTexts.has(u.text)
       );
       if (units.length === 0) {
-        void this.translatePlaceholders();
+        void this.translateAttributes();
         return;
       }
       // 页面大部分内容已有缓存（之前翻过）→ 整页直译；否则视口懒翻译省 token
       const cachedRatio = await this.checkPageCacheRatio(units);
       if (gen !== this.generation) return; // 等待期间被还原，放弃本次
       this.scheduleUnits(units, cachedRatio >= 0.6);
-      void this.translatePlaceholders();
+      void this.translateAttributes();
     } finally {
       this.translateAllRunning = false;
       if (this.translateAllQueued) {
@@ -203,26 +206,33 @@ export class PageEngine {
     }
   }
 
-  /** 翻译搜索框/输入框的 placeholder 提示词（去重 + 术语表 + 防重复） */
-  async translatePlaceholders(): Promise<void> {
+  /** 翻译页面属性文案（placeholder / title / alt / aria-label）：去重 + 术语表 + 防重复 */
+  async translateAttributes(): Promise<void> {
+    if (!this.attributesEnabled) return;
     const gen = this.generation;
-    const els = Array.from(
-      document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-        "input[placeholder], textarea[placeholder]"
-      )
-    ).filter(
-      (el) =>
-        el.placeholder.trim() !== "" &&
-        !el.hasAttribute("data-it-ph-done") &&
-        isTranslatablePlaceholder(el.placeholder, this.targetLang)
-    );
-    if (els.length === 0) return;
+    // 一次性收集全部可译属性候选，按文本去重后一次批译（与 placeholder 管线同思路）
+    const candidates: Array<{ el: HTMLElement; attr: TranslatableAttr; text: string }> = [];
+    for (const attr of TRANSLATABLE_ATTRS) {
+      const sel =
+        attr === "placeholder" ? "input[placeholder], textarea[placeholder]" : `[${attr}]`;
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>(sel))) {
+        if (candidates.length >= MAX_ATTR_CANDIDATES) break;
+        if (el.hasAttribute("data-it-attr-done")) continue;
+        if (!isTranslatableAttrElement(el, attr)) continue;
+        const text = (el.getAttribute(attr) ?? "").trim();
+        if (!text || text.length > MAX_ATTR_TEXT) continue;
+        if (!isTranslatableAttrText(text, this.targetLang)) continue;
+        candidates.push({ el, attr, text });
+      }
+      if (candidates.length >= MAX_ATTR_CANDIDATES) break;
+    }
+    if (candidates.length === 0) return;
 
-    const byText = new Map<string, (HTMLInputElement | HTMLTextAreaElement)[]>();
-    for (const el of els) {
-      const list = byText.get(el.placeholder) ?? [];
-      list.push(el);
-      byText.set(el.placeholder, list);
+    const byText = new Map<string, Array<{ el: HTMLElement; attr: TranslatableAttr }>>();
+    for (const c of candidates) {
+      const list = byText.get(c.text) ?? [];
+      list.push({ el: c.el, attr: c.attr });
+      byText.set(c.text, list);
     }
     const texts = [...byText.keys()];
 
@@ -230,33 +240,45 @@ export class PageEngine {
     try {
       results = await translateTexts(texts, this.targetLang, this.glossary);
     } catch {
-      return;
+      return; // 属性翻译失败不阻塞正文翻译，也无需报错占位
     }
     if (gen !== this.generation) return; // 期间被还原，放弃
 
     for (let i = 0; i < texts.length && i < results.length; i++) {
       const t = results[i]?.trim();
       if (!t) continue;
-      for (const el of byText.get(texts[i]) ?? []) {
-        if (!el.hasAttribute("data-it-ph-orig")) {
-          el.setAttribute("data-it-ph-orig", texts[i]);
-        }
-        el.placeholder = t;
-        el.setAttribute("data-it-ph-done", "");
+      for (const { el, attr } of byText.get(texts[i]) ?? []) {
+        saveOriginalAttr(el, attr);
+        el.setAttribute(attr, t);
+        el.setAttribute("data-it-attr-done", "");
       }
     }
   }
 
-  /** 还原 placeholder 提示词到原文 */
-  private restorePlaceholders(): void {
-    document
-      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-it-ph-done]")
-      .forEach((el) => {
+  /** 还原全部已译属性到原文（含旧版 placeholder 专用标记的兼容清理） */
+  private restoreAttributes(): void {
+    document.querySelectorAll<HTMLElement>("[data-it-attr-done]").forEach((el) => {
+      const raw = el.getAttribute("data-it-attr-orig");
+      if (raw) {
+        try {
+          const saved = JSON.parse(raw) as Record<string, string>;
+          for (const [attr, value] of Object.entries(saved)) el.setAttribute(attr, value);
+        } catch {
+          // 坏 JSON：保持译文态即可，还原流程不应中断
+        }
+      }
+      el.removeAttribute("data-it-attr-orig");
+      el.removeAttribute("data-it-attr-done");
+    });
+    // 兼容旧版 placeholder 专用标记（升级当刻未刷新页面的残留）
+    document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-it-ph-done]").forEach(
+      (el) => {
         const orig = el.getAttribute("data-it-ph-orig");
         if (orig !== null) el.placeholder = orig;
         el.removeAttribute("data-it-ph-orig");
         el.removeAttribute("data-it-ph-done");
-      });
+      }
+    );
   }
 
   /** 清理在途批次残留在容器上的处理标记：还原/换页时在途批次的 renderBatch 永远不会执行，
@@ -276,7 +298,7 @@ export class PageEngine {
     this.generation++; // 在途翻译结果作废（旧页容器已脱离文档）
     this.renderer.restore();
     this.clearProcessingMarks();
-    this.restorePlaceholders(); // SPA 换页后重置 placeholder，避免旧译文残留
+    this.restoreAttributes(); // SPA 换页后重置 placeholder，避免旧译文残留
     // 旧页上下文作废：换页后若观察器先于 translateAll 触发翻译，不能把旧页的
     // 标题/摘要当作新页语境注入（下次 translateAll 会按新页重新计算）
     this.pageContext = undefined;
@@ -302,7 +324,7 @@ export class PageEngine {
     this.generation++; // 在途翻译结果作废
     this.renderer.restore();
     this.clearProcessingMarks();
-    this.restorePlaceholders();
+    this.restoreAttributes();
     this.doneTexts.clear();
     this.pendingTexts.clear();
     this.allUnits.clear();
@@ -685,9 +707,44 @@ function getPageContext(maxChars: number): TranslationContext {
   return { title, description, content };
 }
 
-/** placeholder 提示词是否值得翻译：够长、含字母、且不是目标语言 */
-function isTranslatablePlaceholder(text: string, targetLang: string): boolean {
+/** ===== HTML 属性翻译（placeholder / title / alt / aria-label） ===== */
+
+const TRANSLATABLE_ATTRS = ["placeholder", "title", "alt", "aria-label"] as const;
+type TranslatableAttr = (typeof TRANSLATABLE_ATTRS)[number];
+
+/** 单条属性值翻译上限：更长的多半不是界面文案，跳过省 token */
+const MAX_ATTR_TEXT = 500;
+/** 属性候选元素上限：防超大页面扫描与请求量失控 */
+const MAX_ATTR_CANDIDATES = 300;
+
+/** 属性翻译元素级过滤：跳过我们的 UI、脚本/样式区、SVG、可编辑区与 aria-hidden / translate=no 子树。
+ *  INPUT/TEXTAREA 虽在正文提取的排除标签内（它们的文本不可译），但其 placeholder 属性可译。 */
+function isTranslatableAttrElement(el: HTMLElement, attr: TranslatableAttr): boolean {
+  if (attr !== "placeholder" && EXCLUDED_TAGS.has(el.tagName)) return false;
+  if (el.isContentEditable) return false;
+  if (el.closest("[data-it-ui], [data-it-unit], svg") !== null) return false;
+  if (el.closest('[aria-hidden="true"], [translate="no"]') !== null) return false;
+  return true;
+}
+
+/** 属性值是否值得翻译：够长、含字母、且不是目标语言（与正文提取同一套启发式） */
+function isTranslatableAttrText(text: string, targetLang: string): boolean {
   if (text.length < 2) return false;
-  if (!/[A-Za-zÀ-ɏ぀-ヿ가-힣一-鿿]/.test(text)) return false;
+  if (!LETTER_RE.test(text)) return false;
   return !isTargetLanguage(text, targetLang);
+}
+
+/** 首次修改前把该属性原文存进 data-it-attr-orig（JSON map），还原时据此恢复 */
+function saveOriginalAttr(el: HTMLElement, attr: TranslatableAttr): void {
+  let saved: Record<string, string> = {};
+  const raw = el.getAttribute("data-it-attr-orig");
+  if (raw) {
+    try {
+      saved = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      saved = {};
+    }
+  }
+  if (!(attr in saved)) saved[attr] = el.getAttribute(attr) ?? "";
+  el.setAttribute("data-it-attr-orig", JSON.stringify(saved));
 }

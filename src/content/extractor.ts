@@ -25,8 +25,9 @@ export interface ExtractOptions {
  * 注：BUTTON / OPTION / SELECT 不再整体排除——下拉菜单、点击展开的选项
  * 多为这类控件。它们改走“仅文本原位替换”（见 getControlEl 与 Renderer 的
  * textOnly 处理）：只改文字不改 DOM 结构，点击展开/选中交互不受影响。
+ * （导出供属性翻译的元素过滤复用）
  */
-const EXCLUDED_TAGS = new Set([
+export const EXCLUDED_TAGS = new Set([
   "SCRIPT", "STYLE", "NOSCRIPT", "IFRAME", "SVG", "MATH", "CODE", "PRE",
   "KBD", "SAMP", "VAR", "TEXTAREA", "INPUT",
 ]);
@@ -322,7 +323,8 @@ function shouldTranslate(
   return true;
 }
 
-const LETTER_RE = /[A-Za-zÀ-ɏ぀-ヿ가-힣一-鿿]/;
+/** 字母判定（含拉丁扩展/假名/韩文/汉字）：导出供属性翻译复用 */
+export const LETTER_RE = /[A-Za-zÀ-ɏ぀-ヿ가-힣一-鿿]/;
 
 /** 目标语言启发式：文本是否不含任何需翻译的字符（纯目标语言文本可跳过）。
  *  含拉丁字母、假名、韩文等外来字符即视为需要翻译，即使目标语言字符占比较高。
