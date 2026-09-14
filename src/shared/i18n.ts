@@ -155,7 +155,7 @@ function currentLang(): UiLang {
       : typeof navigator !== "undefined"
         ? navigator.languages ?? [navigator.language]
         : [];
-    lang = codes.some((c) => /^zh\b|^zh-/i.test(c)) ? "zh" : "en";
+    lang = codes.some((c) => /^zh/i.test(c)) ? "zh" : "en";
   } catch {
     lang = "zh";
   }

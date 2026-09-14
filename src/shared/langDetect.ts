@@ -23,34 +23,44 @@ export const KNOWN_SOURCE_LANGS = [
   "vi",
 ] as const;
 
-export type SourceLang = (typeof KNOWN_SOURCE_LANGS)[number] | "";
+export type SourceLang = (typeof KNOWN_SOURCE_LANGS)[number] | "zh-TW" | "";
 
-/** 语言别名归一：zh-CN/zh-Hans/zh-TW → zh；iw → he 等（html lang 常见写法收窄） */
+/** 语言别名归一：zh-CN/zh-Hans/zh-TW → zh；ISO 639-2 中文码 zho/chi → zh；iw → he 等
+ *  （html lang 常见写法收窄，否则这些标签会整体跳过 html-lang 快速路径） */
 export function normalizeLangTag(tag: string): string {
   const primary = tag.trim().toLowerCase().split(/[-_]/)[0] ?? "";
   if (primary === "iw" || primary === "ji") return "he";
   if (primary === "in") return "id";
+  if (primary === "zho" || primary === "chi") return "zh";
   return primary;
 }
 
 /**
  * 从页面检测源语言（content 侧调用一次，结果随会话复用）：
- * - `<html lang>` 命中已知语言 → 用它；
+ * - `<html lang>` 命中已知语言 → 用它（zh 系按原始标签保留繁体变体，见 refineZhVariant）；
  * - 否则按正文文本启发式猜（不精确，只用于提示词语境，宁缺毋滥返回 ""）。
  * forceSourceLang 非空时直接返回（用户显式指定优先）。
  */
 export function detectPageSourceLang(forceSourceLang: string, sampleText: string): SourceLang {
-  const forced = normalizeLangTag(forceSourceLang ?? "");
+  const forcedRaw = (forceSourceLang ?? "").trim();
+  const forced = normalizeLangTag(forcedRaw);
   if (forced && (KNOWN_SOURCE_LANGS as readonly string[]).includes(forced)) {
-    return forced as SourceLang;
+    return refineZhVariant(forcedRaw, forced);
   }
-  const htmlLang = normalizeLangTag(
-    document.documentElement?.getAttribute("lang") ?? ""
-  );
+  const htmlLangRaw = document.documentElement?.getAttribute("lang") ?? "";
+  const htmlLang = normalizeLangTag(htmlLangRaw);
   if (htmlLang && (KNOWN_SOURCE_LANGS as readonly string[]).includes(htmlLang)) {
-    return htmlLang as SourceLang;
+    return refineZhVariant(htmlLangRaw.trim(), htmlLang);
   }
   return guessFromText(sampleText);
+}
+
+/** zh 系保留繁体变体（zh-TW/zh-HK/zh-MO/zh-Hant → zh-TW；ISO 639-2 写法 zho-TW 同样识别）：
+ *  Microsoft 端点要求具体的 zh-Hans/zh-Hant（不认裸 zh），繁中页传 zh-Hans 会按简体处理；
+ *  简体/未知变体回落主码 zh，由各端点自行归一（Google → zh-CN，Microsoft → zh-Hans）。 */
+function refineZhVariant(rawTag: string, primary: string): SourceLang {
+  if (primary === "zh" && /^zho?[-_]?(tw|hk|mo|hant)\b/i.test(rawTag)) return "zh-TW";
+  return primary as SourceLang;
 }
 
 /** 文本启发式：按各语言特征字符的占比粗判。占比不明显时返回 ""（交给端点自动检测）。 */
@@ -89,6 +99,7 @@ export function withSourceLangContext(contextText: string, srcLang: string): str
   if (!srcLang) return contextText;
   const label: Record<string, string> = {
     zh: "中文",
+    "zh-TW": "中文（繁体）",
     en: "英语",
     ja: "日语",
     ko: "韩语",

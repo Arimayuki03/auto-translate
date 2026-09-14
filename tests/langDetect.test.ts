@@ -21,6 +21,10 @@ describe("normalizeLangTag", () => {
     expect(normalizeLangTag("iw")).toBe("he");
     expect(normalizeLangTag("in")).toBe("id");
   });
+  it("ISO 639-2 中文码归一：zho/chi → zh", () => {
+    expect(normalizeLangTag("zho-TW")).toBe("zh");
+    expect(normalizeLangTag("chi")).toBe("zh");
+  });
 });
 
 describe("detectPageSourceLang", () => {
@@ -37,6 +41,31 @@ describe("detectPageSourceLang", () => {
   it("html lang 未知语言时回退文本启发式", () => {
     document.documentElement.setAttribute("lang", "xx-Unknown");
     expect(detectPageSourceLang("", "これは日本語のテキストです。")).toBe("ja");
+  });
+
+  it("html lang 的 zh 变体保留繁体标记：zh-TW/zh-Hant → zh-TW，zh-CN/zh-Hans → zh", () => {
+    document.documentElement.setAttribute("lang", "zh-TW");
+    expect(detectPageSourceLang("", "text")).toBe("zh-TW");
+    document.documentElement.setAttribute("lang", "zh-Hant");
+    expect(detectPageSourceLang("", "text")).toBe("zh-TW");
+    document.documentElement.setAttribute("lang", "zh-CN");
+    expect(detectPageSourceLang("", "text")).toBe("zh");
+    document.documentElement.setAttribute("lang", "zh-Hans");
+    expect(detectPageSourceLang("", "text")).toBe("zh");
+  });
+
+  it("ISO 639-2 写法同样走 html lang 快速路径：zho-TW → zh-TW、zho → zh", () => {
+    document.documentElement.setAttribute("lang", "zho-TW");
+    expect(detectPageSourceLang("", "text")).toBe("zh-TW");
+    document.documentElement.setAttribute("lang", "zho-Hant");
+    expect(detectPageSourceLang("", "text")).toBe("zh-TW");
+    document.documentElement.setAttribute("lang", "zho");
+    expect(detectPageSourceLang("", "text")).toBe("zh");
+  });
+
+  it("强制源语言同样保留 zh 繁体变体（导入设置可写入 zh-TW）", () => {
+    expect(detectPageSourceLang("zh-TW", "text")).toBe("zh-TW");
+    expect(detectPageSourceLang("zh-HK", "text")).toBe("zh-TW");
   });
 
   it("无任何信号时返回空串（交给端点自动检测）", () => {
@@ -81,5 +110,9 @@ describe("withSourceLangContext", () => {
   });
   it("空上下文也能注入（生成带前导空行的语境段）", () => {
     expect(withSourceLangContext("", "en")).toContain("原文语言：英语");
+  });
+
+  it("zh-TW 注入繁体中文标签", () => {
+    expect(withSourceLangContext("CTX", "zh-TW")).toContain("原文语言：中文（繁体）");
   });
 });

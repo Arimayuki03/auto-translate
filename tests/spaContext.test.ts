@@ -6,8 +6,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PageEngine } from "../src/content/engine";
+import { PageObserver } from "../src/content/observer";
 import { Renderer } from "../src/content/renderer";
 import { extractUnits } from "../src/content/extractor";
+import { setupSpaNavigation } from "../src/content/navigation";
+import { resolveSiteRules, EMPTY_SITE_RULE } from "../src/shared/siteRules";
 import type { TranslationContext } from "../src/shared/messages";
 import type { Settings } from "../src/shared/types";
 
@@ -77,6 +80,20 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
+/** 轮询等待条件成立：提取/调度是多层异步链（chunked 提取按时间片让出），
+ *  固定轮数的 flush 在系统高负载下会提前返回，造成偶发失败 */
+async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+function translateCallCount(): number {
+  return sendMessage.mock.calls.filter((c) => c[0]?.type === "translate").length;
+}
+
 describe("SPA 换页清理旧上下文", () => {
   it("整页翻译携带旧页上下文", async () => {
     document.title = "旧页面标题";
@@ -131,5 +148,54 @@ describe("SPA 换页清理旧上下文", () => {
 
     const contexts = sentContexts();
     expect(contexts[contexts.length - 1]?.title).toBe("新页面标题");
+  });
+});
+
+describe("SPA 换页重解析站点规则", () => {
+  it("pushState 换页触发 onNavigation 按新 URL 重建规则（仅 hash 变化不触发）", () => {
+    // 用户规则只作用于 github.com/settings 路径前缀
+    const userRules = [{ matches: ["github.com/settings"], excludeSelectors: [".skip-me"] }];
+    const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
+    expect(engine.extractOptions.excludeSelector).toBeNull();
+    const onNavigation = vi.fn(() =>
+      engine.applySiteRule(resolveSiteRules(location.href, userRules, []))
+    );
+    const observer = new PageObserver(engine);
+    setupSpaNavigation({
+      engine,
+      renderer: new Renderer("bilingual"),
+      observer,
+      autoTranslate: false,
+      isSensitive: () => false,
+      isPageDisabled: () => false,
+      onNavigation,
+      ensureToolbar: vi.fn(),
+    });
+
+    history.pushState({}, "", "https://github.com/settings/security");
+    expect(onNavigation).toHaveBeenCalledTimes(1);
+    // 内置 math-render 规则全站命中，合并串里应包含本路径的用户排除选择器
+    expect(engine.extractOptions.excludeSelector).toContain(".skip-me");
+
+    // 仅 hash 变化（锚点跳转）：不算换页，不重解析
+    history.pushState({}, "", "https://github.com/settings/security#toc");
+    expect(onNavigation).toHaveBeenCalledTimes(1);
+    expect(engine.extractOptions.excludeSelector).toContain(".skip-me");
+    observer.disconnect(); // 测试结束前断开，避免 MutationObserver 回调串到后续用例
+  });
+
+  it("applySiteRule 后提取立即遵守新排除区（换页前的旧规则不再命中）", async () => {
+    document.title = "页面标题";
+    document.body.innerHTML = `<p>Translate this paragraph.</p><div class="ad-banner">Skipped banner text.</div>`;
+    const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
+    engine.applySiteRule({ ...EMPTY_SITE_RULE, excludeSelector: ".ad-banner" });
+
+    await engine.translateAll();
+    await waitFor(() => translateCallCount() > 0);
+    const sent = sendMessage.mock.calls
+      .filter((c) => c[0]?.type === "translate")
+      .flatMap((c) => (c[0] as { texts?: string[] }).texts ?? []);
+    expect(sent).toContain("Translate this paragraph.");
+    expect(sent.join("\n")).not.toContain("Skipped banner text.");
   });
 });

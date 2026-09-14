@@ -46,6 +46,18 @@ beforeAll(async () => {
       args: [`--disable-extensions-except=${distDir}`, `--load-extension=${distDir}`],
     });
     browserAvailable = true;
+    // 免费通道 mock 在 context 级注册一次（覆盖所有用例新开的页面，不随用例叠加）：
+    // 任何 translate.googleapis.com 请求都返回固定译文
+    await context.route("**://translate.googleapis.com/**", (route) => {
+      const url = new URL(route.request().url());
+      const q = url.searchParams.get("q") ?? "";
+      const translated = `「${q}」`;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([[[translated, q, null, null, 10]], null, "en"]),
+      });
+    });
   } catch {
     browserAvailable = false; // 无浏览器环境（CI 未装）：跳过
   }
@@ -66,30 +78,14 @@ async function freshPage(): Promise<Page> {
     sw = context.serviceWorkers().find((w) => w.url().includes("service-worker-loader"));
   }
   if (!sw) throw new Error("SKIP");
+  // 通过扩展 SW 把默认 API 切到 googlefree（免 Key，端点已被 context 级 route mock）。
+  // 直接写 chrome.storage 的最小设置：读取侧 getSettings 按段合并默认值。
+  // （此前先 import 存储 chunk 再调 saveSettings，但 chunk 文件名带内容哈希，构建一变即失效）
   await sw.evaluate(async () => {
-    const { getSettings, saveSettings } = await import("./assets/storage-BtNi0PCW.js");
-    const s = await getSettings();
-    s.api.format = "googlefree";
-    await saveSettings(s);
-  }).catch(async () => {
-    // chunk 文件名变化时兜底：直接用 chrome.storage 写最小设置（读取侧会合并默认值）
-    await sw!.evaluate(async () => {
-      const stored = await chrome.storage.local.get("settings");
-      const s = stored.settings ?? {};
-      s.api = { ...(s.api ?? {}), format: "googlefree" };
-      await chrome.storage.local.set({ settings: s });
-    });
-  });
-  // 免费通道 mock：任何 translate.googleapis.com 请求都返回固定译文
-  await context.route("**://translate.googleapis.com/**", (route) => {
-    const url = new URL(route.request().url());
-    const q = url.searchParams.get("q") ?? "";
-    const translated = `「${q}」`;
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify([[[translated, q, null, null, 10]], null, "en"]),
-    });
+    const stored = await chrome.storage.local.get("settings");
+    const s = (stored.settings ?? {}) as { api?: Record<string, unknown> };
+    s.api = { ...(s.api ?? {}), format: "googlefree" };
+    await chrome.storage.local.set({ settings: s });
   });
   const p = await context.newPage();
   await p.goto(baseUrl);

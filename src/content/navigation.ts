@@ -36,6 +36,9 @@ export interface SpaNavigationOptions {
   isSensitive: () => boolean;
   /** 当前子页是否被用户「还原」过（禁用自动翻译），只影响该子页 */
   isPageDisabled: () => boolean;
+  /** 真正换页（URL 变化，hash 微调不算）时的额外动作：换页后按新 URL 重解析站点规则等。
+   *  在 resetForNavigation 之后、延迟重译之前调用。 */
+  onNavigation?: () => void;
 }
 
 export function setupSpaNavigation(opts: SpaNavigationOptions): void {
@@ -62,6 +65,7 @@ export function setupSpaNavigation(opts: SpaNavigationOptions): void {
       lastNavUrl = location.href;
       lastNavAt = Date.now();
       opts.engine.resetForNavigation();
+      opts.onNavigation?.(); // 换页后按新 URL 重建站点规则等（先于延迟重译，新页首扫即用新规则）
     }
     // 该子页被用户「还原」过（禁用自动翻译）：保持原文、引擎回到未翻译态、不重译。
     // 在重建工具条之前处理，让工具条按「未翻译」态初始化。

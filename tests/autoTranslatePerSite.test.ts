@@ -80,10 +80,18 @@ function makeEngine(settings: Settings) {
   return new PageEngine(renderer, settings);
 }
 
-/** translateAll 内部把翻译任务 fire-and-forget，需等一两个宏任务让渲染完成 */
-async function flush(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 0));
-  await Promise.resolve();
+/** translateAll 内部把翻译任务 fire-and-forget：提取/调度是多层异步链（chunked 提取按
+ *  时间片让出），固定轮数的 flush 在系统高负载下会提前返回造成偶发失败，改为轮询等待 */
+async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+function translateCallCount(): number {
+  return sendMessage.mock.calls.filter(([m]) => m?.type === "translate").length;
 }
 
 describe("自动翻译 vs 还原", () => {
@@ -131,12 +139,11 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
     expect(engine.targetLanguage).toBe("en");
 
     await engine.translateAll();
-    await flush();
+    await waitFor(() => translateCallCount() > 0);
     // 自动翻译发出的请求必须用还原后的语言
     const translateCalls = sendMessage.mock.calls.filter(([m]) => m?.type === "translate");
-    expect(translateCalls.length).toBeGreaterThan(0);
     expect(translateCalls.every(([m]) => m.targetLang === "en")).toBe(true);
-    expect(document.body.textContent).toContain("【译】");
+    await waitFor(() => (document.body.textContent ?? "").includes("【译】"));
   });
 
   it("还原的 displayMode 会被渲染器使用（仅译文模式生效）", async () => {
@@ -155,8 +162,10 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
     expect(engine.renderer.getMode()).toBe("translated");
 
     await engine.translateAll();
-    await flush();
     // 仅译文模式：译文元素可见（包裹容器用纯 CSS 切换，译文顶替原文位置）
+    await waitFor(
+      () => document.querySelectorAll(".it-translated.it-done").length > 0
+    );
     expect(document.querySelectorAll(".it-translated.it-done").length).toBeGreaterThan(0);
     // 原文被隐藏
     expect(document.querySelectorAll("[data-it-orig-hidden]").length).toBeGreaterThan(0);

@@ -20,8 +20,8 @@ const MAX_SEGMENTS_PER_REQUEST = 50;
 /** 请求启动间隔（毫秒）：免费端点，与 googlefree 同样压低速率防 429 */
 const MIN_START_INTERVAL_MS = 300;
 
-/** 目标语言归一化为 Microsoft 语言码（zh-Hans / zh-Hant / ja / ko / en…） */
-/** 微软端点源语言归一：zh 系传 zh-Hans（端点要求）；其余取主码 */
+/** 微软端点源语言归一：端点不认裸 zh，必须传具体变体——检测层保留的 zh-TW 落到
+ *  zh-Hant；简体/未知变体的 zh 按 zh-Hans 传；非 zh 取主码 */
 function toMicrosoftSourceLang(lang: string): string {
   const primary = lang.trim().toLowerCase().split(/[-_]/)[0] ?? "";
   if (primary === "zh") {
@@ -30,6 +30,7 @@ function toMicrosoftSourceLang(lang: string): string {
   return primary;
 }
 
+/** 目标语言归一化为 Microsoft 语言码（zh-Hans / zh-Hant / ja / ko / en…） */
 function toMicrosoftLang(lang: string): string {
   const l = lang.trim();
   if (/^zh-?(cn|hans|sg)/i.test(l)) return "zh-Hans";

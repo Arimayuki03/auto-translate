@@ -143,6 +143,17 @@ export class PageEngine {
     this.renderer.setTargetLang(lang); // 占位估算/chunk 分隔按新语言渲染
   }
 
+  /** SPA 换页后按新 URL 重解析站点规则（index.ts 在导航回调里调用）：
+   *  排除区/排除标签/强制块级即时生效，后续提取与属性翻译都用新规则。 */
+  applySiteRule(siteRule: ResolvedSiteRule): void {
+    this.opts = {
+      ...this.opts,
+      excludeTags: siteRule.excludeTags,
+      forceBlockTags: siteRule.forceBlockTags,
+      excludeSelector: siteRule.excludeSelector ?? null,
+    };
+  }
+
   /** 单条文本翻译（划词 / 输入框），失败 throw */
   async translateText(text: string): Promise<string> {
     const [r] = await translateTexts([text], this.targetLang, this.glossary);

@@ -4,6 +4,7 @@
  *  工具条、划词气泡、输入框翻译、SPA 导航接管是 top 专属装配。 */
 import type { ItCommandMessage } from "../shared/messages";
 import { resolveSiteRules } from "../shared/siteRules";
+import type { ResolvedSiteRule } from "../shared/siteRules";
 import { getSettings } from "../shared/storage";
 import type { Settings } from "../shared/types";
 import {
@@ -64,13 +65,15 @@ async function main(): Promise<void> {
   const applyStyle = (): void =>
     applyTranslationStyle(settings.translate.style, settings.translate.customCss ?? "");
   applyStyle();
-  // 站点规则库：内置规则 + 用户自定义规则按本 frame URL 合并解析（每 frame 独立，按各自 URL 匹配）
-  const siteRule = resolveSiteRules(
-    location.href,
-    settings.sites.rules ?? [],
-    settings.sites.disabledRuleIds ?? []
-  );
-  const engine = new PageEngine(renderer, settings, siteRule);
+  // 站点规则库：内置规则 + 用户自定义规则按本 frame URL 合并解析（每 frame 独立，按各自 URL 匹配）。
+  // SPA 换页不重跑 main()：导航回调里按新 URL 重解析（见 setupSpaNavigation 的 onNavigation）
+  const resolveSiteRule = (): ResolvedSiteRule =>
+    resolveSiteRules(
+      location.href,
+      settings.sites.rules ?? [],
+      settings.sites.disabledRuleIds ?? []
+    );
+  const engine = new PageEngine(renderer, settings, resolveSiteRule());
 
   let toolbar: Toolbar | null = null;
   if (isTop) {
@@ -108,6 +111,8 @@ async function main(): Promise<void> {
       autoTranslate: settings.translate.autoTranslate,
       isSensitive,
       isPageDisabled,
+      // 带路径前缀的站点规则（matches/excludeMatches）随 SPA 换页按新 URL 重新解析
+      onNavigation: () => engine.applySiteRule(resolveSiteRule()),
       ensureToolbar: () => {
         if (!document.querySelector(".it-toolbar")) {
           toolbar?.destroy(); // 工具条随旧 body 被移除，清理引用并重建
