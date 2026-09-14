@@ -21,11 +21,13 @@ export interface ApiDiagnostic {
   responsePreview?: string;
 }
 
-/** 页面上下文只用于全页翻译；划词/输入框请求不携带，避免额外 token */
+/** 页面上下文只用于全页翻译；划词/输入框请求不携带，避免额外 token。
+ *  summary 为 LLM 生成的文章摘要（长文页整页翻译期间异步补充，带缓存）；缺省时只用原文截断。 */
 export interface TranslationContext {
   title?: string;
   description?: string;
   content?: string;
+  summary?: string;
 }
 
 export interface TranslateRequestMessage {
@@ -105,6 +107,27 @@ export interface CheckCacheMessage {
   type: "check-cache";
   targetLang: string;
   texts: string[];
+}
+
+// ===== LLM 页面上下文摘要（content → background，整页翻译期间异步补充）=====
+
+/** 生成/读取页面文章摘要（背景按「标题+正文+配置」哈希查缓存，未命中才请求 LLM）。
+ *  失败静默返回空摘要：content 侧保持原文截断上下文，不阻塞也不报错。 */
+export interface PageSummaryRequestMessage {
+  type: "page-summary";
+  id: string;
+  title: string;
+  /** 发送侧已按 contextMaxChars 截断的正文文本 */
+  content: string;
+  /** 随整页翻译会话中止（还原/换页时不再浪费这次请求） */
+  sessionId?: number;
+}
+
+export interface PageSummaryResponseMessage {
+  id: string;
+  ok: boolean;
+  summary?: string;
+  error?: string;
 }
 
 // ===== 划词流式翻译（Port 长连接协议）=====

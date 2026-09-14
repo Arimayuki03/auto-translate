@@ -2,6 +2,8 @@ import type {
   CancelTranslationMessage,
   CheckCacheMessage,
   ItCommandMessage,
+  PageSummaryRequestMessage,
+  PageSummaryResponseMessage,
   StreamPortMessage,
   StreamStartMessage,
   TestConnectionRequestMessage,
@@ -162,6 +164,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) =>
         sendResponse({ cachedCount: 0, error: err instanceof Error ? err.message : String(err) })
       );
+    return true;
+  }
+
+  // ===== LLM 页面上下文摘要 =====
+
+  // 生成/读取页面文章摘要（缓存优先）。随整页翻译会话中止（还原/换页时按 sessionId 一并中止）；
+  // 失败静默返回空摘要：content 侧回退原文截断上下文，不阻塞翻译批次。
+  if (message?.type === "page-summary") {
+    const req = message as PageSummaryRequestMessage;
+    const controller = new AbortController();
+    registerController(req.sessionId, controller);
+    beginKeepAlive();
+    translateService
+      .generatePageSummary(req.title, req.content, controller.signal)
+      .then(
+        (summary) => sendResponse({ id: req.id, ok: true, summary } as PageSummaryResponseMessage),
+        (err) =>
+          sendResponse({
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          } as PageSummaryResponseMessage)
+      )
+      .finally(() => {
+        endKeepAlive();
+        unregisterController(req.sessionId, controller);
+      });
     return true;
   }
 

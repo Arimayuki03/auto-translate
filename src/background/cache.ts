@@ -1,4 +1,6 @@
 const CACHE_PREFIX = "it-cache:";
+/** LLM 页面摘要缓存前缀：与译文缓存同库（chrome.storage.local）但键空间独立 */
+const SUMMARY_PREFIX = "it-summary:";
 
 /** FNV-1a 同步哈希：比 SHA-256 快两个数量级，无异步开销，适合高频缓存键。
  *  32 位哈希在条目量大时有碰撞可能——因此值里同时保存原文（src），读取时校验：
@@ -162,5 +164,130 @@ export class TranslationCache {
 
   private cacheKey(targetLang: string, text: string, variant: string): string {
     return CACHE_PREFIX + fnv1aHex(`${targetLang}|${variant}|${text}`);
+  }
+}
+
+/** 摘要缓存条目：val 为 LLM 生成的文章摘要，src 为「标题|正文」的哈希（碰撞校验用——
+ *  正文最长可达数千字符，存哈希而不是原文，单条目 ~100 字节，长期堆积也撑不爆存储配额），
+ *  ts 为写入时间戳（TTL 淘汰用）。 */
+interface SummaryEntry {
+  src: string;
+  val: string;
+  ts: number;
+}
+
+/**
+ * LLM 页面摘要缓存：内存（快速层）+ chrome.storage.local（磁盘持久层），结构与译文缓存同思路。
+ *  键 = 变体(通道格式+模型) + 标题 + 正文长度 + 正文 的哈希：同一页面在模型变更后重新生成，
+ *  同一页面的重复翻译/重复访问直接命中。TTL 与条目上限由 TranslateService 按设置刷新。
+ */
+export class SummaryCache {
+  private memory = new Map<string, SummaryEntry>();
+
+  maxEntries = 5000;
+  ttlDays = 7;
+
+  private expired(ts: number): boolean {
+    if (this.ttlDays <= 0) return false;
+    return Date.now() - ts > this.ttlDays * 24 * 60 * 60 * 1000;
+  }
+
+  private static key(title: string, content: string, variant: string): string {
+    return SUMMARY_PREFIX + fnv1aHex(`${variant}|${title}|${content.length}|${content}`);
+  }
+
+  private static srcOf(title: string, content: string): string {
+    return fnv1aHex(`${title}|${content}`);
+  }
+
+  async get(title: string, content: string, variant = ""): Promise<string | undefined> {
+    const key = SummaryCache.key(title, content, variant);
+    const hit = this.memory.get(key);
+    if (hit) {
+      if (hit.src !== SummaryCache.srcOf(title, content) || this.expired(hit.ts)) return undefined;
+      return hit.val;
+    }
+    const stored = await chrome.storage.local.get(key);
+    const value = stored[key] as Partial<SummaryEntry> | undefined;
+    if (
+      value &&
+      typeof value === "object" &&
+      typeof value.val === "string" &&
+      typeof value.src === "string" &&
+      value.src === SummaryCache.srcOf(title, content) &&
+      typeof value.ts === "number" &&
+      !this.expired(value.ts)
+    ) {
+      const entry: SummaryEntry = { src: value.src, val: value.val, ts: value.ts };
+      this.memory.set(key, entry);
+      return entry.val;
+    }
+    return undefined;
+  }
+
+  async set(title: string, content: string, summary: string, variant = ""): Promise<void> {
+    if (!summary.trim()) return; // 空摘要不缓存（失败结果每次重生成会浪费请求）
+    const key = SummaryCache.key(title, content, variant);
+    const entry: SummaryEntry = {
+      src: SummaryCache.srcOf(title, content),
+      val: summary,
+      ts: Date.now(),
+    };
+    if (this.memory.size >= this.maxEntries && !this.memory.has(key)) {
+      const oldest = this.memory.keys().next().value as string | undefined;
+      if (oldest) this.memory.delete(oldest);
+    }
+    this.memory.set(key, entry);
+    try {
+      await chrome.storage.local.set({ [key]: entry });
+    } catch {
+      // 磁盘写入失败（多为配额超限）：内存层照常命中，下次访问重读失败也只是一次重新生成
+      console.warn("[auto-translate] 页面摘要缓存磁盘写入失败（可能已达存储配额上限）");
+    }
+  }
+
+  async clear(): Promise<void> {
+    this.memory.clear();
+    await removeStorageByPrefix(SUMMARY_PREFIX);
+  }
+
+  /** 每日清理：移除过期条目，再按写入时间保留最新 maxEntries 条 */
+  async cleanupExpired(): Promise<number> {
+    const all = await chrome.storage.local.get(null);
+    const keys = Object.keys(all).filter((k) => k.startsWith(SUMMARY_PREFIX));
+    if (keys.length === 0) return 0;
+    const valid: Array<{ key: string; ts: number }> = [];
+    const toRemove: string[] = [];
+    for (const key of keys) {
+      const e = all[key] as Partial<SummaryEntry> | undefined;
+      if (!e || typeof e !== "object" || typeof e.ts !== "number" || this.expired(e.ts)) {
+        toRemove.push(key);
+        continue;
+      }
+      valid.push({ key, ts: e.ts });
+    }
+    if (valid.length > this.maxEntries) {
+      valid.sort((a, b) => b.ts - a.ts);
+      toRemove.push(...valid.slice(this.maxEntries).map((v) => v.key));
+    }
+    if (toRemove.length > 0) {
+      await chrome.storage.local.remove(toRemove).catch(() => undefined);
+    }
+    return toRemove.length;
+  }
+
+  /** 磁盘层条目数（设置页「缓存管理」展示用） */
+  async diskCount(): Promise<number> {
+    const all = await chrome.storage.local.get(null);
+    return Object.keys(all).filter((k) => k.startsWith(SUMMARY_PREFIX)).length;
+  }
+}
+
+/** 按前缀删除 storage.local 键（clear 的定点清理；get(null) 全量读入后过滤） */
+async function removeStorageByPrefix(prefix: string): Promise<void> {
+  const all = await chrome.storage.local.get(null);
+  const keys = Object.keys(all).filter((k) => k.startsWith(prefix));
+  if (keys.length > 0) {
+    await chrome.storage.local.remove(keys).catch(() => undefined);
   }
 }

@@ -1,7 +1,7 @@
 import type { ApiConfig, BatchMode, Settings } from "../shared/types";
 import type { TranslationContext } from "../shared/messages";
 import { getSettings } from "../shared/storage";
-import { TranslationCache, fnv1aHex } from "./cache";
+import { TranslationCache, SummaryCache, fnv1aHex } from "./cache";
 import { TokenBucket } from "./rateLimiter";
 import { ApiError, withErrorSource } from "./providers/http";
 import { createProvider } from "./providers";
@@ -41,6 +41,14 @@ export const BATCH_SEPARATOR = "===IT_SEP===";
 /** 免译哨兵：批量输出「严格等于」该值（忽略首尾空白）的段，返回原文代替译文
  *  （该段本身已是目标语言 / 代码 / 公式 / 编号 / 专有名词等，不硬译；未来方向 三.5） */
 export const NO_TRANSLATION_SENTINEL = "{{NO_TRANSLATION_NEEDED}}";
+
+/** LLM 页面摘要的系统提示词：摘要只注入翻译上下文（帮助模型理解长文语境），
+ *  不套用用户自定义翻译指令——那是给「译文输出」定的规则，与摘要无关。 */
+export const SUMMARY_SYSTEM_PROMPT =
+  "你是专业的文章摘要引擎。请用 2-3 句话概括文章的主题与关键信息，只输出摘要本身，不要解释、不要任何前缀、引号或格式。";
+
+/** 摘要输出上限：超长多半是模型没遵守指令，截断保底（上下文注入也不该太长） */
+const MAX_SUMMARY_CHARS = 600;
 
 /** 批量解析失败时的二次降级组大小：先拆成 ≤8 段的小批量重试——小批量输出短、
  *  解析成功率高，把最坏情况的请求数从 N 压到约 N/8；仍失败的组才逐段。 */
@@ -164,6 +172,13 @@ export class TranslateService {
 
   private cache = new TranslationCache();
   private cacheEnabled = true;
+  /** LLM 页面摘要缓存：与译文缓存同一套 TTL/上限设置，键空间独立 */
+  private summaryCache = new SummaryCache();
+  /** 摘要缓存变体：只掺影响摘要结果的配置（通道格式/模型）。自定义翻译 prompt 不影响摘要，
+   *  不掺入——用户改译文指令不应让所有页面摘要重新生成 */
+  private summaryVariant = "";
+  /** 摘要生成的跨标签页在途去重：同页多标签同时整页翻译只发一次摘要请求 */
+  private summaryInflight = new Map<string, Promise<string>>();
   /** 缓存变体：掺入影响译文结果的配置（通道格式/模型/自定义提示词）。
    *  切换模型或修改 prompt 后旧缓存不再命中，避免「改了设置却像是没生效」的困惑；
    *  术语表不参与——术语占位在 content 侧完成，后台缓存的原文本身已含 ⟦n⟧ token。 */
@@ -520,18 +535,26 @@ export class TranslateService {
 
   /** 清空译文缓存（设置页入口） */
   async clearCache(): Promise<void> {
-    await this.cache.clear();
+    await Promise.all([this.cache.clear(), this.summaryCache.clear()]);
   }
 
   /** 清理过期/超额缓存条目（chrome.alarms 每日触发；设置页可手动触发）。返回删除条数 */
   async cleanupCache(): Promise<number> {
     this.applyCacheSettings(await this.getSettingsCached());
-    return this.cache.cleanupExpired();
+    const [removed, removedSummaries] = await Promise.all([
+      this.cache.cleanupExpired(),
+      this.summaryCache.cleanupExpired(),
+    ]);
+    return removed + removedSummaries;
   }
 
-  /** 磁盘层缓存条目数（设置页「缓存管理」展示） */
+  /** 磁盘层缓存条目数（设置页「缓存管理」展示；含译文 + 页面摘要） */
   async cacheStats(): Promise<number> {
-    return this.cache.diskCount();
+    const [count, summaryCount] = await Promise.all([
+      this.cache.diskCount(),
+      this.summaryCache.diskCount(),
+    ]);
+    return count + summaryCount;
   }
 
   /** 返回一批文本中命中缓存的条数（用于内容侧决定整页直译还是视口懒翻译） */
@@ -545,6 +568,85 @@ export class TranslateService {
     return checks.filter((v) => v !== undefined).length;
   }
 
+  /**
+   * LLM 页面摘要（整页翻译期间由 content 异步请求，不阻塞翻译批次）：
+   * 缓存命中直接返回；未命中走与翻译同一套启动限速/并发限制的 LLM 请求生成 2-3 句摘要并落盘。
+   * best-effort：开关关闭 / 免费通道 / 空正文 / 请求失败 一律返回 ""，
+   * content 侧保持「标题/描述/正文截断」的原始上下文，不受影响。
+   */
+  async generatePageSummary(title: string, content: string, signal?: AbortSignal): Promise<string> {
+    const settings = await this.getSettingsCached();
+    this.applyCacheSettings(settings);
+    if (!settings.translate.summaryEnabled || signal?.aborted) return "";
+    // 免费通道（googlefree/microsoft）是纯翻译端点，无法执行摘要指令：只支持 LLM 通道
+    if (settings.api.format === "googlefree" || settings.api.format === "microsoft") return "";
+    const t = title.trim();
+    const c = content.trim();
+    if (!c) return "";
+    const cached = this.cacheEnabled
+      ? await this.summaryCache.get(t, c, this.summaryVariant)
+      : undefined;
+    if (cached !== undefined) return cached;
+
+    // 跨标签页去重：同一页面的并发摘要请求共享同一次生成
+    const key = `${this.summaryVariant}|${fnv1aHex(`${t}\u0000${c}`)}`;
+    const inflight = this.summaryInflight.get(key);
+    if (inflight) return inflight;
+    const promise = this.generateSummary(settings, t, c, signal);
+    this.summaryInflight.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      // 仅当条目仍指向本次执行时清除（并发覆盖场景不能误删后发起的请求）
+      if (this.summaryInflight.get(key) === promise) this.summaryInflight.delete(key);
+    }
+  }
+
+  /** 摘要生成执行体：与翻译共用限速/并发/重试设施；失败静默返回 ""，不缓存失败结果 */
+  private async generateSummary(
+    settings: Settings,
+    title: string,
+    content: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const limit = Math.max(1, settings.api.maxConcurrency || 3);
+    const interval = Math.max(50, settings.api.minRequestIntervalMs ?? 500);
+    this.minRequestIntervalMs = interval;
+    this.configureChannels(1000 / interval, Math.min(limit, 16));
+    const messages: ChatMessage[] = [
+      { role: "system", content: SUMMARY_SYSTEM_PROMPT },
+      { role: "user", content: `标题：${title || "（无标题）"}\n\n正文：\n${content}` },
+    ];
+    const api = settings.api;
+    try {
+      // 摘要是 best-effort 增强：至多一次重试，避免坏端点上每页都白烧 4 次请求
+      const raw = await this.runConcurrent(limit, () =>
+        withRetry(
+          () =>
+            this.request(api, messages, {
+              batchMode: "lines",
+              batchSeparator: BATCH_SEPARATOR,
+              batchSize: 1,
+              freeEndpoint: api.freeEndpoint,
+              freeBackupEndpoint: api.freeBackupEndpoint,
+              signal,
+            }),
+          1,
+          (pauseMs) => this.pauseRateLimit(api, pauseMs)
+        )
+      );
+      if (signal?.aborted) return "";
+      const summary = raw.trim().slice(0, MAX_SUMMARY_CHARS);
+      if (!summary) return "";
+      if (this.cacheEnabled) {
+        await this.summaryCache.set(title, content, summary, this.summaryVariant);
+      }
+      return summary;
+    } catch {
+      return "";
+    }
+  }
+
   /** 应用缓存设置（开关 / 内存条目上限 / 过期天数 / 变体）：每次请求前刷新，设置页改动即时生效 */
   private applyCacheSettings(settings: Settings): void {
     this.cacheEnabled = settings.cache.enabled;
@@ -553,6 +655,9 @@ export class TranslateService {
     this.cacheVariant = fnv1aHex(
       [settings.api.format, settings.api.model, settings.api.customSystemPrompt ?? ""].join("|")
     );
+    this.summaryCache.maxEntries = this.cache.maxEntries;
+    this.summaryCache.ttlDays = this.cache.ttlDays;
+    this.summaryVariant = fnv1aHex([settings.api.format, settings.api.model].join("|"));
   }
 
   /** 带缓存的 getSettings：避免每次翻译请求都读 chrome.storage + 解密 API Key。
@@ -602,7 +707,7 @@ export class TranslateService {
     }
   ): Promise<string> {
     const contextText = opts?.context
-      ? `\n\n页面上下文（仅用于理解语境，不要翻译或复述这段上下文）：\n标题：${opts.context.title ?? ""}\n描述：${opts.context.description ?? ""}\n正文摘要：${opts.context.content ?? ""}`
+      ? `\n\n页面上下文（仅用于理解语境，不要翻译或复述这段上下文）：\n标题：${opts.context.title ?? ""}\n描述：${opts.context.description ?? ""}${opts.context.summary ? `\n文章摘要：${opts.context.summary}` : ""}\n正文摘要：${opts.context.content ?? ""}`
       : "";
     const chatOpts = (mode: BatchMode) => ({
       batchMode: mode,

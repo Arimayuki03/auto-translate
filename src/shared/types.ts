@@ -62,6 +62,11 @@ export interface Settings {
     contextEnabled?: boolean;
     /** 标题、描述、正文摘要合计最大字符数 */
     contextMaxChars?: number;
+    /** LLM 页面摘要：整页翻译时请 LLM 概括文章主题注入上下文（结果按页缓存，每页至多一次请求）。
+     *  仅 LLM 通道可用；免费通道（googlefree/microsoft）自动跳过，回退原文截断。 */
+    summaryEnabled?: boolean;
+    /** 页面正文字数超过该阈值才生成 LLM 摘要（短页原文截断已够用，省一次请求）；0 = 不限 */
+    summaryMinChars?: number;
     /** 译文样式主题（灰字默认）；变更后下次注入页面生效 */
     style?: TranslationStyle;
     /** 用户自定义译文 CSS（附加在主题之上，限长由设置页钳制） */

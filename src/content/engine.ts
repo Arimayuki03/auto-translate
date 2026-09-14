@@ -2,6 +2,8 @@
 import type {
   CancelTranslationMessage,
   CheckCacheMessage,
+  PageSummaryRequestMessage,
+  PageSummaryResponseMessage,
   TranslationContext,
 } from "../shared/messages";
 import type { Settings } from "../shared/types";
@@ -47,6 +49,9 @@ export class PageEngine {
   /** 页面上下文（标题/描述/正文摘要）仅整页翻译注入，可在设置里关闭或限制长度 */
   private contextEnabled: boolean;
   private contextMaxChars: number;
+  /** LLM 页面摘要：长文页（正文超 summaryMinChars）整页翻译期间异步补一条文章摘要进上下文 */
+  private summaryEnabled: boolean;
+  private summaryMinChars: number;
   /** HTML 属性翻译开关（placeholder / title / alt / aria-label） */
   private attributesEnabled: boolean;
   private pageContext: TranslationContext | undefined;
@@ -92,6 +97,8 @@ export class PageEngine {
     this.viewportLazy = settings.translate.viewportLazy;
     this.contextEnabled = settings.translate.contextEnabled ?? true;
     this.contextMaxChars = Math.max(200, settings.translate.contextMaxChars ?? 3000);
+    this.summaryEnabled = settings.translate.summaryEnabled ?? false;
+    this.summaryMinChars = Math.max(0, settings.translate.summaryMinChars ?? 6000);
     this.attributesEnabled = settings.translate.translateAttributes ?? true;
     this.pageContext = undefined;
 
@@ -158,7 +165,21 @@ export class PageEngine {
     this.lastError = undefined; // 新一轮翻译开始，清掉上一轮的失败信息
     try {
       const gen = this.generation;
-      this.pageContext = this.contextEnabled ? getPageContext(this.contextMaxChars) : undefined;
+      const collected = this.contextEnabled
+        ? getPageContext(this.contextMaxChars, this.summaryEnabled ? this.summaryMinChars : 0)
+        : undefined;
+      this.pageContext = collected?.context;
+      // LLM 页面摘要（未来方向 P2）：长文页异步补一条文章摘要进上下文。
+      // 不 await——首批请求先带「标题/描述/正文截断」发出，摘要返回后的批次自动携带；
+      // 摘要按页缓存在 background，重复翻译/回访时首个请求就能拿到。
+      if (
+        collected?.context &&
+        this.summaryEnabled &&
+        collected.context.content &&
+        collected.totalLen >= this.summaryMinChars
+      ) {
+        void this.enrichPageSummary(gen, collected.context);
+      }
       // 全页扫描用时间片版提取：超大页面不再一次性阻塞主线程（借鉴 read-frog chunked walk）。
       // 让出期间若被还原（generation 变化）则中止本次。
       const extracted = await extractUnitsChunked(
@@ -234,6 +255,31 @@ export class PageEngine {
       return (res?.cachedCount ?? 0) / sample.length;
     } catch {
       return 0;
+    }
+  }
+
+  /**
+   * 请求 background 生成/读取 LLM 页面摘要并并入页面上下文（best-effort 增强）：
+   * 失败/被中止时保持「标题/描述/正文截断」原样，翻译不受影响。
+   * 结果只并入本次翻译会话的上下文：还原/换页（代次变化）或 translateAll 已重建上下文时丢弃，
+   * 避免把上一轮/旧页的摘要串进新一轮。
+   */
+  private async enrichPageSummary(gen: number, base: TranslationContext): Promise<void> {
+    const req: PageSummaryRequestMessage = {
+      type: "page-summary",
+      id: `ps-${Date.now()}-${++summaryMsgSeq}`,
+      title: base.title ?? "",
+      content: base.content ?? "",
+      sessionId: gen,
+    };
+    try {
+      const res = (await chrome.runtime.sendMessage(req)) as PageSummaryResponseMessage | undefined;
+      if (!res?.ok || !res.summary) return;
+      if (gen !== this.generation) return;
+      if (this.pageContext !== base) return;
+      this.pageContext = { ...base, summary: res.summary };
+    } catch {
+      // 消息通道异常（如 SW 重启窗口）：摘要缺席不影响翻译
     }
   }
 
@@ -682,12 +728,14 @@ function buildBatches(entries: [string, TranslationUnit[]][]): [string, Translat
 }
 
 /** 收集页面上下文（标题/描述/正文摘要）：整页翻译注入，给模型提供语境；正文按设置上限截断。
+ *  countUpTo：LLM 摘要启用时同步统计页面正文字数（计到该阈值即可判定长文页，无需全页精确值）；
+ *  传 0 表示不需要统计（摘要关闭），遍历在 content 预算处提前停止，行为与历史版本一致。
  *  性能要点（大页面卡顿修复）：
  *  - 不深克隆整个 body、不读 innerText（两者在长文页会长时间阻塞主线程并强制整页排版）；
  *  - 改用 TreeWalker 原地遍历文本节点，textContent 取词（不触发排版），跳过脚本/样式/我们的 UI；
- *  - 累加到 maxChars 即提前停止，不先拼出整页长字符串再截断；
+ *  - 达到 content 预算与字数阈值两者较早的停止点即停，不先拼出整页长字符串再截断；
  *  - 用 skipSubtreeCache 记忆"该子树是否应跳过"，避免每个文本节点都向上爬全部祖先。 */
-function getPageContext(maxChars: number): TranslationContext {
+function getPageContext(maxChars: number, countUpTo = 0): { context: TranslationContext; totalLen: number } {
   const title = document.title.trim().slice(0, 200);
   const description =
     document
@@ -695,8 +743,10 @@ function getPageContext(maxChars: number): TranslationContext {
       ?.content.trim()
       .slice(0, 500) ?? "";
   const budget = Math.max(0, maxChars);
+  const countBudget = Math.max(0, countUpTo);
   let content = "";
-  if (budget > 0 && document.body) {
+  let totalLen = 0;
+  if ((budget > 0 || countBudget > 0) && document.body) {
     const SKIP_TAGS = new Set([
       "SCRIPT",
       "STYLE",
@@ -740,12 +790,17 @@ function getPageContext(maxChars: number): TranslationContext {
       if (!t) continue;
       parts.push(t);
       len += t.length + 1;
-      if (len >= budget) break; // 达到上限即停，不遍历整页
+      // content 预算与摘要字数统计两者都满足才停（budget 小 countUpTo 大时继续走到阈值）
+      if (len >= budget && len >= countBudget) break;
     }
     content = parts.join(" ").replace(/\s+/g, " ").slice(0, budget);
+    totalLen = len; // 计到停止点为止的近似全页字数（≥阈值即判长文页，无需精确）
   }
-  return { title, description, content };
+  return { context: { title, description, content }, totalLen };
 }
+
+/** 页面摘要请求 id 序列（同一页面内多次 translateAll 并发时保唯一） */
+let summaryMsgSeq = 0;
 
 /** ===== HTML 属性翻译（placeholder / title / alt / aria-label） ===== */
 

@@ -108,6 +108,8 @@ async function loadForm(): Promise<void> {
   ($("translate-input") as HTMLInputElement).checked = s.translate.translateInput;
   ($("context-enabled") as HTMLInputElement).checked = s.translate.contextEnabled ?? true;
   input("context-max-chars").value = String(s.translate.contextMaxChars ?? 3000);
+  ($("summary-enabled") as HTMLInputElement).checked = s.translate.summaryEnabled ?? false;
+  input("summary-min-chars").value = String(s.translate.summaryMinChars ?? 6000);
   select("style-theme").value = s.translate.style ?? "gray";
   ($("custom-css") as HTMLTextAreaElement).value = s.translate.customCss ?? "";
   ($("translate-attributes") as HTMLInputElement).checked = s.translate.translateAttributes ?? true;
@@ -196,6 +198,12 @@ async function readForm(): Promise<Settings> {
         0,
         parseInt(($("context-max-chars") as HTMLInputElement).value, 10) || 3000
       ),
+      summaryEnabled: ($("summary-enabled") as HTMLInputElement).checked,
+      // 空/非法输入回退默认 6000；显式 0（=长短页都生成）是合法值，不能被 || 吞掉
+      summaryMinChars: (() => {
+        const v = parseInt(($("summary-min-chars") as HTMLInputElement).value, 10);
+        return Number.isNaN(v) ? 6000 : Math.max(0, v);
+      })(),
       style: select("style-theme").value as TranslationStyle,
       customCss: ($("custom-css") as HTMLTextAreaElement).value.slice(0, 8000),
       translateAttributes: ($("translate-attributes") as HTMLInputElement).checked,

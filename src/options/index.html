@@ -149,6 +149,18 @@
         <p class="hint">正文摘要的最大长度（标题/描述另有固定上限）。设得越小越省 token。</p>
       </div>
       <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" id="summary-enabled" />
+          <span>LLM 页面摘要（请 AI 概括长文主题注入上下文，专业长文的翻译更贴语境）</span>
+        </label>
+        <p class="hint">整页翻译期间异步补一条摘要，每页至多多一次请求（结果已缓存，回访不重复请求）。免费通道（Google/Microsoft）不支持，自动跳过。</p>
+      </div>
+      <div class="form-row">
+        <label for="summary-min-chars">摘要启用字数阈值</label>
+        <input type="number" id="summary-min-chars" min="0" max="100000" step="500" />
+        <p class="hint">页面正文超过该字数才生成 LLM 摘要（短页用原文截断已够用，省一次请求）；0 = 长短页都生成。</p>
+      </div>
+      <div class="form-row">
         <label for="style-theme">译文样式</label>
         <select id="style-theme">
           <option value="gray">灰字（默认，跟随页面文字色）</option>
