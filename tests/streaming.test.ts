@@ -16,6 +16,7 @@ import { ollamaProvider } from "../src/background/providers/ollama";
 import { openaiProvider } from "../src/background/providers/openai";
 import type { ApiConfig, Settings } from "../src/shared/types";
 import { TranslateError, translateTextStream } from "../src/content/translate";
+import { __setUiLang } from "../src/shared/i18n";
 
 const BASE_API: ApiConfig = {
   format: "openai",
@@ -122,9 +123,13 @@ function mockStorage(settings: Settings, memory = new Map<string, string>()): vo
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // 钉住界面语言：t() 依赖运行环境的 navigator 语言（本地中文 / CI 英文），
+  // 「未收到 done/error 就断连」用例断言 streamDisconnected 文案，不钉会随环境漂移
+  __setUiLang("zh");
 });
 
 afterEach(() => {
+  __setUiLang(null); // 恢复自动判定，不串到后续用例
   vi.unstubAllGlobals();
   // 关键：threads 池的 worker 会跨测试文件复用 globalThis —— 不清掉本文件的
   // chrome mock，后续在同一 worker 里运行的 jsdom 引擎测试会被残留 mock 干扰
