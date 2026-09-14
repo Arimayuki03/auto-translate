@@ -3,12 +3,13 @@ import type { DisplayMode } from "../shared/types";
 import type { EngineState, EngineStats, PageEngine } from "./engine";
 import { copyText, makeDraggable } from "./ui";
 import { currentHost, currentPageKey, savePerSite, setPageDisabled } from "./perSite";
+import { t } from "../shared/i18n";
 
 const MODES: DisplayMode[] = ["bilingual", "translated"];
 const MODE_LABEL: Record<DisplayMode, string> = {
-  bilingual: "双语对照",
-  translated: "仅译文",
-  original: "原文",
+  bilingual: t("modeBilingual"),
+  translated: t("modeTranslated"),
+  original: t("modeOriginal"),
 };
 const LANGUAGES: [string, string][] = [
   ["zh-CN", "简体中文"],
@@ -42,8 +43,8 @@ export class Toolbar {
     // 红色小圆圈（默认态）：点击展开，拖动移动
     this.fab = document.createElement("div");
     this.fab.className = "it-fab";
-    this.fab.textContent = "译";
-    this.fab.title = "打开翻译设置";
+    this.fab.textContent = t("translate");
+    this.fab.title = t("fabTitle");
     this.fab.setAttribute("role", "button");
 
     // 展开后的详细设置面板
@@ -53,11 +54,11 @@ export class Toolbar {
     const grip = document.createElement("span");
     grip.className = "it-drag";
     grip.textContent = "⠿";
-    grip.title = "拖动移动工具条";
+    grip.title = t("dragTitle");
 
     this.toggleBtn = document.createElement("button");
     this.toggleBtn.className = "it-toggle";
-    this.toggleBtn.textContent = "翻译";
+    this.toggleBtn.textContent = t("toggleTranslate");
     this.toggleBtn.addEventListener("click", () => this.onToggle());
 
     // 显示模式：双语对照 / 仅译文（「原文」用「还原」切换，不在此列）
@@ -91,8 +92,8 @@ export class Toolbar {
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "it-copy-all";
-    copyBtn.textContent = "复制译文";
-    copyBtn.title = "复制整页译文到剪贴板";
+    copyBtn.textContent = t("copyAll");
+    copyBtn.title = t("copyAllTitle");
     copyBtn.addEventListener("click", () => this.copyTranslations());
 
     this.statusEl = document.createElement("span");
@@ -101,15 +102,15 @@ export class Toolbar {
     // 诊断信息复制按钮：仅在有翻译错误时显示，内容脱敏（绝不含 API Key）
     this.diagBtn = document.createElement("button");
     this.diagBtn.className = "it-copy-all";
-    this.diagBtn.textContent = "复制诊断信息";
-    this.diagBtn.title = "复制脱敏的错误诊断信息（不含 API Key），便于反馈问题";
+    this.diagBtn.textContent = t("copyDiagnostic");
+    this.diagBtn.title = t("copyDiagnosticTitle");
     this.diagBtn.style.display = "none";
     this.diagBtn.addEventListener("click", () => this.copyDiagnostic());
 
     const closeBtn = document.createElement("button");
     closeBtn.className = "it-close";
     closeBtn.textContent = "✕";
-    closeBtn.title = "收起为圆点";
+    closeBtn.title = t("collapseTitle");
     closeBtn.addEventListener("click", () => this.setExpanded(false));
 
     this.panel.append(
@@ -171,11 +172,11 @@ export class Toolbar {
       .map((el) => (el.textContent ?? "").trim())
       .filter(Boolean);
     if (texts.length === 0) {
-      this.statusEl.textContent = "暂无译文";
+      this.statusEl.textContent = t("noTranslations");
       return;
     }
     const ok = copyText(texts.join("\n\n"));
-    this.statusEl.textContent = ok ? `已复制 ${texts.length} 段` : "复制失败";
+    this.statusEl.textContent = ok ? t("copiedCount", texts.length) : t("copyFailed");
   }
 
   /** 敏感页（登录/密码/2FA 等）隐藏工具条，避免诱导翻译敏感内容 */
@@ -243,19 +244,22 @@ export class Toolbar {
 
   private setStatus(state: EngineState, stats: EngineStats): void {
     this.toggleBtn.disabled = state === "translating";
-    this.toggleBtn.textContent = state === "off" ? "翻译" : "还原";
+    this.toggleBtn.textContent = state === "off" ? t("toggleTranslate") : t("toggleRestore");
     const err = this.engine.lastError;
     if (state === "translating") {
-      this.statusEl.textContent = "翻译中…";
+      this.statusEl.textContent = t("translating");
     } else if (state === "done") {
-      this.statusEl.textContent = `共 ${stats.done} 段完成`;
+      this.statusEl.textContent = t("doneCount", stats.done);
     } else if (state === "partial") {
       // 失败原因带上具体错误类型（如「主 API 鉴权失败（401/403）」），不再只显示笼统的失败数
-      this.statusEl.textContent = `共 ${stats.done} 段完成，${stats.error} 段失败${
-        err ? `：${shorten(err.message, 60)}` : ""
-      }`;
+      this.statusEl.textContent = t(
+        "partialCount",
+        stats.done,
+        stats.error,
+        err ? shorten(err.message, 60) : ""
+      );
     } else {
-      this.statusEl.textContent = "未翻译";
+      this.statusEl.textContent = t("notTranslated");
     }
     // 有可诊断的错误时显示「复制诊断信息」按钮
     this.diagBtn.style.display = state === "partial" && err ? "" : "none";
@@ -265,22 +269,24 @@ export class Toolbar {
   private copyDiagnostic(): void {
     const err = this.engine.lastError;
     if (!err) {
-      this.statusEl.textContent = "暂无错误信息";
+      this.statusEl.textContent = t("noErrorInfo");
       return;
     }
     const d = err.diagnostic;
     const lines = [
-      `[auto-translate 诊断] ${new Date().toISOString()}`,
-      `错误：${err.message}`,
-      ...(err.errorCode ? [`错误码：${err.errorCode}`] : []),
-      ...(d?.provider ? [`通道：${d.provider}`] : []),
-      ...(d?.source ? [`来源：${d.source === "main" ? "主 API" : "备用 API"}`] : []),
-      ...(d?.endpoint ? [`端点：${d.endpoint}`] : []),
-      ...(d?.hostname ? [`主机：${d.hostname}`] : []),
-      ...(d?.status ? [`HTTP 状态：${d.status}`] : []),
+      `${t("diagHeader")} ${new Date().toISOString()}`,
+      `${t("diagError")}：${err.message}`,
+      ...(err.errorCode ? [`${t("diagErrorCode")}：${err.errorCode}`] : []),
+      ...(d?.provider ? [`${t("diagProvider")}：${d.provider}`] : []),
+      ...(d?.source
+        ? [`${t("diagSource")}：${d.source === "main" ? t("diagSourceMain") : t("diagSourceBackup")}`]
+        : []),
+      ...(d?.endpoint ? [`${t("diagEndpoint")}：${d.endpoint}`] : []),
+      ...(d?.hostname ? [`${t("diagHostname")}：${d.hostname}`] : []),
+      ...(d?.status ? [`${t("diagHttpStatus")}：${d.status}`] : []),
     ];
     const ok = copyText(lines.join("\n"));
-    this.statusEl.textContent = ok ? "诊断信息已复制" : "复制失败";
+    this.statusEl.textContent = ok ? t("diagnosticCopied") : t("copyFailed");
   }
 
   private saveState(): void {

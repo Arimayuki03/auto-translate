@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: Settings = {
     style: "gray",
     customCss: "",
     translateAttributes: true,
+    forceSourceLang: "",
   },
   sites: { whitelist: [], blacklist: [], rules: [], disabledRuleIds: [] },
   tts: { enabled: true, voice: "", rate: 0 },
@@ -193,6 +194,7 @@ function sanitizeImportSettings(raw: unknown): Settings {
       style: enumOf(["gray", "outline", "underline", "blur"] as const),
       customCss: str,
       translateAttributes: bool,
+      forceSourceLang: str,
     }) as unknown as Partial<Settings["translate"]>,
     sites: pick(r.sites, {
       whitelist: strArr,

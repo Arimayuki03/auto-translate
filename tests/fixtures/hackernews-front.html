@@ -1,0 +1,27 @@
+<!-- Hacker News 首页简化片段(tr/td 必须包在 table 内,否则 HTML5 解析会丢弃)：排名/分数/评论链接是机器化文本，标题与评论正文应保留 -->
+<table><tr class="athing">
+  <td class="title"><span class="rank">1.</span></td>
+  <td class="title"><a href="item?id=1">Show HN: A tiny translation extension built with zero dependencies</a></td>
+</tr>
+<tr>
+  <td></td>
+  <td class="subtext"><span class="score" id="score_1">342 points</span> by <a href="user?id=x">user1</a>
+    <span class="age">5 hours ago</span> | <a href="hide?id=1">hide</a> | <span class="togg">...</span> |
+    <a href="item?id=1">84&nbsp;comments</a></td>
+</tr></table>
+<table><tr class="athing">
+  <td class="title"><span class="rank">2.</span></td>
+  <td class="title"><a href="item?id=2">The unexpected complexity of spreadsheet software</a></td>
+</tr>
+<tr>
+  <td></td>
+  <td class="subtext"><span class="score" id="score_2">128 points</span> by <a href="user?id=y">user2</a>
+    <span class="age">2 hours ago</span> | <a href="item?id=2">61&nbsp;comments</a></td>
+</tr></table>
+<table><tr class='comtr'>
+  <td><div class="comment">
+    <span class="comhead"><a class="user" href="user?id=z">user3</a> <span class="age">3 hours ago</span> <span class="navs"> | <a href="reply?id=1">reply</a></span></span>
+    <div class="msg-text">The whole discussion reminds me of the early days of personal computing, when everything was simpler but also surprisingly limited.</div>
+  </div></td>
+</tr>
+</table>

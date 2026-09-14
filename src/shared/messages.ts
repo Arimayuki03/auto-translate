@@ -28,6 +28,8 @@ export interface TranslationContext {
   description?: string;
   content?: string;
   summary?: string;
+  /** 页面源语言（html lang / 启发式 / 用户强制）：提示词语境 + 免费通道 sl/from 参数 */
+  sourceLang?: string;
 }
 
 export interface TranslateRequestMessage {

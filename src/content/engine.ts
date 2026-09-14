@@ -7,6 +7,7 @@ import type {
   TranslationContext,
 } from "../shared/messages";
 import type { ResolvedSiteRule } from "../shared/siteRules";
+import { detectPageSourceLang } from "../shared/langDetect";
 import type { Settings } from "../shared/types";
 import {
   extractUnits,
@@ -61,6 +62,8 @@ export class PageEngine {
   private summaryMinChars: number;
   /** HTML 属性翻译开关（placeholder / title / alt / aria-label） */
   private attributesEnabled: boolean;
+  /** 强制源语言：空串 = 自动检测（html lang / 启发式） */
+  private forceSourceLang: string;
   private pageContext: TranslationContext | undefined;
   /** 防止自动翻译/可见性/SPA 信号同时触发时重复扫描并重复计数 */
   private translateAllRunning = false;
@@ -111,6 +114,7 @@ export class PageEngine {
     this.summaryEnabled = settings.translate.summaryEnabled ?? false;
     this.summaryMinChars = Math.max(0, settings.translate.summaryMinChars ?? 6000);
     this.attributesEnabled = settings.translate.translateAttributes ?? true;
+    this.forceSourceLang = settings.translate.forceSourceLang ?? "";
     this.pageContext = undefined;
 
     // 失败重试：占位里的“重试”按钮
@@ -180,6 +184,13 @@ export class PageEngine {
         ? getPageContext(this.contextMaxChars, this.summaryEnabled ? this.summaryMinChars : 0)
         : undefined;
       this.pageContext = collected?.context;
+      // 源语言检测（html lang / 启发式 / 用户强制）：随上下文带给 background（提示词 + 免费通道参数）
+      if (this.pageContext) {
+        this.pageContext = {
+          ...this.pageContext,
+          sourceLang: detectPageSourceLang(this.forceSourceLang, collected?.context.content ?? ""),
+        };
+      }
       // LLM 页面摘要（未来方向 P2）：长文页异步补一条文章摘要进上下文。
       // 不 await——首批请求先带「标题/描述/正文截断」发出，摘要返回后的批次自动携带；
       // 摘要按页缓存在 background，重复翻译/回访时首个请求就能拿到。
@@ -189,7 +200,7 @@ export class PageEngine {
         collected.context.content &&
         collected.totalLen >= this.summaryMinChars
       ) {
-        void this.enrichPageSummary(gen, collected.context);
+        void this.enrichPageSummary(gen, this.pageContext!); // base 含 sourceLang 扩展（引用校验用）
       }
       // 全页扫描用时间片版提取：超大页面不再一次性阻塞主线程（借鉴 read-frog chunked walk）。
       // 让出期间若被还原（generation 变化）则中止本次。

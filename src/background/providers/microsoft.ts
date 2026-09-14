@@ -21,6 +21,15 @@ const MAX_SEGMENTS_PER_REQUEST = 50;
 const MIN_START_INTERVAL_MS = 300;
 
 /** 目标语言归一化为 Microsoft 语言码（zh-Hans / zh-Hant / ja / ko / en…） */
+/** 微软端点源语言归一：zh 系传 zh-Hans（端点要求）；其余取主码 */
+function toMicrosoftSourceLang(lang: string): string {
+  const primary = lang.trim().toLowerCase().split(/[-_]/)[0] ?? "";
+  if (primary === "zh") {
+    return /^zh.*(tw|hk|hant)/i.test(lang) ? "zh-Hant" : "zh-Hans";
+  }
+  return primary;
+}
+
 function toMicrosoftLang(lang: string): string {
   const l = lang.trim();
   if (/^zh-?(cn|hans|sg)/i.test(l)) return "zh-Hans";
@@ -162,7 +171,9 @@ export const microsoftProvider: Provider = {
     for (let start = 0; start < segments.length; start += MAX_SEGMENTS_PER_REQUEST) {
       const group = segments.slice(start, start + MAX_SEGMENTS_PER_REQUEST);
       await acquireStartSlot();
-      const translated = await requestTranslate(group, "", tl, options.timeoutMs, options.signal);
+      // from 留空 = 端点自动检测；用户强制/页面检测出源语言时显式传入
+      const from = options.sourceLang ? toMicrosoftSourceLang(options.sourceLang) : "";
+      const translated = await requestTranslate(group, from, tl, options.timeoutMs, options.signal);
       out.push(...translated);
     }
     const separator = options.batchSeparator ?? "===IT_SEP===";

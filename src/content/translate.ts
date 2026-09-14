@@ -9,6 +9,7 @@ import type {
   TranslationContext,
 } from "../shared/messages";
 import { STREAM_PORT_NAME } from "../shared/messages";
+import { t } from "../shared/i18n";
 
 let msgSeq = 0;
 
@@ -60,7 +61,7 @@ export async function translateTexts(
     // 会话被中止（用户还原/换页）是预期行为：抛普通 Error（非 TranslateError），
     // 引擎不会把它当作 API 失败记入 lastError / 工具条
     if (res?.error === "cancelled") throw new Error("cancelled");
-    throw new TranslateError(res?.error ?? "翻译请求失败", res?.errorCode, res?.diagnostic);
+    throw new TranslateError(res?.error ?? t("translateFailed"), res?.errorCode, res?.diagnostic);
   }
   return res.results.map((r) => restore(r));
 }
@@ -113,7 +114,7 @@ export function translateTextStream(
       if (settled) return;
       // background 收尾后会主动断连；未收到 done/error 就断开 = 服务侧异常中断
       settled = true;
-      reject(new TranslateError("翻译连接已断开"));
+      reject(new TranslateError(t("streamDisconnected")));
     });
     const req: StreamStartMessage = { type: "stream-start", text: tokenized[0], targetLang };
     try {

@@ -5,6 +5,7 @@ import type {
 } from "../shared/messages";
 import { getSettings, saveSettings } from "../shared/storage";
 import type { ApiConfig, ApiFormat } from "../shared/types";
+import { t } from "../shared/i18n";
 
 const $ = (id: string): HTMLElement => {
   const el = document.getElementById(id);
@@ -58,21 +59,23 @@ async function loadForm(): Promise<void> {
 $("p-test").addEventListener("click", async () => {
   const api = await readApi();
   if (!FREE_FORMATS.has(api.format) && (!api.baseUrl || !api.model)) {
-    setStatus("请填写 BaseURL 和模型", "err");
+    setStatus(t("popupNeedBaseUrl"), "err");
     return;
   }
   const btn = $("p-test") as HTMLButtonElement;
   btn.disabled = true;
-  setStatus("测试中…");
+  setStatus(t("popupTestRunning"));
   try {
     const req: TestConnectionRequestMessage = { type: "test-connection", id: crypto.randomUUID(), api };
     const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
     setStatus(
-      res.ok ? `连接成功：${res.message ?? ""}` : `连接失败：${res.error ?? "未知错误"}`,
+      res.ok
+        ? t("popupTestOk", res.message ?? "")
+        : t("popupTestFail", res.error ?? t("popupUnknownError")),
       res.ok ? "ok" : "err"
     );
   } catch (err) {
-    setStatus(`连接失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    setStatus(t("popupTestFail", err instanceof Error ? err.message : String(err)), "err");
   } finally {
     btn.disabled = false;
   }
@@ -81,7 +84,7 @@ $("p-test").addEventListener("click", async () => {
 $("p-save").addEventListener("click", async () => {
   const current = await getSettings();
   await saveSettings({ ...current, api: await readApi() });
-  setStatus("已保存 ✔", "ok");
+  setStatus(t("popupSaved"), "ok");
 });
 
 $("p-full-settings").addEventListener("click", (e) => {
@@ -101,7 +104,7 @@ async function initSite(): Promise<void> {
     if (!url) return;
     currentHost = new URL(url).hostname.replace(/^www\./, "");
     const el = $("site-name");
-    el.textContent = currentHost || "未知站点";
+    el.textContent = currentHost || t("popupUnknownSite");
   } catch {
     /* 忽略 */
   }
@@ -109,7 +112,7 @@ async function initSite(): Promise<void> {
 
 async function addSite(list: "whitelist" | "blacklist"): Promise<void> {
   if (!currentHost) {
-    setStatus("无法获取当前站点", "err");
+    setStatus(t("popupNoSite"), "err");
     return;
   }
   const s = await getSettings();
@@ -120,7 +123,10 @@ async function addSite(list: "whitelist" | "blacklist"): Promise<void> {
   const otherIdx = s.sites[other].indexOf(currentHost);
   if (otherIdx >= 0) s.sites[other].splice(otherIdx, 1);
   await saveSettings(s);
-  setStatus(list === "whitelist" ? `已加入白名单 ✔ ${currentHost}` : `已加入黑名单 ✔ ${currentHost}`, "ok");
+  setStatus(
+    list === "whitelist" ? t("popupWhitelisted", currentHost) : t("popupBlacklisted", currentHost),
+    "ok"
+  );
 }
 
 $("btn-whitelist").addEventListener("click", () => void addSite("whitelist"));

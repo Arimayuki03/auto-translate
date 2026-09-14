@@ -2,6 +2,7 @@
  *  状态流转：idle → fetching（合成中）→ playing（播放中）→ idle；
  *  任何时刻的 stop()（点停止/气泡关闭）作废在途请求并停止播放；错误短暂显示后自动复位。 */
 import type { TtsPlayResponseMessage, TtsSynthesizeResponseMessage } from "../shared/messages";
+import { t } from "../shared/i18n";
 
 export type TtsState = "idle" | "fetching" | "playing" | "error";
 
@@ -52,7 +53,7 @@ export class TtsController {
       })) as TtsSynthesizeResponseMessage | undefined;
       if (g !== this.gen) return; // 期间被停止/关闭：丢弃结果不播放
       if (!synth?.ok || !synth.audioBase64) {
-        throw new Error(synth?.error || "语音合成失败");
+        throw new Error(synth?.error || t("ttsSynthFailed"));
       }
       this.set("playing");
       const play = (await chrome.runtime.sendMessage({
@@ -63,7 +64,7 @@ export class TtsController {
         contentType: synth.contentType ?? "audio/mpeg",
       })) as TtsPlayResponseMessage | undefined;
       if (g !== this.gen) return; // stop() 已把状态复位：不覆盖
-      if (!play?.ok) throw new Error(play?.error || "音频播放失败");
+      if (!play?.ok) throw new Error(play?.error || t("ttsPlayFailed"));
       this.set("idle");
     } catch (err) {
       if (g !== this.gen) return;

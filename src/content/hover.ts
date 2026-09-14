@@ -5,6 +5,7 @@
  */
 import { extractUnits } from "./extractor";
 import type { PageEngine } from "./engine";
+import { t } from "../shared/i18n";
 
 /** 块级悬停候选：正文块直接作为候选；div/section 为兜底（悬停其空白处可整块译入） */
 const HOVER_BLOCK_SELECTOR =
@@ -107,7 +108,7 @@ export function initHoverTranslate(opts: HoverTranslateOptions): () => void {
   const badge = document.createElement("div");
   badge.className = "it-hover-badge";
   badge.setAttribute("data-it-ui", ""); // 提取/观察器/悬停判定统一跳过我们自己的 UI
-  badge.textContent = "译";
+  badge.textContent = t("translate");
   badge.style.display = "none";
   document.body.appendChild(badge);
 

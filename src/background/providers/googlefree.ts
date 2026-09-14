@@ -54,11 +54,11 @@ function releaseSlot(): void {
 }
 let waitingHead = 0;
 
-function buildGoogleUrl(endpoint: string, text: string, tl: string): string {
+function buildGoogleUrl(endpoint: string, text: string, tl: string, sl = "auto"): string {
   const url = new URL(endpoint || DEFAULT_ENDPOINT);
   url.searchParams.set("client", url.searchParams.get("client") || "gtx");
   url.searchParams.set("dt", url.searchParams.get("dt") || "t");
-  url.searchParams.set("sl", url.searchParams.get("sl") || "auto");
+  url.searchParams.set("sl", url.searchParams.get("sl") || sl);
   url.searchParams.set("tl", tl);
   url.searchParams.set("q", text);
   return url.toString();
@@ -71,11 +71,12 @@ async function gTranslate(
   text: string,
   tl: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  sl = "auto"
 ): Promise<GoogleTranslationResult> {
   let url: string;
   try {
-    url = buildGoogleUrl(endpoint, text, tl);
+    url = buildGoogleUrl(endpoint, text, tl, sl);
   } catch {
     throw new ApiError(
       "bad_request",
@@ -175,12 +176,13 @@ async function translateWithFallback(
   text: string,
   tl: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  sl = "auto"
 ): Promise<GoogleTranslationResult> {
   let lastError: unknown;
   for (let i = 0; i < endpoints.length; i++) {
     try {
-      return await gTranslate(endpoints[i], text, tl, timeoutMs, signal);
+      return await gTranslate(endpoints[i], text, tl, timeoutMs, signal, sl);
     } catch (err) {
       // 会话中止（非 ApiError）不换端点重试，直接上抛
       if (!(err instanceof ApiError)) throw err;
@@ -219,7 +221,8 @@ export const googleFreeProvider: Provider = {
           segments[idx],
           tl,
           options.timeoutMs,
-          options.signal
+          options.signal,
+          toGoogleLang(options.sourceLang ?? "")
         );
         out[idx] = result.text;
         diagnostic ??= result.diagnostic;

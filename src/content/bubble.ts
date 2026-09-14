@@ -5,6 +5,7 @@ import { getSettings } from "../shared/storage";
 import { translateTextStream } from "./translate";
 import { copyText, isInsideOurUI, makeDraggable } from "./ui";
 import { TtsController } from "./tts";
+import { t } from "../shared/i18n";
 
 const DEDUP_WINDOW_MS = 3000;
 const MAX_RECENT = 100;
@@ -24,8 +25,14 @@ export function initBubble(
   const ttsCtl = new TtsController((state, err) => {
     if (!speakBtn) return;
     speakBtn.textContent =
-      state === "fetching" ? "生成中…" : state === "playing" ? "停止" : state === "error" ? "朗读失败" : "朗读";
-    speakBtn.title = state === "error" ? err || "朗读失败" : "朗读译文";
+      state === "fetching"
+        ? t("speakGenerating")
+        : state === "playing"
+          ? t("stop")
+          : state === "error"
+            ? t("speakFailed")
+            : t("speak");
+    speakBtn.title = state === "error" ? err || t("speakFailed") : t("speakTitle");
   });
 
   /** 挂「朗读」按钮（tts.enabled 时）：读气泡最终译文，流式未结束/失败态不可读 */
@@ -34,8 +41,8 @@ export function initBubble(
     const actions = bubbleEl.querySelector(".it-bubble-actions");
     if (!actions) return;
     const speak = document.createElement("button");
-    speak.textContent = "朗读";
-    speak.title = "朗读译文";
+    speak.textContent = t("speak");
+    speak.title = t("speakTitle");
     speak.addEventListener("click", () => {
       if (bubbleEl.classList.contains("it-bubble-loading")) return; // 流式翻译尚未结束
       const body = bubbleEl.querySelector(".it-bubble-body");
@@ -103,8 +110,8 @@ export function initBubble(
       const btn = document.createElement("button");
       btn.className = "it-translate-sel";
       btn.setAttribute("data-it-ui", "");
-      btn.textContent = "译";
-      btn.title = "翻译选中内容";
+      btn.textContent = t("translate");
+      btn.title = t("translateSelection");
       bubble = btn;
       position(btn, rect);
       btn.addEventListener("click", () => {
@@ -149,7 +156,7 @@ export function initBubble(
     onSettled: () => void
   ): Promise<void> {
     const body = bubbleEl.querySelector(".it-bubble-body") as HTMLElement;
-    body.textContent = "翻译中…";
+    body.textContent = t("translating");
     // 术语表与整页翻译同源：按当前设置读取（划词是低频用户手势，一次小读取可接受）
     let glossary: string[] = [];
     try {
@@ -183,10 +190,10 @@ export function initBubble(
       if (!bubbleEl.isConnected) return; // 气泡已关闭（取消导致的中止）：无 UI 可更新
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
-      body.textContent = "翻译失败 ";
+      body.textContent = `${t("translateFailed")} `;
       const retry = document.createElement("button");
       retry.className = "it-retry";
-      retry.textContent = "重试";
+      retry.textContent = t("retry");
       retry.addEventListener("click", () => void renderTranslation(bubbleEl, text, eng, onSettled));
       body.appendChild(retry);
       bubbleEl.classList.remove("it-bubble-loading");
@@ -206,10 +213,10 @@ function buildBubble(onClose: () => void): HTMLElement {
   const header = document.createElement("div");
   header.className = "it-bubble-header";
   const title = document.createElement("span");
-  title.textContent = "译文";
+  title.textContent = t("bubbleTitle");
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "✕";
-  closeBtn.title = "关闭";
+  closeBtn.title = t("close");
   closeBtn.addEventListener("click", () => onClose());
   header.append(title, closeBtn);
 
@@ -219,7 +226,7 @@ function buildBubble(onClose: () => void): HTMLElement {
   const actions = document.createElement("div");
   actions.className = "it-bubble-actions";
   const copy = document.createElement("button");
-  copy.textContent = "复制";
+  copy.textContent = t("copy");
   copy.addEventListener("click", () => copyText(body.textContent ?? ""));
   actions.appendChild(copy);
 

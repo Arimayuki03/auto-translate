@@ -1,0 +1,26 @@
+<!--
+  Stack Overflow 问题页简化片段：投票栏/签名/相关链接不译,问题与回答正文应保留。
+  另含一个 .s-prose.js-post-body 后紧跟的 div（站点规则排除区）。
+-->
+<div id="question">
+  <div class="votecell"><div class="js-voting-container"><span class="vote-count-post">42</span></div></div>
+  <div class="postcell">
+    <div class="s-prose js-post-body">
+      <p>How do I correctly await multiple promises in JavaScript while keeping the original order of results?</p>
+      <p>I tried combining Promise.all with Array.prototype.map but the outputs arrive in completion order.</p>
+    </div>
+    <div class="mt24 mb16"><a class="s-link" href="/questions/ask">Ask Question</a></div>
+  </div>
+</div>
+<div id="answers">
+  <div class="answercell">
+    <div class="votecell"><span class="vote-count-post">67</span></div>
+    <div class="s-prose js-post-body">
+      <p>Promise.all preserves the order of the input array regardless of completion order, so map is the right approach.</p>
+    </div>
+    <div class="js-post-signature"><span class="community-wiki">edited by community wiki</span></div>
+    <div class="s-prose js-post-body + div"></div>
+  </div>
+</div>
+<div id="left-sidebar"><a href="/">Home</a><a href="/questions">Questions</a></div>
+<div id="comments-link-123"><a href="#">Add a comment</a></div>

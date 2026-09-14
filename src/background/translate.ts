@@ -4,6 +4,7 @@ import { getSettings } from "../shared/storage";
 import { TranslationCache, SummaryCache, fnv1aHex } from "./cache";
 import { TokenBucket } from "./rateLimiter";
 import { ApiError, withErrorSource } from "./providers/http";
+import { withSourceLangContext } from "../shared/langDetect";
 import { createProvider } from "./providers";
 import type { ChatMessage, ChatOptions } from "./providers/types";
 
@@ -24,6 +25,7 @@ type BatchChatOptions = Pick<
   | "freeEndpoint"
   | "freeBackupEndpoint"
   | "targetLang"
+  | "sourceLang"
   | "signal"
 >;
 
@@ -706,9 +708,10 @@ export class TranslateService {
       signal?: AbortSignal;
     }
   ): Promise<string> {
-    const contextText = opts?.context
+    const rawContext = opts?.context
       ? `\n\n页面上下文（仅用于理解语境，不要翻译或复述这段上下文）：\n标题：${opts.context.title ?? ""}\n描述：${opts.context.description ?? ""}${opts.context.summary ? `\n文章摘要：${opts.context.summary}` : ""}\n正文摘要：${opts.context.content ?? ""}`
       : "";
+    const contextText = withSourceLangContext(rawContext, opts?.context?.sourceLang ?? "");
     const chatOpts = (mode: BatchMode) => ({
       batchMode: mode,
       batchSeparator: BATCH_SEPARATOR,
@@ -717,6 +720,8 @@ export class TranslateService {
       freeBackupEndpoint: settings.api.freeBackupEndpoint,
       // 免费通道显式拿目标语言，避免从中文提示词正则反解（P3-5）；signal 供会话中止打断在途 fetch
       targetLang,
+      // 源语言（html lang / 启发式 / 用户强制）：免费通道据此设 sl/from，LLM 通道走提示词语境
+      sourceLang: opts?.context?.sourceLang,
       signal: opts?.signal,
     });
 

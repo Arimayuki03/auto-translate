@@ -5,6 +5,7 @@
  */
 import type { DisplayMode, TranslationStyle } from "../shared/types";
 import type { TranslationUnit } from "./extractor";
+import { t } from "../shared/i18n";
 
 /** 父级为这些标签时译文插到容器内部（块级兄弟会破坏列表/表格结构） */
 const RESTRICTED_PARENTS = new Set([
@@ -160,10 +161,10 @@ export class Renderer {
     el.textContent = "";
     const span = document.createElement("span");
     span.className = "it-err-text";
-    span.textContent = "翻译失败";
+    span.textContent = t("translateFailed");
     const retry = document.createElement("button");
     retry.className = "it-retry";
-    retry.textContent = "重试";
+    retry.textContent = t("retry");
     retry.setAttribute("data-it-unit", unit.id);
     el.append(span, retry);
     // 仅译文模式：原文未被替换（翻译失败不应覆盖原文），需要隐藏错误元素

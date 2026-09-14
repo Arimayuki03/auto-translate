@@ -1,6 +1,7 @@
 /** 输入框翻译（F-011）：聚焦输入框显示「译」按钮；鼠标一移动即隐藏；可切换翻译/还原 */
 import type { PageEngine } from "./engine";
 import { isInsideOurUI } from "./ui";
+import { t } from "../shared/i18n";
 
 export function initInput(
   engine: PageEngine,
@@ -35,8 +36,8 @@ export function initInput(
     field = f;
     const b = document.createElement("button");
     b.className = "it-input-btn";
-    b.textContent = f.hasAttribute("data-it-input-translated") ? "还原" : "译";
-    b.title = "翻译输入内容 / 还原原文";
+    b.textContent = f.hasAttribute("data-it-input-translated") ? t("restore") : t("translate");
+    b.title = t("inputTranslateTitle");
     b.addEventListener("mousedown", (e) => e.preventDefault()); // 保持输入框焦点
     b.addEventListener("click", () => void onButtonClick(b, f));
     document.body.appendChild(b);
@@ -51,7 +52,7 @@ export function initInput(
       if (orig !== null) setFieldText(f, orig);
       f.removeAttribute("data-it-input-translated");
       f.removeAttribute("data-it-input-orig");
-      b.textContent = "译";
+      b.textContent = t("translate");
       return;
     }
     const text = getFieldText(f).trim();
@@ -65,10 +66,10 @@ export function initInput(
       }
       setFieldText(f, result);
       f.setAttribute("data-it-input-translated", "");
-      b.textContent = "还原"; // 按钮保留，可再点还原
+      b.textContent = t("restore"); // 按钮保留，可再点还原
     } catch {
-      b.textContent = "失败";
-      setTimeout(() => (b.textContent = "译"), 1200);
+      b.textContent = t("inputFailed");
+      setTimeout(() => (b.textContent = t("translate")), 1200);
     } finally {
       b.disabled = false;
     }

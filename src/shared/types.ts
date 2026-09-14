@@ -75,6 +75,9 @@ export interface Settings {
     customCss?: string;
     /** 翻译 HTML 属性：placeholder / title / alt / aria-label（默认开启） */
     translateAttributes?: boolean;
+    /** 强制源语言：空串 = 自动检测（默认）。非空时（如 "en"）批量请求的页面上下文会声明源语言，
+     *  免费通道（googlefree/microsoft）据此设置 sl/from 参数，避免端点自动检测误判。 */
+    forceSourceLang?: string;
   };
   sites: {
     whitelist: string[];

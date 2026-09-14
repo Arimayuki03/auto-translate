@@ -115,6 +115,7 @@ async function loadForm(): Promise<void> {
   select("style-theme").value = s.translate.style ?? "gray";
   ($("custom-css") as HTMLTextAreaElement).value = s.translate.customCss ?? "";
   ($("translate-attributes") as HTMLInputElement).checked = s.translate.translateAttributes ?? true;
+  select("force-source-lang").value = s.translate.forceSourceLang ?? "";
   ($("tts-enabled") as HTMLInputElement).checked = s.tts.enabled;
   select("tts-voice").value = s.tts.voice;
   select("tts-rate").value = String(s.tts.rate);
@@ -265,6 +266,7 @@ async function readForm(): Promise<Settings> {
       style: select("style-theme").value as TranslationStyle,
       customCss: ($("custom-css") as HTMLTextAreaElement).value.slice(0, 8000),
       translateAttributes: ($("translate-attributes") as HTMLInputElement).checked,
+      forceSourceLang: select("force-source-lang").value,
     },
     sites: {
       whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
