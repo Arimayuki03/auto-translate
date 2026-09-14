@@ -3,6 +3,7 @@ import type { PageEngine } from "./engine";
 import type { TtsSettings } from "../shared/types";
 import { getSettings } from "../shared/storage";
 import { translateTextStream } from "./translate";
+import { placeFixedInViewport } from "./placement";
 import { copyText, isInsideOurUI, makeDraggable } from "./ui";
 import { TtsController } from "./tts";
 import { t } from "../shared/i18n";
@@ -251,6 +252,5 @@ function position(el: HTMLElement, rect: DOMRect): void {
   if (top + h > innerHeight) top = rect.top - h - 8;
   left = Math.min(Math.max(left, 8), Math.max(8, innerWidth - w - 8));
   top = Math.min(Math.max(top, 8), innerHeight - h - 8);
-  el.style.left = `${left}px`;
-  el.style.top = `${top}px`;
+  placeFixedInViewport(el, left, top);
 }

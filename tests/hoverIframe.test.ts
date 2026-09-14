@@ -316,4 +316,53 @@ describe("悬停角标交互", () => {
     a.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     expect(badge.style.display).toBe("none");
   });
+
+  it("角标挂 <html> 下而非 body（body 带 transform/filter 的站点上 fixed 包含块失真的第一层防御）", () => {
+    const { badge } = setup();
+    expect(badge.parentElement).toBe(document.documentElement);
+  });
+
+  it("站点含块偏移（fixed 以文档为基准）：按实测位置回填，视觉位置仍贴住段落", () => {
+    const { badge } = setup();
+    const a = document.getElementById("a")!;
+    stubRect(a, 10, 40); // 目标视口坐标：left=10，top=16（40-24）
+    // 模拟 body{transform} 的失真：以 style 里的局部坐标 + 滚动量(4500) 呈现于视口
+    const offset = 4500;
+    badge.getBoundingClientRect = () =>
+      ({
+        left: (parseFloat(badge.style.left) || 0) + offset,
+        top: (parseFloat(badge.style.top) || 0) + offset,
+        width: 20,
+        height: 20,
+      }) as DOMRect;
+
+    a.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    expect(badge.style.display).toBe("block");
+    // 回填后局部坐标被平移，实测视口位置回到段落左上角
+    expect(parseFloat(badge.style.left)).toBeCloseTo(10 - offset, 0);
+    expect(parseFloat(badge.style.top)).toBeCloseTo(16 - offset, 0);
+    const b = badge.getBoundingClientRect();
+    expect(b.left).toBeCloseTo(10, 0);
+    expect(b.top).toBeCloseTo(16, 0);
+  });
+
+  it("含块为缩放失真（html zoom 类，k=1.5 叠加平移）：仿射反解后仍贴住段落（±亚像素舍入）", () => {
+    const { badge } = setup();
+    const a = document.getElementById("a")!;
+    stubRect(a, 10, 40);
+    const k = 1.5;
+    const offset = 4500;
+    badge.getBoundingClientRect = () =>
+      ({
+        left: (parseFloat(badge.style.left) || 0) * k + offset,
+        top: (parseFloat(badge.style.top) || 0) * k + offset,
+        width: 20,
+        height: 20,
+      }) as DOMRect;
+
+    a.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    const b = badge.getBoundingClientRect();
+    expect(Math.abs(b.left - 10)).toBeLessThanOrEqual(1.5);
+    expect(Math.abs(b.top - 16)).toBeLessThanOrEqual(1.5);
+  });
 });

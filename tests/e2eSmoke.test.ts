@@ -93,9 +93,16 @@ async function freshPage(): Promise<Page> {
   return p;
 }
 
-/** 展开工具条并点「翻译」，等译文真正填充（.it-done；占位是 reserve 阶段就有的 .it-pending） */
+/** 展开工具条并点「翻译」，等译文真正填充（.it-done；占位是 reserve 阶段就有的 .it-pending）。
+ *  面板可能已是展开态（如总开关关闭→重开后保留展开）：红点此时被 CSS 隐藏，直接点「翻译」。 */
 async function translatePage(p: Page): Promise<void> {
-  await p.click(".it-fab");
+  if (
+    await p
+      .locator(".it-fab")
+      .isVisible()
+      .catch(() => false)
+  )
+    await p.click(".it-fab");
   await p.waitForSelector(".it-toggle", { timeout: 5000 });
   await p.click(".it-toggle");
   const deadline = Date.now() + 60_000;
@@ -103,7 +110,9 @@ async function translatePage(p: Page): Promise<void> {
     const done = await p.evaluate(() => document.querySelectorAll(".it-translated.it-done").length);
     if (done > 0) return;
     if (Math.random() < 0.1) {
-      const status = await p.evaluate(() => document.querySelector(".it-status")?.textContent ?? "");
+      const status = await p.evaluate(
+        () => document.querySelector(".it-status")?.textContent ?? ""
+      );
       console.log("E2E POLL:", JSON.stringify({ done, status }));
     }
     await p.waitForTimeout(1000);
@@ -113,8 +122,9 @@ async function translatePage(p: Page): Promise<void> {
   const probe = await p.evaluate(
     () =>
       new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: "check-cache", targetLang: "zh-CN", texts: ["x"] }, (r) =>
-          resolve({ lastErr: chrome.runtime.lastError?.message ?? null, res: r })
+        chrome.runtime.sendMessage(
+          { type: "check-cache", targetLang: "zh-CN", texts: ["x"] },
+          (r) => resolve({ lastErr: chrome.runtime.lastError?.message ?? null, res: r })
         );
       })
   );
@@ -123,6 +133,54 @@ async function translatePage(p: Page): Promise<void> {
 }
 
 describe("e2e 冒烟（加载 dist 扩展）", () => {
+  /** 模拟 popup 开关：SW 直写 chrome.storage.local 的 enabled 字段。
+   *  popup 保存走的是同一个存储通道，storage.onChanged 广播到所有 frame。 */
+  async function setEnabledViaSw(v: boolean): Promise<void> {
+    if (!context) throw new Error("SKIP");
+    const sw = context.serviceWorkers().find((w) => w.url().includes("service-worker-loader"));
+    if (!sw) throw new Error("SKIP");
+    await sw.evaluate(async (val) => {
+      const stored = await chrome.storage.local.get("settings");
+      const s = (stored.settings ?? {}) as Record<string, unknown>;
+      s.enabled = val;
+      await chrome.storage.local.set({ settings: s });
+    }, v);
+  }
+
+  it("总开关：关闭立即还原页面并收起工具条；重新开启恢复翻译（无需刷新）", async () => {
+    if (!browserAvailable) return;
+    const p = await freshPage();
+    await translatePage(p);
+    expect(
+      await p.evaluate(() => document.querySelectorAll(".it-translated").length)
+    ).toBeGreaterThan(0);
+
+    // 关闭：已译内容即时还原、悬浮工具条收起（storage.onChanged 实时生效，不刷新页面）
+    await setEnabledViaSw(false);
+    await p.waitForFunction(
+      () =>
+        document.querySelectorAll(".it-translated").length === 0 &&
+        !!document.querySelector(".it-toolbar")?.classList.contains("it-toolbar-sensitive"),
+      undefined,
+      { timeout: 15_000 }
+    );
+    // 关闭后短暂等待：观察器/动态入口不应再产生任何译文
+    await p.waitForTimeout(1500);
+    expect(await p.evaluate(() => document.querySelectorAll(".it-translated").length)).toBe(0);
+
+    // 重新开启：工具条恢复，且手动翻译照常可用（自动翻译默认关，不自动重译）
+    await setEnabledViaSw(true);
+    await p.waitForFunction(
+      () => !document.querySelector(".it-toolbar")?.classList.contains("it-toolbar-sensitive"),
+      undefined,
+      { timeout: 15_000 }
+    );
+    await translatePage(p); // 复用完整链路：展开工具条 → 点翻译 → 译文出现
+    expect(
+      await p.evaluate(() => (document.body.textContent ?? "").includes("by the extension.」"))
+    ).toBe(true);
+  }, 180_000);
+
   it("翻译 → 译文出现 → 状态完成 →还原", async () => {
     if (!browserAvailable) return;
     const p = await freshPage();

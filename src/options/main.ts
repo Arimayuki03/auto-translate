@@ -79,8 +79,12 @@ function updateFormatHint(): void {
   }
   // 免费通道内部固定安全哨兵协议，批量协议选项不适用；自定义端点仅 Google 免费通道支持
   batchMode.disabled = isFree;
-  $("free-endpoint-row").style.display = isGoogleFree ? "" : "none";
-  $("free-backup-endpoint-row").style.display = isGoogleFree ? "" : "none";
+  // 免费通道隐藏连接字段并给出说明行；googlefree 额外露出自定义端点配置
+  for (const row of ["base-url-row", "api-key-row", "model-row", "batch-mode-row"]) {
+    $(row).hidden = isFree;
+  }
+  $("free-endpoint-row").hidden = !isGoogleFree;
+  $("free-backup-endpoint-row").hidden = !isGoogleFree;
 }
 
 async function loadForm(): Promise<void> {
@@ -108,11 +112,15 @@ async function loadForm(): Promise<void> {
   ($("viewport-lazy") as HTMLInputElement).checked = s.translate.viewportLazy;
   ($("translate-on-select") as HTMLInputElement).checked = s.translate.translateOnSelect;
   ($("translate-input") as HTMLInputElement).checked = s.translate.translateInput;
+  ($("translate-hover") as HTMLInputElement).checked = s.translate.translateHover ?? false;
   ($("context-enabled") as HTMLInputElement).checked = s.translate.contextEnabled ?? true;
   input("context-max-chars").value = String(s.translate.contextMaxChars ?? 3000);
   ($("summary-enabled") as HTMLInputElement).checked = s.translate.summaryEnabled ?? false;
   input("summary-min-chars").value = String(s.translate.summaryMinChars ?? 6000);
-  select("style-theme").value = s.translate.style ?? "gray";
+  const styleValue = s.translate.style ?? "gray";
+  for (const radio of document.querySelectorAll<HTMLInputElement>("input[name='style-theme']")) {
+    radio.checked = radio.value === styleValue;
+  }
   ($("custom-css") as HTMLTextAreaElement).value = s.translate.customCss ?? "";
   ($("translate-attributes") as HTMLInputElement).checked = s.translate.translateAttributes ?? true;
   select("force-source-lang").value = s.translate.forceSourceLang ?? "";
@@ -138,16 +146,16 @@ function renderBuiltinRules(disabled: string[]): void {
   const disabledSet = new Set(disabled);
   for (const rule of BUILT_IN_RULES) {
     if (!rule.id) continue;
-    const row = document.createElement("label");
-    row.className = "checkbox-row";
+    const item = document.createElement("label");
+    item.className = "rule-item";
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.dataset.ruleId = rule.id;
     cb.checked = !disabledSet.has(rule.id);
     const span = document.createElement("span");
     span.textContent = `${rule.name ?? rule.id}（${rule.matches.join("、")}）`;
-    row.append(cb, span);
-    box.appendChild(row);
+    item.append(cb, span);
+    box.appendChild(item);
   }
 }
 
@@ -252,6 +260,7 @@ async function readForm(): Promise<Settings> {
       viewportLazy: ($("viewport-lazy") as HTMLInputElement).checked,
       translateOnSelect: ($("translate-on-select") as HTMLInputElement).checked,
       translateInput: ($("translate-input") as HTMLInputElement).checked,
+      translateHover: ($("translate-hover") as HTMLInputElement).checked,
       contextEnabled: ($("context-enabled") as HTMLInputElement).checked,
       contextMaxChars: Math.max(
         0,
@@ -263,7 +272,8 @@ async function readForm(): Promise<Settings> {
         const v = parseInt(($("summary-min-chars") as HTMLInputElement).value, 10);
         return Number.isNaN(v) ? 6000 : Math.max(0, v);
       })(),
-      style: select("style-theme").value as TranslationStyle,
+      style: (document.querySelector<HTMLInputElement>("input[name='style-theme']:checked")
+        ?.value ?? "gray") as TranslationStyle,
       customCss: ($("custom-css") as HTMLTextAreaElement).value.slice(0, 8000),
       translateAttributes: ($("translate-attributes") as HTMLInputElement).checked,
       forceSourceLang: select("force-source-lang").value,
@@ -364,7 +374,38 @@ async function runTestConnection(
   }
 }
 
+/** 侧边导航切换：显示目标面板，同步高亮；localStorage 记忆上次访问的分组 */
+function switchPanel(name: string): void {
+  for (const btn of document.querySelectorAll<HTMLButtonElement>(".nav-item")) {
+    btn.classList.toggle("active", btn.dataset.panel === name);
+  }
+  for (const panel of document.querySelectorAll<HTMLElement>(".panel")) {
+    panel.hidden = panel.dataset.panel !== name;
+  }
+  try {
+    localStorage.setItem("options-panel", name);
+  } catch {
+    /* localStorage 不可用时忽略（隐私模式等） */
+  }
+  window.scrollTo({ top: 0 });
+}
+
 function init(): void {
+  // 导航切换（含记忆：优先恢复上次访问的分组）
+  let initialPanel = "";
+  try {
+    initialPanel = localStorage.getItem("options-panel") ?? "";
+  } catch {
+    /* 忽略 */
+  }
+  if (!document.querySelector(`.panel[data-panel='${CSS.escape(initialPanel)}']`)) {
+    initialPanel = "api";
+  }
+  switchPanel(initialPanel);
+  for (const btn of document.querySelectorAll<HTMLButtonElement>(".nav-item")) {
+    btn.addEventListener("click", () => switchPanel(btn.dataset.panel ?? "api"));
+  }
+
   $("api-format").addEventListener("change", updateFormatHint);
   $("backup-format").addEventListener("change", updateBackupFormatFields);
   $("btn-save").addEventListener("click", async () => {

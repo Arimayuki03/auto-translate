@@ -41,6 +41,80 @@ body {
   padding: 16px;
 }
 
+/* 插件总开关行：左侧标签 + 右侧滑动开关 */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+/* 开关状态提示行 */
+.switch-hint {
+  margin-bottom: 12px;
+  font-size: 11px;
+  color: var(--it-muted);
+  min-height: 14px;
+}
+
+.switch-hint.off {
+  color: #dc2626;
+}
+
+.switch-row label[for="p-enabled"] {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--it-text);
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: #d1d5db;
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+
+.slider::before {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 2px;
+  top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.switch input:checked + .slider {
+  background: var(--it-primary);
+}
+
+.switch input:checked + .slider::before {
+  transform: translateX(16px);
+}
+
+/* 开关关闭时弱化 API 配置区，提示当前不可用 */
+.popup-body.disabled .field {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 .hint {
   font-size: 12px;
   color: var(--it-muted);
@@ -177,5 +251,9 @@ body {
   .btn-secondary {
     background: #334155;
     color: #e5e7eb;
+  }
+
+  .slider {
+    background: #475569;
   }
 }

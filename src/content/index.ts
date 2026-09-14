@@ -35,8 +35,34 @@ const CREDENTIAL_RE =
 
 async function main(): Promise<void> {
   const settings = await getSettings();
-  if (!shouldTranslatePage(settings)) return;
+  if (!shouldTranslatePage(settings)) return; // 黑白名单命中：维持原语义（改动需刷新页面生效）
+  if (!settings.enabled) {
+    watchMasterSwitch(); // 总开关关闭：不装配任何功能，只挂监听等待重新开启
+    return;
+  }
+  await startTranslation(settings);
+}
 
+/** 总开关关闭时挂在页面上的轻量监听：popup 重新开启后（saveSettings 触发 storage.onChanged）
+ *  本 frame 立即补做完整装配，无需刷新。消费到「开启」即注销自我；若注销时开关又已被关回，
+ *  重跑的 main() 会按最新设置重新决定（再挂监听或装配）。 */
+function watchMasterSwitch(): void {
+  const listener = (
+    changes: Record<string, chrome.storage.StorageChange>,
+    areaName: string
+  ): void => {
+    if (areaName !== "local") return;
+    const next = (changes.settings?.newValue as Settings | undefined)?.enabled;
+    if (next !== true) return;
+    chrome.storage.onChanged.removeListener(listener);
+    void main();
+  };
+  chrome.storage.onChanged.addListener(listener);
+}
+
+/** 完整装配（总开关开启且未被黑白名单拦截的 frame 才会走到这里）：
+ *  引擎 / 工具条 / 划词气泡 / 输入框 / 悬停翻译 / 动态内容观察器 / 快捷键 / 自动翻译 */
+async function startTranslation(settings: Settings): Promise<void> {
   // 顶层 / 子 frame 分流。window.top === window.self 在跨源下也只做引用比较，安全。
   const isTop = isTopFrame();
 
@@ -45,6 +71,12 @@ async function main(): Promise<void> {
   const isSensitive = (): boolean =>
     settings.security.sensitivePages &&
     CREDENTIAL_RE.test(location.hostname + " " + location.pathname);
+
+  // 插件总开关的运行态镜像：装配完成后由下方 storage.onChanged 监听实时翻转。
+  // 所有功能入口统一经 isBlocked 拦截（敏感页 或 开关关闭），保证关闭开关后
+  // 快捷键/划词/输入框/悬停/观察器补扫/可见性触发翻译都不再有任何翻译动作。
+  let enabledNow = settings.enabled;
+  const isBlocked = (): boolean => !enabledNow || isSensitive();
 
   // 按站点还原上次的翻译设置（目标语言 / 显示模式）；换页后动态重新判断。
   // 每个 frame 各自按自己的 host 读取（子 frame 与父页站点不同时互不影响）
@@ -78,7 +110,7 @@ async function main(): Promise<void> {
   let toolbar: Toolbar | null = null;
   if (isTop) {
     toolbar = new Toolbar(engine);
-    toolbar.setSensitive(isSensitive()); // 敏感页隐藏工具条
+    toolbar.setSensitive(isBlocked()); // 敏感页 / 开关关闭时隐藏工具条
 
     console.debug("[auto-translate] content 已注入", {
       url: location.href,
@@ -88,17 +120,19 @@ async function main(): Promise<void> {
       viewportLazy: settings.translate.viewportLazy,
     });
 
-    initBubble(engine, settings.translate.translateOnSelect, isSensitive, settings.tts);
-    initInput(engine, settings.translate.translateInput, isSensitive);
-    // 悬停翻译：仅顶层 frame；整页未翻译时悬停块级容器出「译」角标，点击只译该段
-    initHoverTranslate({ engine, isSensitive });
+    initBubble(engine, settings.translate.translateOnSelect, isBlocked, settings.tts);
+    initInput(engine, settings.translate.translateInput, isBlocked);
+    // 悬停翻译：仅顶层 frame 且设置开启时装配；整页未翻译时悬停块级容器出「译」角标，点击只译该段
+    if (settings.translate.translateHover) {
+      initHoverTranslate({ engine, isSensitive: isBlocked });
+    }
   } else {
     // 子 frame 注入日志精简：多 frame 页面会注入十几份，只留一行定位信息
     console.debug("[auto-translate] 子 frame 已注入", location.host + location.pathname);
   }
 
   const observer = new PageObserver(engine); // 构造即开始监听动态内容（各 frame 独立观察自己的 DOM）
-  observer.isSensitive = isSensitive;
+  observer.isSensitive = isBlocked;
   observer.isPageDisabled = isPageDisabled;
 
   if (isTop) {
@@ -109,7 +143,7 @@ async function main(): Promise<void> {
       renderer,
       observer,
       autoTranslate: settings.translate.autoTranslate,
-      isSensitive,
+      isSensitive: isBlocked,
       isPageDisabled,
       // 带路径前缀的站点规则（matches/excludeMatches）随 SPA 换页按新 URL 重新解析
       onNavigation: () => engine.applySiteRule(resolveSiteRule()),
@@ -118,7 +152,7 @@ async function main(): Promise<void> {
           toolbar?.destroy(); // 工具条随旧 body 被移除，清理引用并重建
           toolbar = new Toolbar(engine);
         }
-        toolbar?.setSensitive(isSensitive()); // 换页后按新 URL 决定是否显示
+        toolbar?.setSensitive(isBlocked()); // 换页后按新 URL / 开关状态决定是否显示
         applyStyle(); // 新 body 上主题类已丢失，重挂（幂等）
       },
     });
@@ -130,7 +164,7 @@ async function main(): Promise<void> {
   chrome.runtime.onMessage.addListener((msg: ItCommandMessage) => {
     if (msg?.type !== "it-command") return;
     if (msg.command === "toggle-translate") {
-      if (isSensitive()) return; // 敏感页禁止翻译
+      if (isBlocked()) return; // 敏感页 / 总开关关闭时禁止翻译
       if (engine.hasTranslated()) {
         engine.restore();
         void setPageDisabled(currentPageKey(), true); // 还原该子页 → 该子页禁用自动翻译
@@ -143,18 +177,48 @@ async function main(): Promise<void> {
     }
   });
 
+  // 插件总开关实时生效：popup / 设置页保存都会写 chrome.storage.local，
+  // storage.onChanged 自动广播到所有扩展上下文（含每个 frame 的 content script），
+  // 无需 background 中继、无需刷新页面。
+  // 关闭 → 还原本 frame 已译内容（engine.restore 同时中止在途请求，不浪费额度）、
+  //         隐藏悬浮工具条、enabledNow 翻转后所有功能入口一律拦截；
+  // 开启 → 恢复入口与工具条，并按自动翻译设置补译当前页。
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local") return;
+    const entry = changes.settings;
+    if (!entry) return;
+    const next = (entry.newValue as Settings | undefined)?.enabled ?? true;
+    const prev = (entry.oldValue as Settings | undefined)?.enabled ?? true;
+    if (next === prev) return; // 只响应总开关变化；其它设置项的保存不打扰
+    enabledNow = next;
+    if (!next) {
+      engine.restore();
+      toolbar?.setSensitive(true); // 借用敏感页的隐藏机制收起悬浮工具条
+    } else {
+      toolbar?.setSensitive(isSensitive()); // 按当前 URL 恢复工具条显示状态
+      if (
+        settings.translate.autoTranslate &&
+        document.visibilityState === "visible" &&
+        !isSensitive() &&
+        !isPageDisabled()
+      ) {
+        void engine.translateAll();
+      }
+    }
+  });
+
   if (settings.translate.autoTranslate) {
-    // 只翻译当前前台标签页；后台标签页等切到前台再译，避免后台抢 API 额度；敏感页跳过。
+    // 只翻译当前前台标签页；后台标签页等切到前台再译，避免后台抢 API 额度；敏感页/开关关闭跳过。
     // document.visibilityState 是各 frame 自己的可见性：display:none / 未渲染的子 frame 为
     // hidden，变为可见时会收到自己的 visibilitychange 再自动翻译（后台 frame 不抢额度）
-    if (document.visibilityState === "visible" && !isSensitive() && !isPageDisabled()) {
+    if (document.visibilityState === "visible" && !isBlocked() && !isPageDisabled()) {
       await engine.translateAll();
     }
     document.addEventListener("visibilitychange", () => {
-      // 后台标签页切回前台再译；但用户已手动还原过本页 / 该子页被禁用时不重新翻译
+      // 后台标签页切回前台再译；但用户已手动还原过本页 / 该子页被禁用 / 开关关闭时不重新翻译
       if (
         document.visibilityState === "visible" &&
-        !isSensitive() &&
+        !isBlocked() &&
         !isPageDisabled() &&
         !engine.restoredByUser
       ) {
@@ -172,7 +236,9 @@ function matchesDomain(host: string, entry: string): boolean {
   return host === d || host.endsWith("." + d);
 }
 
-/** 页面级守卫：黑白名单（命中则整页禁用；敏感页判断改为动态，见 isSensitive） */
+/** 页面级守卫：黑白名单（命中则整页禁用；敏感页判断改为动态，见 isSensitive）。
+ *  总开关 enabled 不在这里判：关闭时 main 仍要挂 watchMasterSwitch 监听，
+ *  保证重新开启无需刷新页面。 */
 function shouldTranslatePage(s: Settings): boolean {
   const host = location.hostname.replace(/^www\./, "").toLowerCase();
 

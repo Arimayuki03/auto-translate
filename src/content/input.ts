@@ -1,5 +1,6 @@
 /** 输入框翻译（F-011）：聚焦输入框显示「译」按钮；鼠标一移动即隐藏；可切换翻译/还原 */
 import type { PageEngine } from "./engine";
+import { placeFixedInViewport } from "./placement";
 import { isInsideOurUI } from "./ui";
 import { t } from "../shared/i18n";
 
@@ -21,14 +22,15 @@ export function initInput(
     if (field && !field.isConnected) field = null;
   }
 
-  /** 定位按钮到输入框上方/下方（视口坐标） */
+  /** 定位按钮到输入框上方/下方（视口坐标；含块偏移校正见 placement.ts） */
   function positionButton(): void {
     if (!btn || !field) return;
     const r = field.getBoundingClientRect();
     const btnW = btn.offsetWidth || 32;
-    btn.style.top = r.top > 40 ? `${Math.max(8, r.top - 30)}px` : `${r.bottom + 4}px`;
-    btn.style.left = `${Math.min(Math.max(8, r.right - btnW), Math.max(8, innerWidth - btnW - 8))}px`;
-    btn.style.right = "auto";
+    const top = r.top > 40 ? Math.max(8, r.top - 30) : r.bottom + 4;
+    const left = Math.min(Math.max(8, r.right - btnW), Math.max(8, innerWidth - btnW - 8));
+    btn.style.right = "auto"; // 保证以 left/top 为定位基准
+    placeFixedInViewport(btn, left, top);
   }
 
   function showButton(f: HTMLElement): void {

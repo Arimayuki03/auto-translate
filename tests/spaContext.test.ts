@@ -75,19 +75,21 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
-async function flush(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 0));
-  await Promise.resolve();
-}
-
 /** 轮询等待条件成立：提取/调度是多层异步链（chunked 提取按时间片让出），
  *  固定轮数的 flush 在系统高负载下会提前返回，造成偶发失败 */
-async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
     if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
     await new Promise((r) => setTimeout(r, 10));
   }
+}
+
+/** 等翻译渲染落地：请求发出先于渲染，轮询到 it-done/it-error 即代表该批请求已全部记录 */
+function waitForRendered(): Promise<void> {
+  return waitFor(
+    () => document.querySelectorAll(".it-translated.it-done, .it-translated.it-error").length > 0
+  );
 }
 
 function translateCallCount(): number {
@@ -100,7 +102,7 @@ describe("SPA 换页清理旧上下文", () => {
     document.body.innerHTML = `<p>Old page paragraph text.</p>`;
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     const contexts = sentContexts();
     expect(contexts.length).toBeGreaterThan(0);
@@ -113,7 +115,7 @@ describe("SPA 换页清理旧上下文", () => {
     document.body.innerHTML = `<p>Old page paragraph text.</p>`;
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
     expect(sentContexts()[0]?.title).toBe("旧页面标题");
 
     // SPA 换页：重置引擎状态并清理旧上下文
@@ -124,7 +126,7 @@ describe("SPA 换页清理旧上下文", () => {
     document.body.innerHTML = `<p>New page paragraph text.</p>`;
     const units = extractUnits(document.body, engine.extractOptions);
     await engine.translateUnits(units);
-    await flush();
+    await waitForRendered();
 
     // 最后一次 translate 请求不应携带旧页上下文（上下文已作废，待 translateAll 重算）
     const contexts = sentContexts();
@@ -138,13 +140,13 @@ describe("SPA 换页清理旧上下文", () => {
     document.body.innerHTML = `<p>Old page paragraph text.</p>`;
     const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     engine.resetForNavigation();
     document.title = "新页面标题";
     document.body.innerHTML = `<p>New page paragraph text.</p>`;
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     const contexts = sentContexts();
     expect(contexts[contexts.length - 1]?.title).toBe("新页面标题");

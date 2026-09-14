@@ -52,9 +52,37 @@ async function loadForm(): Promise<void> {
   ($("p-api-key") as HTMLInputElement).value = s.api.apiKey;
   ($("p-model") as HTMLInputElement).value = s.api.model;
   syncFreeFields();
+  applyEnabledUi(s.enabled);
 }
 
-($("version")).textContent = `v${chrome.runtime.getManifest().version}`;
+// ===== 插件总开关 =====
+const enabledToggle = $("p-enabled") as HTMLInputElement;
+
+/** 把开关状态反映到界面：标签/提示文案、配置区置灰。不写存储（loadForm 初始化与 change 共用） */
+function applyEnabledUi(on: boolean): void {
+  $("p-enabled-label").textContent = t("popupPluginSwitch");
+  ($("p-enabled") as HTMLInputElement).checked = on;
+  const hint = $("p-enabled-hint");
+  hint.textContent = on ? t("popupPluginOnHint") : t("popupPluginOffHint");
+  hint.classList.toggle("off", !on);
+  document.querySelector(".popup-body")?.classList.toggle("disabled", !on);
+}
+
+/** 切换总开关：读最新设置改 enabled 后整体落盘。
+ *  chrome.storage.onChanged 会广播到所有扩展上下文（含每个标签页全部 frame 的
+ *  content script）：关闭 → 还原已译页面并停用所有功能入口；开启 → 按设置恢复。
+ *  无需 background 中继、无需刷新页面。 */
+enabledToggle.addEventListener("change", () => {
+  void (async () => {
+    const s = await getSettings();
+    s.enabled = enabledToggle.checked;
+    await saveSettings(s);
+    applyEnabledUi(s.enabled);
+    setStatus(s.enabled ? t("popupPluginOn") : t("popupPluginOff"), s.enabled ? "ok" : "");
+  })();
+});
+
+$("version").textContent = `v${chrome.runtime.getManifest().version}`;
 
 $("p-test").addEventListener("click", async () => {
   const api = await readApi();
@@ -66,7 +94,11 @@ $("p-test").addEventListener("click", async () => {
   btn.disabled = true;
   setStatus(t("popupTestRunning"));
   try {
-    const req: TestConnectionRequestMessage = { type: "test-connection", id: crypto.randomUUID(), api };
+    const req: TestConnectionRequestMessage = {
+      type: "test-connection",
+      id: crypto.randomUUID(),
+      api,
+    };
     const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
     setStatus(
       res.ok

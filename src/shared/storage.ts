@@ -2,10 +2,11 @@ import type { ApiConfig, Settings } from "./types";
 import { sanitizeSiteRules } from "./siteRules";
 
 /** 设置结构版本：变更默认值（如自动翻译默认关闭/并发加大）时 +1，老版本读取时迁移 */
-const SETTINGS_VERSION = 4;
+const SETTINGS_VERSION = 5;
 
 export const DEFAULT_SETTINGS: Settings = {
   version: SETTINGS_VERSION,
+  enabled: true,
   api: {
     format: "openai",
     baseUrl: "",
@@ -32,6 +33,7 @@ export const DEFAULT_SETTINGS: Settings = {
     blockMaxChars: 1200,
     translateOnSelect: true,
     translateInput: true,
+    translateHover: false,
     viewportLazy: true,
     terminology: [],
     contextEnabled: true,
@@ -95,6 +97,10 @@ export async function getSettings(): Promise<Settings> {
     // v3 → v4：取消敏感页不翻译限制（默认关，老设置里存的 true 归零）
     if (!saved.version || saved.version < 4) {
       merged.security.sensitivePages = DEFAULT_SETTINGS.security.sensitivePages;
+    }
+    // v4 → v5：插件总开关默认开启（老设置没有该字段时补默认值 true）
+    if (!saved.version || saved.version < 5) {
+      merged.enabled = DEFAULT_SETTINGS.enabled;
     }
     merged.version = SETTINGS_VERSION;
   }
@@ -175,6 +181,7 @@ function sanitizeImportSettings(raw: unknown): Settings {
     freeBackupEndpoint: str,
   };
   const patch: SettingsPatch = {
+    enabled: bool(r.enabled),
     api: pick(r.api, apiSpec) as unknown as Partial<ApiConfig>,
     translate: pick(r.translate, {
       targetLang: str,
@@ -185,6 +192,7 @@ function sanitizeImportSettings(raw: unknown): Settings {
       blockMaxChars: num,
       translateOnSelect: bool,
       translateInput: bool,
+      translateHover: bool,
       viewportLazy: bool,
       terminology: strArr,
       contextEnabled: bool,
@@ -258,6 +266,7 @@ export async function importSettings(input: unknown): Promise<void> {
  *  导入校验共用），mergeSettings 负责把缺失字段补齐为默认值 */
 type SettingsPatch = {
   version?: number;
+  enabled?: boolean;
   api?: Partial<ApiConfig>;
   backupApi?: Partial<ApiConfig>;
   translate?: Partial<Settings["translate"]>;
@@ -269,6 +278,7 @@ type SettingsPatch = {
 
 function mergeSettings(base: Settings, patch: SettingsPatch): Settings {
   const api: ApiConfig = { ...base.api, ...(patch.api ?? {}) };
+  const enabled: boolean = patch.enabled ?? base.enabled;
   return {
     ...base,
     ...patch,
@@ -279,5 +289,6 @@ function mergeSettings(base: Settings, patch: SettingsPatch): Settings {
     tts: { ...base.tts, ...(patch.tts ?? {}) },
     security: { ...base.security, ...(patch.security ?? {}) },
     cache: { ...base.cache, ...(patch.cache ?? {}) },
+    enabled,
   };
 }

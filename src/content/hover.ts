@@ -5,6 +5,7 @@
  */
 import { extractUnits } from "./extractor";
 import type { PageEngine } from "./engine";
+import { placeFixedInViewport } from "./placement";
 import { t } from "../shared/i18n";
 
 /** 块级悬停候选：正文块直接作为候选；div/section 为兜底（悬停其空白处可整块译入） */
@@ -110,7 +111,8 @@ export function initHoverTranslate(opts: HoverTranslateOptions): () => void {
   badge.setAttribute("data-it-ui", ""); // 提取/观察器/悬停判定统一跳过我们自己的 UI
   badge.textContent = t("translate");
   badge.style.display = "none";
-  document.body.appendChild(badge);
+  // 挂 <html> 而非 body：body 带 transform/filter 的站点上 fixed 包含块会失真（见 placement.ts）
+  (document.documentElement ?? document.body).appendChild(badge);
 
   let current: HTMLElement | null = null;
 
@@ -129,9 +131,9 @@ export function initHoverTranslate(opts: HoverTranslateOptions): () => void {
     // 角标贴候选左上角外侧；元素顶到视口上沿时放进内部，避免被视口裁掉
     const x = Math.min(Math.max(r.left, 4), Math.max(4, window.innerWidth - 28));
     const y = r.top >= 26 ? r.top - 24 : r.top + 2;
-    badge.style.left = `${Math.round(x)}px`;
-    badge.style.top = `${Math.round(y)}px`;
+    // 先可见再定位：placeFixedInViewport 要读回实际渲染位置校正含块偏移（站点 body/html 带 transform 时 fixed 不再以视口为包含块）
     badge.style.display = "block";
+    placeFixedInViewport(badge, x, y);
     current = el;
   };
 

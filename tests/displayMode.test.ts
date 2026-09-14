@@ -61,9 +61,18 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
-async function flush(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 0));
-  await Promise.resolve();
+async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/** 等翻译渲染落地（成功 it-done / 失败 it-error）：translateAll 对调度链不 await，
+ *  固定一轮 flush 在多 worker 高负载下会提前返回，造成偶发失败 */
+function waitForRendered(): Promise<void> {
+  return waitFor(() => document.querySelectorAll(".it-done, .it-error").length > 0);
 }
 
 function makeEngine() {
@@ -99,7 +108,7 @@ describe("仅译文模式：嵌套元素原文替换（回归：译文与原文�
     document.body.innerHTML = `<ul><li id="t"><span>Hello</span> <span>world</span></li></ul>`;
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     engine.renderer.setMode("translated");
     const li = document.querySelector("#t")!;
@@ -118,7 +127,7 @@ describe("仅译文模式：嵌套元素原文替换（回归：译文与原文�
     document.body.innerHTML = `<ul><li id="t">Hello <b>bold</b> end</li></ul>`;
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     engine.renderer.setMode("translated");
     const li = document.querySelector("#t")!;
@@ -135,7 +144,7 @@ describe("仅译文模式：嵌套元素原文替换（回归：译文与原文�
     document.body.innerHTML = `<ul><li id="t">See <a href="#doc">docs page</a> for details</li></ul>`;
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     engine.renderer.setMode("translated");
     const a = document.querySelector<HTMLAnchorElement>("#t a")!;
@@ -158,7 +167,7 @@ describe("仅译文模式：包裹路径与失败占位", () => {
     document.body.innerHTML = `<p id="t"><span>Plain text here</span></p>`;
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     engine.renderer.setMode("translated");
     const shown = visibleText(document.body);
@@ -176,7 +185,7 @@ describe("仅译文模式：包裹路径与失败占位", () => {
 
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
     expect(document.querySelectorAll(".it-translated.it-error").length).toBeGreaterThan(0);
 
     engine.renderer.setMode("translated");
@@ -202,7 +211,7 @@ describe("布局保真：译文不新增布局项、不挤走原有组件", () =
     document.body.innerHTML = `<nav><a href="/a">Home page</a><a href="/b">Settings</a></nav>`;
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitForRendered();
 
     const nav = document.querySelector("nav")!;
     expect(nav.children.length).toBe(2); // 不新增兄弟元素（flex 导航里兄弟即布局项）

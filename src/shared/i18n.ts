@@ -77,6 +77,11 @@ const zh: Dict = {
   popupNoSite: "无法获取当前站点",
   popupWhitelisted: (host: string) => `已加入白名单 ✔ ${host}`,
   popupBlacklisted: (host: string) => `已加入黑名单 ✔ ${host}`,
+  popupPluginOn: "插件已开启 ✔",
+  popupPluginOff: "插件已关闭，所有翻译功能已停用",
+  popupPluginOnHint: "翻译功能运行中",
+  popupPluginOffHint: "已停用整页翻译 / 划词 / 输入框 / 悬停 / 快捷键",
+  popupPluginSwitch: "插件开关",
 };
 
 const en: Dict = {
@@ -140,6 +145,11 @@ const en: Dict = {
   popupNoSite: "Cannot get current site",
   popupWhitelisted: (host: string) => `Added to whitelist ✔ ${host}`,
   popupBlacklisted: (host: string) => `Added to blacklist ✔ ${host}`,
+  popupPluginOn: "Extension enabled ✔",
+  popupPluginOff: "Extension disabled — all translation features are off",
+  popupPluginOnHint: "Translation is running",
+  popupPluginOffHint: "Page / selection / input / hover / shortcut translation stopped",
+  popupPluginSwitch: "Plugin",
 };
 
 /** 当前 UI 语言：浏览器语言 zh 开头 → 中文，否则英文 */
@@ -150,11 +160,12 @@ let lang: UiLang | null = null;
 function currentLang(): UiLang {
   if (lang) return lang;
   try {
-    const codes = typeof chrome !== "undefined" && chrome.i18n?.getUILanguage
-      ? [chrome.i18n.getUILanguage()]
-      : typeof navigator !== "undefined"
-        ? navigator.languages ?? [navigator.language]
-        : [];
+    const codes =
+      typeof chrome !== "undefined" && chrome.i18n?.getUILanguage
+        ? [chrome.i18n.getUILanguage()]
+        : typeof navigator !== "undefined"
+          ? (navigator.languages ?? [navigator.language])
+          : [];
     lang = codes.some((c) => /^zh/i.test(c)) ? "zh" : "en";
   } catch {
     lang = "zh";

@@ -1,324 +1,560 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI 沉浸式网页翻译 - 设置</title>
-  <link rel="stylesheet" href="./options.css" />
-</head>
-<body>
-  <main class="container">
-    <h1>设置</h1>
-
-    <section class="card">
-      <h2>API 配置</h2>
-      <div class="form-row">
-        <label for="api-format">API 格式</label>
-        <select id="api-format">
-          <option value="openai">OpenAI 兼容（DeepSeek / OneAPI / vLLM / 中转）</option>
-          <option value="anthropic">Anthropic Claude</option>
-          <option value="gemini">Google Gemini</option>
-          <option value="ollama">Ollama 原生</option>
-          <option value="googlefree">Google 免费（无需 Key）</option>
-          <option value="microsoft">Microsoft 免费（无需 Key）</option>
-        </select>
-        <p class="hint" id="format-hint"></p>
-      </div>
-      <div class="form-row">
-        <label for="base-url">BaseURL</label>
-        <input type="text" id="base-url" placeholder="https://api.deepseek.com/v1" />
-        <p class="hint">只需填到域名 / 版本层级，插件会自动拼接接口路径。</p>
-      </div>
-      <div class="form-row">
-        <label for="api-key">API Key</label>
-        <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" />
-        <p class="hint">仅保存在本机浏览器存储（落盘前做混淆处理）。</p>
-      </div>
-      <div class="form-row">
-        <label for="model">模型</label>
-        <input type="text" id="model" placeholder="deepseek-chat" />
-      </div>
-      <div class="form-row" id="free-endpoint-row" style="display: none">
-        <label for="free-endpoint">免费通道端点（留空用内置公开端点）</label>
-        <input type="text" id="free-endpoint" placeholder="https://translate.googleapis.com/translate_a/single" />
-        <p class="hint">Google 免费通道的翻译接口地址；被限流或不可用时可换备用端点。</p>
-      </div>
-      <div class="form-row" id="free-backup-endpoint-row" style="display: none">
-        <label for="free-backup-endpoint">备用端点（可选）</label>
-        <input type="text" id="free-backup-endpoint" placeholder="留空则不使用备用端点" />
-        <p class="hint">主端点失败（限流 / 不可达）时自动切换的第二个免费端点。</p>
-      </div>
-      <div class="form-row">
-        <label for="batch-mode">批量翻译协议</label>
-        <select id="batch-mode">
-          <option value="lines">逐行协议（默认，第三方兼容性最好）</option>
-          <option value="separator">哨兵协议（适合明确支持严格分隔输出的模型）</option>
-        </select>
-        <p class="hint">逐行：一次请求多段、按行返回，兼容性最好。哨兵：用 ===IT_SEP=== 分隔输入输出，段落内含换行时更可靠，但对模型指令服从度要求高；解析失败会自动回退逐行。</p>
-      </div>
-      <div class="form-row">
-        <label for="custom-prompt">自定义翻译指令（可选，附加到系统提示词）</label>
-        <textarea id="custom-prompt" rows="3" placeholder="例如：保持专业术语一致；译文使用简练的书面语。"></textarea>
-        <p class="hint">非空时作为「附加指令」拼在系统提示词最前面。批量协议的分段 / 逐行指令始终完整保留在附加指令之后，不会被覆盖；免费通道不使用该指令。最长 2000 字符。</p>
-      </div>
-      <div class="form-row form-inline">
-        <div>
-          <label for="temperature">温度</label>
-          <input type="number" id="temperature" min="0" max="2" step="0.1" />
-        </div>
-        <div>
-          <label for="timeout">超时（秒）</label>
-          <input type="number" id="timeout" min="5" max="300" />
-        </div>
-        <div>
-          <label for="concurrency">最大并发</label>
-          <input type="number" id="concurrency" min="1" max="10" />
-        </div>
-        <div>
-          <label for="request-interval">请求间隔（毫秒）</label>
-          <input type="number" id="request-interval" min="50" max="10000" step="50" />
-        </div>
-      </div>
-      <p class="hint">温度：越低译文越稳定准确（默认 0.3）。并发：同时发出的 API 请求数（默认 2）。请求间隔：相邻请求的最小启动间隔（默认 500 毫秒，≈2 请求/秒）——中转站/服务商限额严格时调大，如 1000～2000。</p>
-    </section>
-
-    <section class="card">
-      <h2>备用 API（可选，主 API 失败时自动切换）</h2>
-      <div class="form-row">
-        <label for="backup-format">API 格式</label>
-        <select id="backup-format">
-          <option value="openai">OpenAI 兼容</option>
-          <option value="anthropic">Anthropic Claude</option>
-          <option value="gemini">Google Gemini</option>
-          <option value="ollama">Ollama 原生</option>
-          <option value="googlefree">Google 免费（无需 Key）</option>
-          <option value="microsoft">Microsoft 免费（无需 Key）</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label for="backup-base-url">BaseURL</label>
-        <input type="text" id="backup-base-url" placeholder="留空则关闭备用 API" />
-      </div>
-      <div class="form-row">
-        <label for="backup-api-key">API Key</label>
-        <input type="password" id="backup-api-key" placeholder="sk-..." autocomplete="off" />
-      </div>
-      <div class="form-row">
-        <label for="backup-model">模型</label>
-        <input type="text" id="backup-model" />
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>翻译设置</h2>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="auto-translate" />
-          <span>打开网页时自动翻译（仅当前前台标签页）</span>
-        </label>
-        <p class="hint">关闭时需点击页面右下角红点 → 「翻译」手动触发。</p>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="viewport-lazy" />
-          <span>视口懒翻译（只翻译当前浏览区域，滚动到附近才译新内容，节省额度）</span>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="translate-on-select" />
-          <span>划词翻译（选中文本自动弹出译文气泡）</span>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="translate-input" />
-          <span>输入框翻译（输入框右上方显示「译」按钮）</span>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="context-enabled" />
-          <span>整页翻译携带页面上下文（标题/描述/正文摘要，帮助模型理解语境）</span>
-        </label>
-        <p class="hint">仅整页翻译携带；划词 / 输入框翻译不携带，避免额外 token。部分 API 有 token 上限时可关闭。</p>
-      </div>
-      <div class="form-row">
-        <label for="context-max-chars">上下文最大字符数</label>
-        <input type="number" id="context-max-chars" min="0" max="20000" step="200" />
-        <p class="hint">正文摘要的最大长度（标题/描述另有固定上限）。设得越小越省 token。</p>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="summary-enabled" />
-          <span>LLM 页面摘要（请 AI 概括长文主题注入上下文，专业长文的翻译更贴语境）</span>
-        </label>
-        <p class="hint">整页翻译期间异步补一条摘要，每页至多多一次请求（结果已缓存，回访不重复请求）。免费通道（Google/Microsoft）不支持，自动跳过。</p>
-      </div>
-      <div class="form-row">
-        <label for="summary-min-chars">摘要启用字数阈值</label>
-        <input type="number" id="summary-min-chars" min="0" max="100000" step="500" />
-        <p class="hint">页面正文超过该字数才生成 LLM 摘要（短页用原文截断已够用，省一次请求）；0 = 长短页都生成。</p>
-      </div>
-      <div class="form-row">
-        <label for="style-theme">译文样式</label>
-        <select id="style-theme">
-          <option value="gray">灰字（默认，跟随页面文字色）</option>
-          <option value="outline">描边（空心字）</option>
-          <option value="underline">虚线下划线</option>
-          <option value="blur">模糊（悬停显形）</option>
-        </select>
-        <p class="hint">译文的外观主题；保存后刷新页面生效。</p>
-      </div>
-      <div class="form-row">
-        <label for="custom-css">自定义译文 CSS（可选，叠加在主题之上）</label>
-        <textarea id="custom-css" rows="4" placeholder=".it-translated { opacity: 0.85; font-style: italic; }"></textarea>
-        <p class="hint">面向 .it-translated（译文块）等类名书写，最长 8000 字符；保存后刷新页面生效。</p>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="translate-attributes" />
-          <span>翻译 HTML 属性（输入框 placeholder、链接 title、图片 alt、aria-label）</span>
-        </label>
-      </div>
-      <div class="form-row">
-        <label for="force-source-lang">强制源语言（可选）</label>
-        <select id="force-source-lang">
-          <option value="">自动检测（html lang / 内容启发式）</option>
-          <option value="en">英语</option>
-          <option value="ja">日语</option>
-          <option value="ko">韩语</option>
-          <option value="zh">中文</option>
-          <option value="zh-TW">中文（繁体）</option>
-          <option value="de">德语</option>
-          <option value="fr">法语</option>
-          <option value="es">西班牙语</option>
-          <option value="pt">葡萄牙语</option>
-          <option value="ru">俄语</option>
-          <option value="ar">阿拉伯语</option>
-          <option value="it">意大利语</option>
-          <option value="th">泰语</option>
-          <option value="vi">越南语</option>
-        </select>
-        <p class="hint">页面语言被端点误判时手动指定源语言；LLM 通道随上下文注入提示词，免费通道直接作为 sl/from 参数。</p>
-      </div>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="sensitive-pages" />
-          <span>敏感页面不翻译（登录 / 密码 / 2FA / 支付等页面跳过翻译）</span>
-        </label>
-        <p class="hint">
-          开启后，URL 含 login / password / 2fa / pay 等关键词的页面整页不翻译（输入框内的密码值本就永不翻译）。
-          关闭则所有页面都翻译。默认关闭。
-        </p>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>划词朗读（TTS）</h2>
-      <div class="form-row">
-        <label class="checkbox-row">
-          <input type="checkbox" id="tts-enabled" />
-          <span>在划词翻译气泡中显示「朗读」按钮</span>
-        </label>
-        <p class="hint">
-          使用 Edge TTS 免费合成（无需 API Key），朗读气泡中的译文；
-          朗读时点击按钮可停止，关闭气泡也会停止。
-        </p>
-      </div>
-      <div class="form-row">
-        <label for="tts-voice">朗读声音</label>
-        <select id="tts-voice">
-          <option value="">自动（按目标语言选择）</option>
-          <option value="zh-CN-XiaoxiaoNeural">晓晓（中文·女声）</option>
-          <option value="zh-CN-YunxiNeural">云希（中文·男声）</option>
-          <option value="zh-TW-HsiaoChenNeural">曉臻（台湾国语·女声）</option>
-          <option value="en-US-AvaNeural">Ava（英语·女声）</option>
-          <option value="en-US-BrianNeural">Brian（英语·男声）</option>
-          <option value="ja-JP-NanamiNeural">七海（日语·女声）</option>
-          <option value="ko-KR-SunHiNeural">善熙（韩语·女声）</option>
-        </select>
-        <p class="hint">自动模式按当前目标语言挑选声音（中/英/日/韩等）；手动指定后始终使用所选声音。</p>
-      </div>
-      <div class="form-row">
-        <label for="tts-rate">朗读语速</label>
-        <select id="tts-rate">
-          <option value="-50">0.5×（慢）</option>
-          <option value="-25">0.75×</option>
-          <option value="0">1×（正常）</option>
-          <option value="25">1.25×</option>
-          <option value="50">1.5×</option>
-          <option value="100">2×（快）</option>
-        </select>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>站点黑白名单</h2>
-      <div class="form-row">
-        <label for="whitelist">白名单（每行一个域名，仅这些站点自动翻译，留空则全部站点）</label>
-        <textarea id="whitelist" rows="4" placeholder="example.com"></textarea>
-      </div>
-      <div class="form-row">
-        <label for="blacklist">黑名单（每行一个域名，这些站点永不翻译，优先级高于白名单）</label>
-        <textarea id="blacklist" rows="4" placeholder="bank.com"></textarea>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>站点规则库</h2>
-      <div class="form-row">
-        <label>内置站点规则（常见站点的「排除区」适配：导航 / 按钮 / 字幕 / 代码区等不翻译）</label>
-        <div id="builtin-rules" class="rule-list"></div>
-        <p class="hint">取消勾选即禁用对应内置规则；保存后刷新页面生效。</p>
-      </div>
-      <div class="form-row">
-        <label for="site-rules">自定义站点规则（JSON，每行一条；也可整段粘贴 JSON 数组）</label>
-        <textarea id="site-rules" rows="6"
-          placeholder='{"matches":["example.com"],"excludeSelectors":[".sidebar",".no-translate"],"excludeTags":["my-icon"],"forceBlockTags":["my-block"]}'></textarea>
-        <p class="hint">
-          matches 支持域名通配（*.example.com / www.amazon.*）与路径前缀（example.com/docs）。
-          可选字段：excludeSelectors（命中元素及其子树不翻译）、excludeTags（不翻译的标签）、
-          forceBlockTags（强制按块级翻译单元处理的标签）、excludeMatches（反排除）、enabled。
-          与命中的内置规则合并生效；保存后刷新页面生效。
-        </p>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>缓存与数据</h2>
-      <div class="form-row">
-        <div class="form-inline">
-          <div>
-            <label for="cache-ttl-days">缓存保留天数</label>
-            <input type="number" id="cache-ttl-days" min="0" max="365" step="1" />
-          </div>
-          <div>
-            <label>缓存条目</label>
-            <p class="hint" id="cache-stats" style="margin: 0">统计中…</p>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 沉浸式网页翻译 - 设置</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- 侧边导航 -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">译</span>
+          <div class="brand-text">
+            <strong>AI 沉浸式翻译</strong>
+            <span>设置中心</span>
           </div>
         </div>
-        <p class="hint">过期的缓存条目每天自动清理一次（0 = 永不过期）；也可点「立即清理」手动触发。</p>
-      </div>
-      <div class="form-row">
-        <p class="hint">译文缓存保存在本地并跨会话复用（节省 API 额度）。设置可导出为 JSON 备份/迁移。</p>
-        <div class="actions-row">
-          <button id="btn-cleanup-cache" class="btn btn-secondary">立即清理</button>
-          <button id="btn-clear-cache" class="btn btn-secondary">清空缓存</button>
-          <button id="btn-export" class="btn btn-secondary">导出设置</button>
-          <button id="btn-import" class="btn btn-secondary">导入设置</button>
-          <input type="file" id="import-file" accept="application/json" style="display: none" />
+        <nav class="nav" id="nav">
+          <button class="nav-item active" data-panel="api">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M13 3 4 14h6l-1 7 9-11h-6l1-7z" />
+            </svg>
+            API 服务
+          </button>
+          <button class="nav-item" data-panel="translate">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12.87 15.07 10.33 12.53C12.75 10.14 14.37 7.39 15.21 4.5H18V2.5H10.5V.5H8.5V2.5H1v2h12.19c-.79 2.44-2.19 4.78-4.12 6.7-1.28-1.3-2.34-2.7-3.13-4.2H3.94c.95 2.03 2.25 3.94 3.9 5.66l-6.66 6.59 1.42 1.42L9.5 14.16l2.83 2.83 1.04-1.92Zm4.63-6.57h-2L10.5 20.5h2l1.12-3h4.75l1.13 3h2L17.5 8.5Zm-3.12 8 1.62-4.33L16.75 16h-2.37Z"
+              />
+            </svg>
+            翻译行为
+          </button>
+          <button class="nav-item" data-panel="tts">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"
+              />
+            </svg>
+            划词朗读
+          </button>
+          <button class="nav-item" data-panel="sites">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 6h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.92 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82A13.7 13.7 0 0 1 12 4.04zM4.26 14A7.82 7.82 0 0 1 4 12c0-.69.1-1.36.26-2h3.38a16.75 16.75 0 0 0 0 4H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.99 7.99 0 0 1 5.08 16zm2.95-8H5.08a7.99 7.99 0 0 1 4.33-3.56A15.65 15.65 0 0 0 8.03 8zM12 19.96a13.7 13.7 0 0 1-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66a14.86 14.86 0 0 1 0-4h4.68a14.86 14.86 0 0 1 0 4zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a7.99 7.99 0 0 1-4.33 3.56zM16.36 14a16.75 16.75 0 0 0 0-4h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2h-3.38z"
+              />
+            </svg>
+            站点管理
+          </button>
+          <button class="nav-item" data-panel="data">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 4h16v2H4zm0 4h16v2H4zm0 4h10v2H4zm0 4h10v2H4zm12-1.17V13h2v1.83l1.59-1.59L21 14.65l-3 3-3-3 1.41-1.41zM4 20h10v2H4z"
+              />
+            </svg>
+            缓存与数据
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <button id="btn-save" class="btn btn-primary btn-block">保存设置</button>
+          <p id="status" class="status" role="status"></p>
         </div>
-      </div>
-    </section>
+      </aside>
 
-    <div class="actions">
-      <button id="btn-test" class="btn btn-secondary">测试主 API</button>
-      <button id="btn-test-backup" class="btn btn-secondary">测试备用 API</button>
-      <button id="btn-save" class="btn">保存设置</button>
+      <!-- 主内容区 -->
+      <main class="content">
+        <!-- API 服务 -->
+        <section class="panel" id="panel-api" data-panel="api">
+          <header class="panel-header">
+            <h1>API 服务</h1>
+            <p>配置翻译用的 AI 通道；主通道失败时可自动切换备用通道。</p>
+          </header>
+
+          <div class="card">
+            <h2 class="card-title">主通道</h2>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="api-format">API 格式</label>
+                <select id="api-format">
+                  <option value="openai">OpenAI 兼容（DeepSeek / OneAPI / vLLM / 中转）</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="ollama">Ollama 原生</option>
+                  <option value="googlefree">Google 免费（无需 Key）</option>
+                  <option value="microsoft">Microsoft 免费（无需 Key）</option>
+                </select>
+                <p class="hint" id="format-hint"></p>
+              </div>
+              <div class="form-field" id="base-url-row">
+                <label for="base-url">BaseURL</label>
+                <input type="text" id="base-url" placeholder="https://api.deepseek.com/v1" />
+                <p class="hint">只需填到域名 / 版本层级，插件会自动拼接接口路径。</p>
+              </div>
+              <div class="form-field" id="api-key-row">
+                <label for="api-key">API Key</label>
+                <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" />
+                <p class="hint">仅保存在本机浏览器存储（落盘前做混淆处理）。</p>
+              </div>
+              <div class="form-field" id="model-row">
+                <label for="model">模型</label>
+                <input type="text" id="model" placeholder="deepseek-chat" />
+              </div>
+              <div class="form-field span-2" id="free-endpoint-row" hidden>
+                <label for="free-endpoint">免费通道端点（留空用内置公开端点）</label>
+                <input
+                  type="text"
+                  id="free-endpoint"
+                  placeholder="https://translate.googleapis.com/translate_a/single"
+                />
+                <p class="hint">Google 免费通道的翻译接口地址；被限流或不可用时可换备用端点。</p>
+              </div>
+              <div class="form-field span-2" id="free-backup-endpoint-row" hidden>
+                <label for="free-backup-endpoint">备用端点（可选）</label>
+                <input type="text" id="free-backup-endpoint" placeholder="留空则不使用备用端点" />
+                <p class="hint">主端点失败（限流 / 不可达）时自动切换的第二个免费端点。</p>
+              </div>
+              <div class="form-field span-2" id="batch-mode-row">
+                <label for="batch-mode">批量翻译协议</label>
+                <select id="batch-mode">
+                  <option value="lines">逐行协议（默认，第三方兼容性最好）</option>
+                  <option value="separator">哨兵协议（适合明确支持严格分隔输出的模型）</option>
+                </select>
+                <p class="hint">
+                  逐行：一次请求多段、按行返回，兼容性最好。哨兵：用 ===IT_SEP===
+                  分隔输入输出，段落内含换行时更可靠，但对模型指令服从度要求高；解析失败会自动回退逐行。
+                </p>
+              </div>
+              <div class="form-field span-2">
+                <label for="custom-prompt">自定义翻译指令（可选，附加到系统提示词）</label>
+                <textarea
+                  id="custom-prompt"
+                  rows="3"
+                  placeholder="例如：保持专业术语一致；译文使用简练的书面语。"
+                ></textarea>
+                <p class="hint">
+                  非空时作为「附加指令」拼在系统提示词最前面。批量协议的分段 /
+                  逐行指令始终完整保留在附加指令之后，不会被覆盖；免费通道不使用该指令。最长 2000
+                  字符。
+                </p>
+              </div>
+            </div>
+            <div class="field-group">
+              <div class="field-group-title">请求控制</div>
+              <div class="inline-fields">
+                <div class="form-field">
+                  <label for="temperature">温度</label>
+                  <input type="number" id="temperature" min="0" max="2" step="0.1" />
+                </div>
+                <div class="form-field">
+                  <label for="timeout">超时（秒）</label>
+                  <input type="number" id="timeout" min="5" max="300" />
+                </div>
+                <div class="form-field">
+                  <label for="concurrency">最大并发</label>
+                  <input type="number" id="concurrency" min="1" max="10" />
+                </div>
+                <div class="form-field">
+                  <label for="request-interval">请求间隔（毫秒）</label>
+                  <input type="number" id="request-interval" min="50" max="10000" step="50" />
+                </div>
+              </div>
+              <p class="hint">
+                温度：越低译文越稳定准确（默认 0.3）。并发：同时发出的 API 请求数（默认
+                2）。请求间隔：相邻请求的最小启动间隔（默认 500 毫秒，≈2
+                请求/秒）——中转站/服务商限额严格时调大，如 1000～2000。
+              </p>
+            </div>
+            <div class="card-actions">
+              <button id="btn-test" class="btn btn-secondary">测试主 API</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title">备用通道 <span class="badge">可选</span></h2>
+            <p class="card-desc">主 API 失败（限流 / 不可达）时自动切换。留空即不启用。</p>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="backup-format">API 格式</label>
+                <select id="backup-format">
+                  <option value="openai">OpenAI 兼容</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="ollama">Ollama 原生</option>
+                  <option value="googlefree">Google 免费（无需 Key）</option>
+                  <option value="microsoft">Microsoft 免费（无需 Key）</option>
+                </select>
+              </div>
+              <div class="form-field">
+                <label for="backup-base-url">BaseURL</label>
+                <input type="text" id="backup-base-url" placeholder="留空则关闭备用 API" />
+              </div>
+              <div class="form-field">
+                <label for="backup-api-key">API Key</label>
+                <input
+                  type="password"
+                  id="backup-api-key"
+                  placeholder="sk-..."
+                  autocomplete="off"
+                />
+              </div>
+              <div class="form-field">
+                <label for="backup-model">模型</label>
+                <input type="text" id="backup-model" />
+              </div>
+            </div>
+            <div class="card-actions">
+              <button id="btn-test-backup" class="btn btn-secondary">测试备用 API</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 翻译行为 -->
+        <section class="panel" id="panel-translate" data-panel="translate" hidden>
+          <header class="panel-header">
+            <h1>翻译行为</h1>
+            <p>控制何时翻译、翻译哪些内容，以及译文的呈现方式。</p>
+          </header>
+
+          <div class="card">
+            <h2 class="card-title">触发方式</h2>
+            <div class="toggle-list">
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">打开网页时自动翻译</span>
+                  <span class="toggle-desc"
+                    >仅当前前台标签页；关闭时需点击页面右下角红点 → 「翻译」手动触发。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="auto-translate" /><span class="slider"></span
+                ></label>
+              </div>
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">视口懒翻译</span>
+                  <span class="toggle-desc"
+                    >只翻译当前浏览区域，滚动到附近才译新内容，节省额度。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="viewport-lazy" /><span class="slider"></span
+                ></label>
+              </div>
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">划词翻译</span>
+                  <span class="toggle-desc">选中文本自动弹出译文气泡。</span>
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="translate-on-select" /><span class="slider"></span
+                ></label>
+              </div>
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">输入框翻译</span>
+                  <span class="toggle-desc">输入框右上方显示「译」按钮。</span>
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="translate-input" /><span class="slider"></span
+                ></label>
+              </div>
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">悬停翻译</span>
+                  <span class="toggle-desc"
+                    >悬停段落左上角显示「译」角标，点击只译该段。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="translate-hover" /><span class="slider"></span
+                ></label>
+              </div>
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">翻译 HTML 属性</span>
+                  <span class="toggle-desc"
+                    >输入框 placeholder、链接 title、图片 alt、aria-label。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="translate-attributes" /><span class="slider"></span
+                ></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title">上下文理解</h2>
+            <div class="toggle-list">
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">整页翻译携带页面上下文</span>
+                  <span class="toggle-desc"
+                    >携带标题/描述/正文摘要帮助模型理解语境；划词 / 输入框翻译不携带。部分 API 有
+                    token 上限时可关闭。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="context-enabled" /><span class="slider"></span
+                ></label>
+              </div>
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">LLM 页面摘要</span>
+                  <span class="toggle-desc"
+                    >请 AI
+                    概括长文主题注入上下文，专业长文的翻译更贴语境；每页至多多一次请求（结果已缓存）。免费通道不支持，自动跳过。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="summary-enabled" /><span class="slider"></span
+                ></label>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="context-max-chars">上下文最大字符数</label>
+                <input type="number" id="context-max-chars" min="0" max="20000" step="200" />
+                <p class="hint">
+                  正文摘要的最大长度（标题/描述另有固定上限）。设得越小越省 token。
+                </p>
+              </div>
+              <div class="form-field">
+                <label for="summary-min-chars">摘要启用字数阈值</label>
+                <input type="number" id="summary-min-chars" min="0" max="100000" step="500" />
+                <p class="hint">页面正文超过该字数才生成 LLM 摘要；0 = 长短页都生成。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title">译文样式</h2>
+            <div class="style-options" id="style-options">
+              <label class="style-option">
+                <input type="radio" name="style-theme" value="gray" id="style-gray" />
+                <span class="style-preview style-preview-gray">译文预览</span>
+                <span class="style-name">灰字</span>
+                <span class="style-note">跟随页面文字色</span>
+              </label>
+              <label class="style-option">
+                <input type="radio" name="style-theme" value="outline" id="style-outline" />
+                <span class="style-preview style-preview-outline">译文预览</span>
+                <span class="style-name">描边</span>
+                <span class="style-note">空心字</span>
+              </label>
+              <label class="style-option">
+                <input type="radio" name="style-theme" value="underline" id="style-underline" />
+                <span class="style-preview style-preview-underline">译文预览</span>
+                <span class="style-name">虚线下划线</span>
+                <span class="style-note">低调标注</span>
+              </label>
+              <label class="style-option">
+                <input type="radio" name="style-theme" value="blur" id="style-blur" />
+                <span class="style-preview style-preview-blur">译文预览</span>
+                <span class="style-name">模糊</span>
+                <span class="style-note">悬停显形</span>
+              </label>
+            </div>
+            <div class="form-grid">
+              <div class="form-field span-2">
+                <label for="custom-css">自定义译文 CSS（可选，叠加在主题之上）</label>
+                <textarea
+                  id="custom-css"
+                  rows="4"
+                  placeholder=".it-translated { opacity: 0.85; font-style: italic; }"
+                ></textarea>
+                <p class="hint">
+                  面向 .it-translated（译文块）等类名书写，最长 8000 字符；保存后刷新页面生效。
+                </p>
+              </div>
+              <div class="form-field">
+                <label for="force-source-lang">强制源语言（可选）</label>
+                <select id="force-source-lang">
+                  <option value="">自动检测（html lang / 内容启发式）</option>
+                  <option value="en">英语</option>
+                  <option value="ja">日语</option>
+                  <option value="ko">韩语</option>
+                  <option value="zh">中文</option>
+                  <option value="zh-TW">中文（繁体）</option>
+                  <option value="de">德语</option>
+                  <option value="fr">法语</option>
+                  <option value="es">西班牙语</option>
+                  <option value="pt">葡萄牙语</option>
+                  <option value="ru">俄语</option>
+                  <option value="ar">阿拉伯语</option>
+                  <option value="it">意大利语</option>
+                  <option value="th">泰语</option>
+                  <option value="vi">越南语</option>
+                </select>
+                <p class="hint">
+                  页面语言被端点误判时手动指定；LLM 通道注入提示词，免费通道作为 sl/from 参数。
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 划词朗读 -->
+        <section class="panel" id="panel-tts" data-panel="tts" hidden>
+          <header class="panel-header">
+            <h1>划词朗读（TTS）</h1>
+            <p>在划词气泡中朗读译文，使用 Edge TTS 免费合成，无需 API Key。</p>
+          </header>
+
+          <div class="card">
+            <div class="toggle-list">
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">启用朗读按钮</span>
+                  <span class="toggle-desc"
+                    >在划词翻译气泡中显示「朗读」按钮；朗读时点击可停止，关闭气泡也会停止。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="tts-enabled" /><span class="slider"></span
+                ></label>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="tts-voice">朗读声音</label>
+                <select id="tts-voice">
+                  <option value="">自动（按目标语言选择）</option>
+                  <option value="zh-CN-XiaoxiaoNeural">晓晓（中文·女声）</option>
+                  <option value="zh-CN-YunxiNeural">云希（中文·男声）</option>
+                  <option value="zh-TW-HsiaoChenNeural">曉臻（台湾国语·女声）</option>
+                  <option value="en-US-AvaNeural">Ava（英语·女声）</option>
+                  <option value="en-US-BrianNeural">Brian（英语·男声）</option>
+                  <option value="ja-JP-NanamiNeural">七海（日语·女声）</option>
+                  <option value="ko-KR-SunHiNeural">善熙（韩语·女声）</option>
+                </select>
+                <p class="hint">自动模式按当前目标语言挑选声音；手动指定后始终使用所选声音。</p>
+              </div>
+              <div class="form-field">
+                <label for="tts-rate">朗读语速</label>
+                <select id="tts-rate">
+                  <option value="-50">0.5×（慢）</option>
+                  <option value="-25">0.75×</option>
+                  <option value="0">1×（正常）</option>
+                  <option value="25">1.25×</option>
+                  <option value="50">1.5×</option>
+                  <option value="100">2×（快）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 站点管理 -->
+        <section class="panel" id="panel-sites" data-panel="sites" hidden>
+          <header class="panel-header">
+            <h1>站点管理</h1>
+            <p>控制哪些站点翻译、哪些排除，并为常见站点启用内置适配规则。</p>
+          </header>
+
+          <div class="card">
+            <h2 class="card-title">黑白名单</h2>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="whitelist">白名单（每行一个域名）</label>
+                <textarea id="whitelist" rows="4" placeholder="example.com"></textarea>
+                <p class="hint">仅这些站点自动翻译；留空则全部站点。</p>
+              </div>
+              <div class="form-field">
+                <label for="blacklist">黑名单（每行一个域名）</label>
+                <textarea id="blacklist" rows="4" placeholder="bank.com"></textarea>
+                <p class="hint">这些站点永不翻译，优先级高于白名单。</p>
+              </div>
+            </div>
+            <div class="toggle-list">
+              <div class="toggle-item">
+                <div class="toggle-text">
+                  <span class="toggle-label">敏感页面不翻译</span>
+                  <span class="toggle-desc"
+                    >URL 含 login / password / 2fa / pay
+                    等关键词的页面整页跳过（输入框内的密码值本就永不翻译）。默认关闭。</span
+                  >
+                </div>
+                <label class="switch"
+                  ><input type="checkbox" id="sensitive-pages" /><span class="slider"></span
+                ></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title">站点规则库</h2>
+            <div class="form-field">
+              <label>内置站点规则</label>
+              <p class="hint hint-plain">
+                常见站点的「排除区」适配：导航 / 按钮 / 字幕 /
+                代码区等不翻译。取消勾选即禁用；保存后刷新页面生效。
+              </p>
+              <div id="builtin-rules" class="rule-list"></div>
+            </div>
+            <div class="form-field">
+              <label for="site-rules"
+                >自定义站点规则（JSON，每行一条；也可整段粘贴 JSON 数组）</label
+              >
+              <textarea
+                id="site-rules"
+                rows="6"
+                placeholder='{"matches":["example.com"],"excludeSelectors":[".sidebar",".no-translate"],"excludeTags":["my-icon"],"forceBlockTags":["my-block"]}'
+              ></textarea>
+              <p class="hint">
+                matches 支持域名通配（*.example.com / www.amazon.*）与路径前缀（example.com/docs）。
+                可选字段：excludeSelectors（命中元素及其子树不翻译）、excludeTags（不翻译的标签）、
+                forceBlockTags（强制按块级翻译单元处理的标签）、excludeMatches（反排除）、enabled。
+                与命中的内置规则合并生效；保存后刷新页面生效。
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- 缓存与数据 -->
+        <section class="panel" id="panel-data" data-panel="data" hidden>
+          <header class="panel-header">
+            <h1>缓存与数据</h1>
+            <p>译文缓存保存在本地并跨会话复用（节省 API 额度）；设置可导出为 JSON 备份/迁移。</p>
+          </header>
+
+          <div class="card">
+            <h2 class="card-title">缓存管理</h2>
+            <div class="cache-stats">
+              <div class="stat">
+                <span class="stat-value" id="cache-stats">统计中…</span>
+                <span class="stat-label">缓存条目</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value"
+                  ><input type="number" id="cache-ttl-days" min="0" max="365" step="1"
+                /></span>
+                <span class="stat-label">缓存保留天数（0 = 永不过期）</span>
+              </div>
+            </div>
+            <p class="hint">过期的缓存条目每天自动清理一次；也可点「立即清理」手动触发。</p>
+            <div class="actions-row">
+              <button id="btn-cleanup-cache" class="btn btn-secondary">立即清理</button>
+              <button id="btn-clear-cache" class="btn btn-secondary btn-danger">清空缓存</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title">备份与迁移</h2>
+            <p class="card-desc">
+              导出全部设置为 JSON 文件（API Key 保持加密态），或从备份文件导入。
+            </p>
+            <div class="actions-row">
+              <button id="btn-export" class="btn btn-secondary">导出设置</button>
+              <button id="btn-import" class="btn btn-secondary">导入设置</button>
+              <input type="file" id="import-file" accept="application/json" hidden />
+            </div>
+          </div>
+        </section>
+      </main>
     </div>
-    <p id="status" class="status"></p>
-  </main>
-  <script type="module" src="./main.ts"></script>
-</body>
+    <script type="module" src="./main.ts"></script>
+  </body>
 </html>

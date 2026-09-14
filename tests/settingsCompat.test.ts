@@ -145,8 +145,9 @@ describe("v4 设置的第三方 API 配置完全保留", () => {
   it("没有强制把 version:4 的已有设置覆盖回默认值", async () => {
     mockStorage({ settings: structuredClone(fullSettings()) });
     const s = await getSettings();
-    // version 4 与当前版本一致 → 不做迁移，字段逐项保留
-    expect(s.version).toBe(4);
+    // v4 → v5 仅补总开关默认值（enabled=true）并升版本号，其余字段逐项保留
+    expect(s.version).toBe(5);
+    expect(s.enabled).toBe(true);
     expect(s.api.maxConcurrency).toBe(6); // 默认是 3，用户设了 6 → 保留
     expect(s.translate.autoDetectSource).toBe(false); // 默认是 true → 保留
   });
@@ -204,7 +205,11 @@ describe("导出 / 导入往返", () => {
 
   it("导入拒绝非法 provider 格式", async () => {
     mockStorage();
-    const bad = { settings: structuredClone(fullSettings({ api: { ...fullSettings().api, format: "hack" as never } })) };
+    const bad = {
+      settings: structuredClone(
+        fullSettings({ api: { ...fullSettings().api, format: "hack" as never } })
+      ),
+    };
     await expect(importSettings(bad)).rejects.toThrow("不支持的 API 格式");
   });
 
@@ -242,13 +247,13 @@ describe("导出 / 导入往返", () => {
 });
 
 describe("自定义翻译 prompt（api.customSystemPrompt）兼容性", () => {
-  it("旧版 v4 设置没有该字段 → 读取为默认空串（不触发版本迁移）", async () => {
+  it("旧版 v4 设置没有该字段 → 读取为默认空串", async () => {
     const saved = fullSettings();
     delete (saved.api as { customSystemPrompt?: string }).customSystemPrompt;
     mockStorage({ settings: structuredClone(saved) });
     const s = await getSettings();
     expect(s.api.customSystemPrompt).toBe("");
-    expect(s.version).toBe(4);
+    expect(s.version).toBe(5); // v4 读取后经迁移链升到当前版本
   });
 
   it("用户已配置的附加指令读取时原样保留", async () => {

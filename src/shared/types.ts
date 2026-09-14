@@ -47,6 +47,9 @@ export interface ApiConfig {
 export interface Settings {
   /** 设置结构版本（用于迁移默认值变更） */
   version?: number;
+  /** 插件总开关：false 时所有翻译功能停用（整页/划词/输入框/悬停/快捷键/属性翻译）；
+   *  关闭会还原已翻译页面，重新开启后按 autoTranslate 设置恢复翻译当前页 */
+  enabled: boolean;
   api: ApiConfig;
   backupApi?: ApiConfig;
   translate: {
@@ -58,6 +61,8 @@ export interface Settings {
     blockMaxChars: number;
     translateOnSelect: boolean;
     translateInput: boolean;
+    /** 悬停翻译：悬停块级文本容器时显示「译」角标，点击只译该段（默认关） */
+    translateHover?: boolean;
     viewportLazy: boolean;
     terminology: string[];
     /** 页面上下文仅用于整页翻译；划词/输入框翻译不会携带 */
