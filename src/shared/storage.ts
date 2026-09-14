@@ -1,4 +1,5 @@
 import type { ApiConfig, Settings } from "./types";
+import { sanitizeSiteRules } from "./siteRules";
 
 /** 设置结构版本：变更默认值（如自动翻译默认关闭/并发加大）时 +1，老版本读取时迁移 */
 const SETTINGS_VERSION = 4;
@@ -41,7 +42,7 @@ export const DEFAULT_SETTINGS: Settings = {
     customCss: "",
     translateAttributes: true,
   },
-  sites: { whitelist: [], blacklist: [] },
+  sites: { whitelist: [], blacklist: [], rules: [], disabledRuleIds: [] },
   tts: { enabled: true, voice: "", rate: 0 },
   security: { encryptApiKey: true, sensitivePages: false },
   cache: { enabled: true, maxEntries: 5000, ttlDays: 7 },
@@ -119,7 +120,14 @@ export async function exportSettings(): Promise<Record<string, unknown>> {
   return raw && typeof raw === "object" ? (structuredClone(raw) as Record<string, unknown>) : {};
 }
 
-const SUPPORTED_FORMATS = ["openai", "anthropic", "gemini", "ollama", "googlefree", "microsoft"] as const;
+const SUPPORTED_FORMATS = [
+  "openai",
+  "anthropic",
+  "gemini",
+  "ollama",
+  "googlefree",
+  "microsoft",
+] as const;
 
 /** 导入设置的逐字段校验：只接受已知字段与正确类型，非法字段剔除（回退默认值）。
  *  此前只校验 api.format：手工编辑的导入文件若把 sites.blacklist 写成字符串等，
@@ -137,7 +145,10 @@ function sanitizeImportSettings(raw: unknown): Settings {
     (v: unknown): T | undefined =>
       allowed.includes(v as T) ? (v as T) : undefined;
   /** 按 spec 挑选对象里的已知字段（类型不符的丢弃） */
-  const pick = (value: unknown, spec: Record<string, (v: unknown) => unknown>): Record<string, unknown> => {
+  const pick = (
+    value: unknown,
+    spec: Record<string, (v: unknown) => unknown>
+  ): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     if (!value || typeof value !== "object") return out;
     const obj = value as Record<string, unknown>;
@@ -186,6 +197,8 @@ function sanitizeImportSettings(raw: unknown): Settings {
     sites: pick(r.sites, {
       whitelist: strArr,
       blacklist: strArr,
+      rules: sanitizeSiteRules,
+      disabledRuleIds: strArr,
     }) as unknown as Partial<Settings["sites"]>,
     tts: pick(r.tts, {
       enabled: bool,
@@ -204,7 +217,10 @@ function sanitizeImportSettings(raw: unknown): Settings {
   };
   // 备用 API 显式给出对象时才存在（沿用主备字段继承语义：缺的字段拿主 API 补）
   if (r.backupApi && typeof r.backupApi === "object") {
-    patch.backupApi = { ...patch.api, ...pick(r.backupApi, apiSpec) } as unknown as Partial<ApiConfig>;
+    patch.backupApi = {
+      ...patch.api,
+      ...pick(r.backupApi, apiSpec),
+    } as unknown as Partial<ApiConfig>;
   }
   const merged = mergeSettings(DEFAULT_SETTINGS, patch);
   merged.version = SETTINGS_VERSION;

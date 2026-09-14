@@ -11,6 +11,24 @@ export function inViewport(el: HTMLElement): boolean {
   return r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0;
 }
 
+/**
+ * 视口优先调度的排序键：值越小越先翻译。
+ * - 视口内：返回 r.top（同屏内自上而下，保持「页头先出」的阅读顺序）；
+ * - 视口外：innerHeight + 到视口边缘的横向/纵向距离（越远越靠后）；
+ * - 不可见元素（display:none 等 rect 全 0）：排最后（翻译它们没有可视收益）。
+ * jsdom 等 rect 恒为 0 的环境全部落在最后一档 → 稳定排序退化为 DOM 顺序。
+ */
+export function viewportOrderKey(el: HTMLElement): number {
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 && r.height <= 0) return Number.MAX_SAFE_INTEGER;
+  if (r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0) {
+    return Math.max(0, r.top);
+  }
+  const dy = r.top >= innerHeight ? r.top - innerHeight : r.bottom <= 0 ? -r.bottom : 0;
+  const dx = r.left >= innerWidth ? r.left - innerWidth : r.right <= 0 ? -r.right : 0;
+  return innerHeight + dy + dx;
+}
+
 /** 按谓词二分数组：返回 [通过, 未通过] */
 export function partition<T>(arr: T[], pred: (t: T) => boolean): [T[], T[]] {
   const a: T[] = [];

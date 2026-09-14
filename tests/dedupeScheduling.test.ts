@@ -78,6 +78,16 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
+/** 轮询等待条件成立（与 sessionCancel.test.ts 同惯例）：
+ *  提取/调度是多层异步链，固定轮数的 flush 在系统高负载下会提前返回造成偶发失败 */
+async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 async function waitObserver(): Promise<void> {
   await new Promise((r) => setTimeout(r, 550));
   await flush();
@@ -93,7 +103,7 @@ describe("translateAll 去重", () => {
   it("连续调用多次 translateAll：total 不增加、请求不重复", async () => {
     const engine = makeEngine();
     await engine.translateAll();
-    await flush();
+    await waitFor(() => allRequestedTexts().length > 0); // 首轮请求确实已发出
     const totalAfter1 = engine["stats"].total;
     const reqAfter1 = allRequestedTexts().length;
 
@@ -181,8 +191,8 @@ describe("失败容器不重复调度", () => {
     await flush();
 
     // 失败的段落标记为失败态
-    const failedContainer = Array.from(document.querySelectorAll("p")).find(
-      (p) => p.textContent?.includes("Hello")
+    const failedContainer = Array.from(document.querySelectorAll("p")).find((p) =>
+      p.textContent?.includes("Hello")
     ) as HTMLElement;
     expect(engine.renderer.isFailed(failedContainer)).toBe(true);
     const totalAfter1 = engine["stats"].total;

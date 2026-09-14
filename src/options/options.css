@@ -187,3 +187,14 @@ h2 {
     box-shadow: 0 1px 3px rgb(0 0 0 / 0.4);
   }
 }
+/* 站点规则库：内置规则勾选列表（可滚动网格） */
+.rule-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 6px 16px;
+  border: 1px solid var(--it-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+}

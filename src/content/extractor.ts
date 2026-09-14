@@ -18,6 +18,12 @@ export interface ExtractOptions {
   minTextLength: number;
   blockMaxChars: number;
   targetLang: string;
+  /** 站点规则：不翻译的标签（大小写变体已收录，shared/siteRules 的 resolveSiteRules 产出） */
+  excludeTags?: ReadonlySet<string>;
+  /** 站点规则：强制按块级容器处理的标签 */
+  forceBlockTags?: ReadonlySet<string>;
+  /** 站点规则：排除区选择器（已逐条校验合并；命中元素及其子树不翻译） */
+  excludeSelector?: string | null;
 }
 
 /** 巨型段落拆分阈值：单个文本块超过该长度时，在句子边界拆分为多个子单元（chunk）。
@@ -33,15 +39,49 @@ export const CHUNK_SPLIT_CHARS = 1200;
  * （导出供属性翻译的元素过滤复用）
  */
 export const EXCLUDED_TAGS = new Set([
-  "SCRIPT", "STYLE", "NOSCRIPT", "IFRAME", "SVG", "MATH", "CODE", "PRE",
-  "KBD", "SAMP", "VAR", "TEXTAREA", "INPUT",
+  "SCRIPT",
+  "STYLE",
+  "NOSCRIPT",
+  "IFRAME",
+  "SVG",
+  "MATH",
+  "CODE",
+  "PRE",
+  "KBD",
+  "SAMP",
+  "VAR",
+  "TEXTAREA",
+  "INPUT",
 ]);
 
 /** 作为“翻译单元容器”候选的块级元素 */
 const BLOCK_TAGS = new Set([
-  "P", "DIV", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE",
-  "TD", "TH", "TR", "TABLE", "DD", "DT", "FIGCAPTION", "SUMMARY", "ADDRESS",
-  "SECTION", "ARTICLE", "HEADER", "FOOTER", "MAIN", "UL", "OL",
+  "P",
+  "DIV",
+  "LI",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "BLOCKQUOTE",
+  "TD",
+  "TH",
+  "TR",
+  "TABLE",
+  "DD",
+  "DT",
+  "FIGCAPTION",
+  "SUMMARY",
+  "ADDRESS",
+  "SECTION",
+  "ARTICLE",
+  "HEADER",
+  "FOOTER",
+  "MAIN",
+  "UL",
+  "OL",
 ]);
 
 let seq = 0;
@@ -57,10 +97,10 @@ export function extractUnits(root: HTMLElement, opts: ExtractOptions): Translati
   const excludedSubtreeCache = new Map<HTMLElement, boolean>();
   const idCache = new Map<string, boolean>();
 
-  for (const t of walkTextNodes(root, hiddenCache, excludedSubtreeCache, idCache)) {
+  for (const t of walkTextNodes(root, opts, hiddenCache, excludedSubtreeCache, idCache)) {
     // 一次向上遍历同时判定 control / standalone link / block container，
     // 避免原来三个函数各自独立爬祖先链（O(3×深度) → O(深度)）
-    const container = resolveContainer(t);
+    const container = resolveContainer(t, opts);
     if (container === document.body) continue;
     let list = grouped.get(container);
     if (!list) grouped.set(container, (list = []));
@@ -87,9 +127,9 @@ export async function extractUnitsChunked(
   const idCache = new Map<string, boolean>();
   const pacer = createWorkPacer();
 
-  for (const t of walkTextNodes(root, hiddenCache, excludedSubtreeCache, idCache)) {
+  for (const t of walkTextNodes(root, opts, hiddenCache, excludedSubtreeCache, idCache)) {
     // 一次向上遍历同时判定 control / standalone link / block container
-    const container = resolveContainer(t);
+    const container = resolveContainer(t, opts);
     if (container !== document.body) {
       let list = grouped.get(container);
       if (!list) grouped.set(container, (list = []));
@@ -130,6 +170,7 @@ function buildUnitsFromGrouped(
  *  各域子树互不相交，slot 分发的 light DOM 文本仍属 light 树，故不会重复访问。 */
 function* walkTextNodes(
   root: HTMLElement,
+  opts: ExtractOptions,
   hiddenCache: Map<HTMLElement, boolean>,
   excludedCache: Map<HTMLElement, boolean>,
   idCache: Map<string, boolean>
@@ -137,7 +178,7 @@ function* walkTextNodes(
   const acceptNode = (node: Node): number => {
     const t = node as Text;
     if (!t.textContent || !t.textContent.trim()) return NodeFilter.FILTER_REJECT;
-    if (isExcluded(t, hiddenCache, excludedCache, idCache)) return NodeFilter.FILTER_REJECT;
+    if (isExcluded(t, opts, hiddenCache, excludedCache, idCache)) return NodeFilter.FILTER_REJECT;
     return NodeFilter.FILTER_ACCEPT;
   };
   // 1) light DOM（含 slot 分发的宿主子节点）
@@ -146,7 +187,7 @@ function* walkTextNodes(
   while ((n = walker.nextNode())) yield n as Text;
   // 2) 各 open shadow root：过滤规则与 light DOM 相同，宿主侧排除状态单独判定
   for (const scope of collectShadowRoots(root)) {
-    if (isShadowScopeExcluded(scope.host)) continue;
+    if (isShadowScopeExcluded(scope.host, opts)) continue;
     walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, { acceptNode });
     while ((n = walker.nextNode())) yield n as Text;
   }
@@ -172,9 +213,9 @@ function collectShadowRoots(root: HTMLElement): ShadowRoot[] {
   return roots;
 }
 
-/** shadow 域是否整体跳过：宿主不可见，或宿主自身及其 light 祖先带排除标记。
+/** shadow 域是否整体跳过：宿主不可见，或宿主自身及其 light 祖先带排除标记 / 命中站点规则。
  *  shadow 内文本的祖先链不跨 shadow 边界，宿主侧的排除状态需在此单独判定。 */
-function isShadowScopeExcluded(host: Element): boolean {
+function isShadowScopeExcluded(host: Element, opts: ExtractOptions): boolean {
   for (let el: Element | null = host; el; el = el.parentElement) {
     if (
       el.hasAttribute("data-it-ui") ||
@@ -185,6 +226,8 @@ function isShadowScopeExcluded(host: Element): boolean {
     ) {
       return true;
     }
+    if (opts.excludeTags?.size && opts.excludeTags.has(el.tagName)) return true;
+    if (opts.excludeSelector && el.matches(opts.excludeSelector)) return true;
   }
   return isHiddenElement(host as HTMLElement);
 }
@@ -206,6 +249,7 @@ function isHiddenElement(el: HTMLElement): boolean {
  *  命中缓存即可立刻返回（大量文本节点共享祖先，避免重复向上爬 + 重复样式计算）。 */
 function isExcluded(
   node: Text,
+  opts: ExtractOptions,
   hiddenCache: Map<HTMLElement, boolean>,
   excludedCache: Map<HTMLElement, boolean>,
   idCache: Map<string, boolean>
@@ -226,7 +270,7 @@ function isExcluded(
   let cum = ancestorExcluded;
   for (let i = chain.length - 1; i >= 0; i--) {
     const e = chain[i];
-    cum = isSelfExcluded(e, hiddenCache, idCache) || cum;
+    cum = isSelfExcluded(e, opts, hiddenCache, idCache) || cum;
     excludedCache.set(e, cum);
   }
   return cum;
@@ -236,10 +280,14 @@ function isExcluded(
  *  idCache 记忆 document.getElementById 结果，避免链接密集页面重复全局查找。 */
 function isSelfExcluded(
   el: HTMLElement,
+  opts: ExtractOptions,
   hiddenCache: Map<HTMLElement, boolean>,
   idCache: Map<string, boolean>
 ): boolean {
   if (EXCLUDED_TAGS.has(el.tagName)) return true;
+  // 站点规则：不翻译的标签 / 排除区选择器。选择器只需自匹配——祖先命中会经 cum 传导给整棵子树
+  if (opts.excludeTags?.size && opts.excludeTags.has(el.tagName)) return true;
+  if (opts.excludeSelector && el.matches(opts.excludeSelector)) return true;
   let hidden = hiddenCache.get(el);
   if (hidden === undefined) {
     hidden = isHiddenElement(el);
@@ -272,7 +320,7 @@ function isSelfExcluded(
 /** 一次向上遍历同时判定 control / standalone link / block container。
  *  替代原来 getControlEl → getStandaloneLink → nearestBlockContainer 三次独立爬祖先。
  *  返回锚定容器（控件 / 链接 / 块级容器），或 document.body 表示跳过。 */
-function resolveContainer(node: Text): HTMLElement {
+function resolveContainer(node: Text, opts: ExtractOptions): HTMLElement {
   let el: HTMLElement | null = node.parentElement;
   if (!el) return document.body;
   let current: HTMLElement = el;
@@ -283,7 +331,13 @@ function resolveContainer(node: Text): HTMLElement {
     if (!parent || parent === document.body) break;
     if (foundControl === null && isControl(current)) foundControl = current;
     if (foundLink === null && current.tagName === "A") foundLink = current;
-    if (BLOCK_TAGS.has(current.tagName)) break;
+    // 站点规则的「强制块级」与内置块级标签同权：命中即把该自定义元素锚定为独立单元
+    if (
+      BLOCK_TAGS.has(current.tagName) ||
+      (opts.forceBlockTags?.size && opts.forceBlockTags.has(current.tagName))
+    ) {
+      break;
+    }
     current = parent;
   }
   // 控件优先：按钮/选项锚定到控件自身
@@ -329,7 +383,10 @@ function joinTextNodes(nodes: Text[]): string {
   for (const n of nodes) {
     text += n.textContent ?? "";
     const sib = n.nextSibling;
-    if (sib && (sib.nodeName === "BR" || (sib.nodeType === 1 && BLOCK_TAGS.has((sib as Element).tagName)))) {
+    if (
+      sib &&
+      (sib.nodeName === "BR" || (sib.nodeType === 1 && BLOCK_TAGS.has((sib as Element).tagName)))
+    ) {
       text += " ";
     }
   }
@@ -352,7 +409,8 @@ function shouldTranslate(
   container?: HTMLElement | null
 ): boolean {
   // 链接与控件（按钮/选项）里的短词（FAQ/AI/Save/Delete 等）门槛放低到 2 字符；正文仍按 minTextLength
-  const minLen = container && (isLinkLike(container) || isControl(container)) ? 2 : opts.minTextLength;
+  const minLen =
+    container && (isLinkLike(container) || isControl(container)) ? 2 : opts.minTextLength;
   if (text.length < minLen) return false;
   if (!LETTER_RE.test(text)) return false;
   if (isTargetLanguage(text, opts.targetLang)) return false;

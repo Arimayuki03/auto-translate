@@ -1,3 +1,5 @@
+import type { SiteRule } from "./siteRules";
+
 /** API 格式（适配器层支持）；googlefree / microsoft 为免 key 的免费翻译通道 */
 export type ApiFormat = "openai" | "anthropic" | "gemini" | "ollama" | "googlefree" | "microsoft";
 
@@ -77,6 +79,10 @@ export interface Settings {
   sites: {
     whitelist: string[];
     blacklist: string[];
+    /** 用户自定义站点规则（与内置规则并集生效，见 shared/siteRules.ts） */
+    rules?: SiteRule[];
+    /** 被用户禁用的内置规则 id */
+    disabledRuleIds?: string[];
   };
   /** 划词朗读（TTS）：气泡「朗读」按钮的声音/语速 */
   tts: TtsSettings;

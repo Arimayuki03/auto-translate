@@ -245,6 +245,26 @@
     </section>
 
     <section class="card">
+      <h2>站点规则库</h2>
+      <div class="form-row">
+        <label>内置站点规则（常见站点的「排除区」适配：导航 / 按钮 / 字幕 / 代码区等不翻译）</label>
+        <div id="builtin-rules" class="rule-list"></div>
+        <p class="hint">取消勾选即禁用对应内置规则；保存后刷新页面生效。</p>
+      </div>
+      <div class="form-row">
+        <label for="site-rules">自定义站点规则（JSON，每行一条；也可整段粘贴 JSON 数组）</label>
+        <textarea id="site-rules" rows="6"
+          placeholder='{"matches":["example.com"],"excludeSelectors":[".sidebar",".no-translate"],"excludeTags":["my-icon"],"forceBlockTags":["my-block"]}'></textarea>
+        <p class="hint">
+          matches 支持域名通配（*.example.com / www.amazon.*）与路径前缀（example.com/docs）。
+          可选字段：excludeSelectors（命中元素及其子树不翻译）、excludeTags（不翻译的标签）、
+          forceBlockTags（强制按块级翻译单元处理的标签）、excludeMatches（反排除）、enabled。
+          与命中的内置规则合并生效；保存后刷新页面生效。
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>缓存与数据</h2>
       <div class="form-row">
         <div class="form-inline">

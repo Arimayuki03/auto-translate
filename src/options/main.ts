@@ -5,6 +5,8 @@ import type {
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
 } from "../shared/messages";
+import { BUILT_IN_RULES, sanitizeSiteRules } from "../shared/siteRules";
+import type { SiteRule } from "../shared/siteRules";
 import { exportSettings, getSettings, importSettings, saveSettings } from "../shared/storage";
 import type { ApiConfig, ApiFormat, BatchMode, Settings, TranslationStyle } from "../shared/types";
 
@@ -119,16 +121,70 @@ async function loadForm(): Promise<void> {
   ($("sensitive-pages") as HTMLInputElement).checked = s.security.sensitivePages;
   ($("whitelist") as HTMLTextAreaElement).value = s.sites.whitelist.join("\n");
   ($("blacklist") as HTMLTextAreaElement).value = s.sites.blacklist.join("\n");
+  renderBuiltinRules(s.sites.disabledRuleIds ?? []);
+  ($("site-rules") as HTMLTextAreaElement).value = (s.sites.rules ?? [])
+    .map((r) => JSON.stringify(r))
+    .join("\n");
   input("cache-ttl-days").value = String(s.cache.ttlDays ?? 7);
   updateFormatHint();
   void refreshCacheStats();
+}
+
+/** 内置站点规则勾选列表：勾选 = 启用，取消 = 禁用（落 disabledRuleIds） */
+function renderBuiltinRules(disabled: string[]): void {
+  const box = $("builtin-rules");
+  box.innerHTML = "";
+  const disabledSet = new Set(disabled);
+  for (const rule of BUILT_IN_RULES) {
+    if (!rule.id) continue;
+    const row = document.createElement("label");
+    row.className = "checkbox-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.ruleId = rule.id;
+    cb.checked = !disabledSet.has(rule.id);
+    const span = document.createElement("span");
+    span.textContent = `${rule.name ?? rule.id}（${rule.matches.join("、")}）`;
+    row.append(cb, span);
+    box.appendChild(row);
+  }
+}
+
+/**
+ * 解析自定义规则文本域：每行一条 JSON 对象（// 开头的注释行跳过），也兼容整段 JSON 数组。
+ * 解析结果再过一遍 sanitizeSiteRules 与导入路径同口径。格式错误抛错给保存流程提示行号。
+ */
+function parseSiteRulesTextarea(text: string): SiteRule[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  let raw: unknown;
+  if (trimmed.startsWith("[")) {
+    raw = JSON.parse(trimmed);
+  } else {
+    const arr: unknown[] = [];
+    for (const [i, line] of trimmed.split("\n").entries()) {
+      const l = line.trim();
+      if (!l || l.startsWith("//")) continue;
+      try {
+        arr.push(JSON.parse(l));
+      } catch {
+        throw new Error(`站点规则第 ${i + 1} 行不是有效的 JSON`);
+      }
+    }
+    raw = arr;
+  }
+  const rules = sanitizeSiteRules(raw);
+  if (rules === undefined) throw new Error("站点规则格式无效（应为 JSON 数组或每行一个对象）");
+  return rules;
 }
 
 /** 设置页「缓存管理」：展示磁盘层条目数（缓存前缀计数，不读值内容） */
 async function refreshCacheStats(): Promise<void> {
   const el = $("cache-stats");
   try {
-    const res = (await chrome.runtime.sendMessage({ type: "cache-stats" })) as CacheStatsResponseMessage;
+    const res = (await chrome.runtime.sendMessage({
+      type: "cache-stats",
+    })) as CacheStatsResponseMessage;
     el.textContent = res?.error ? `统计失败：${res.error}` : `${res?.count ?? 0} 条`;
   } catch (err) {
     el.textContent = `统计失败：${err instanceof Error ? err.message : String(err)}`;
@@ -157,19 +213,21 @@ async function readForm(): Promise<Settings> {
     // 自定义附加指令：拼在系统提示词最前（批量协议段保留在其后），限长防提示词膨胀
     customSystemPrompt: ($("custom-prompt") as HTMLTextAreaElement).value.slice(0, 2000),
     // 免费端点仅 googlefree 使用：非免费通道保留原值，避免误清
-    freeEndpoint: (select("api-format").value as ApiFormat) === "googlefree"
-      ? ($("free-endpoint") as HTMLInputElement).value.trim()
-      : current.api.freeEndpoint,
-    freeBackupEndpoint: (select("api-format").value as ApiFormat) === "googlefree"
-      ? ($("free-backup-endpoint") as HTMLInputElement).value.trim()
-      : current.api.freeBackupEndpoint,
+    freeEndpoint:
+      (select("api-format").value as ApiFormat) === "googlefree"
+        ? ($("free-endpoint") as HTMLInputElement).value.trim()
+        : current.api.freeEndpoint,
+    freeBackupEndpoint:
+      (select("api-format").value as ApiFormat) === "googlefree"
+        ? ($("free-backup-endpoint") as HTMLInputElement).value.trim()
+        : current.api.freeBackupEndpoint,
   };
   const backupBaseUrl = ($("backup-base-url") as HTMLInputElement).value.trim();
   const backupModel = ($("backup-model") as HTMLInputElement).value.trim();
   const backupFormat = select("backup-format").value as ApiFormat;
   const backupFree = backupFormat === "googlefree";
   const backupApi: ApiConfig | undefined =
-    (backupFree || (backupBaseUrl && backupModel))
+    backupFree || (backupBaseUrl && backupModel)
       ? {
           format: backupFormat,
           baseUrl: backupFree ? "" : backupBaseUrl,
@@ -211,6 +269,13 @@ async function readForm(): Promise<Settings> {
     sites: {
       whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
       blacklist: parseDomainList($("blacklist") as HTMLTextAreaElement),
+      rules: parseSiteRulesTextarea(($("site-rules") as HTMLTextAreaElement).value),
+      disabledRuleIds: Array.from(
+        document.querySelectorAll<HTMLInputElement>("#builtin-rules input[type='checkbox']")
+      )
+        .filter((cb) => !cb.checked)
+        .map((cb) => cb.dataset.ruleId ?? "")
+        .filter(Boolean),
     },
     tts: {
       ...current.tts,
@@ -227,7 +292,9 @@ async function readForm(): Promise<Settings> {
       // 0 = 永不过期是合法值，不能用 || 兜底吞掉
       ttlDays: (() => {
         const parsed = parseInt(($("cache-ttl-days") as HTMLInputElement).value, 10);
-        return Number.isNaN(parsed) ? (current.cache.ttlDays ?? 7) : Math.min(365, Math.max(0, parsed));
+        return Number.isNaN(parsed)
+          ? (current.cache.ttlDays ?? 7)
+          : Math.min(365, Math.max(0, parsed));
       })(),
     },
   };
@@ -249,7 +316,8 @@ function parseDomainList(el: HTMLTextAreaElement): string[] {
 }
 
 function updateBackupFormatFields(): void {
-  const isFree = select("backup-format").value === "googlefree" || select("backup-format").value === "microsoft";
+  const isFree =
+    select("backup-format").value === "googlefree" || select("backup-format").value === "microsoft";
   for (const id of ["backup-base-url", "backup-api-key", "backup-model"]) {
     const el = $(id) as HTMLInputElement;
     el.disabled = isFree;
@@ -258,7 +326,11 @@ function updateBackupFormatFields(): void {
 }
 
 /** 通用测试连接：主 / 备用 API 复用，失败信息带来源前缀便于区分是哪一路出错 */
-async function runTestConnection(api: ApiConfig | undefined, btnId: string, label: string): Promise<void> {
+async function runTestConnection(
+  api: ApiConfig | undefined,
+  btnId: string,
+  label: string
+): Promise<void> {
   if (!api) {
     setStatus(`未配置${label}，跳过`, "err");
     return;
@@ -271,7 +343,11 @@ async function runTestConnection(api: ApiConfig | undefined, btnId: string, labe
   btn.disabled = true;
   setStatus(`测试${label}中…`);
   try {
-    const req: TestConnectionRequestMessage = { type: "test-connection", id: crypto.randomUUID(), api };
+    const req: TestConnectionRequestMessage = {
+      type: "test-connection",
+      id: crypto.randomUUID(),
+      api,
+    };
     const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
     setStatus(
       res.ok
@@ -290,9 +366,13 @@ function init(): void {
   $("api-format").addEventListener("change", updateFormatHint);
   $("backup-format").addEventListener("change", updateBackupFormatFields);
   $("btn-save").addEventListener("click", async () => {
-    const s = await readForm();
-    await saveSettings(s);
-    setStatus("已保存 ✔", "ok");
+    try {
+      const s = await readForm();
+      await saveSettings(s);
+      setStatus("已保存 ✔", "ok");
+    } catch (err) {
+      setStatus(`保存失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    }
   });
   $("btn-test").addEventListener("click", async () => {
     const s = await readForm();
@@ -307,18 +387,27 @@ function init(): void {
     await runTestConnection(s.backupApi, "btn-test-backup", "备用 API");
   });
   $("btn-clear-cache").addEventListener("click", async () => {
-    const res = (await chrome.runtime.sendMessage({ type: "clear-cache" } as ClearCacheMessage)) as {
+    const res = (await chrome.runtime.sendMessage({
+      type: "clear-cache",
+    } as ClearCacheMessage)) as {
       ok?: boolean;
       error?: string;
     };
-    setStatus(res?.ok ? "缓存已清空 ✔" : `清空失败：${res?.error ?? "未知错误"}`, res?.ok ? "ok" : "err");
+    setStatus(
+      res?.ok ? "缓存已清空 ✔" : `清空失败：${res?.error ?? "未知错误"}`,
+      res?.ok ? "ok" : "err"
+    );
     void refreshCacheStats();
   });
 
   $("btn-cleanup-cache").addEventListener("click", async () => {
-    const res = (await chrome.runtime.sendMessage({ type: "cleanup-cache" })) as CleanupCacheResponseMessage;
+    const res = (await chrome.runtime.sendMessage({
+      type: "cleanup-cache",
+    })) as CleanupCacheResponseMessage;
     setStatus(
-      res?.ok ? `清理完成 ✔ 移除 ${res.removed ?? 0} 条过期/超额条目` : `清理失败：${res?.error ?? "未知错误"}`,
+      res?.ok
+        ? `清理完成 ✔ 移除 ${res.removed ?? 0} 条过期/超额条目`
+        : `清理失败：${res?.error ?? "未知错误"}`,
       res?.ok ? "ok" : "err"
     );
     void refreshCacheStats();

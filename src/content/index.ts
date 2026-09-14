@@ -3,6 +3,7 @@
  *  按本 frame 自己的 URL 判断；引擎、观察器、样式、快捷键、自动翻译各 frame 独立生效；
  *  工具条、划词气泡、输入框翻译、SPA 导航接管是 top 专属装配。 */
 import type { ItCommandMessage } from "../shared/messages";
+import { resolveSiteRules } from "../shared/siteRules";
 import { getSettings } from "../shared/storage";
 import type { Settings } from "../shared/types";
 import {
@@ -63,7 +64,13 @@ async function main(): Promise<void> {
   const applyStyle = (): void =>
     applyTranslationStyle(settings.translate.style, settings.translate.customCss ?? "");
   applyStyle();
-  const engine = new PageEngine(renderer, settings);
+  // 站点规则库：内置规则 + 用户自定义规则按本 frame URL 合并解析（每 frame 独立，按各自 URL 匹配）
+  const siteRule = resolveSiteRules(
+    location.href,
+    settings.sites.rules ?? [],
+    settings.sites.disabledRuleIds ?? []
+  );
+  const engine = new PageEngine(renderer, settings, siteRule);
 
   let toolbar: Toolbar | null = null;
   if (isTop) {

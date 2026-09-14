@@ -6,13 +6,20 @@ import type {
   PageSummaryResponseMessage,
   TranslationContext,
 } from "../shared/messages";
+import type { ResolvedSiteRule } from "../shared/siteRules";
 import type { Settings } from "../shared/types";
-import { extractUnits, extractUnitsChunked, isTargetLanguage, EXCLUDED_TAGS, LETTER_RE } from "./extractor";
+import {
+  extractUnits,
+  extractUnitsChunked,
+  isTargetLanguage,
+  EXCLUDED_TAGS,
+  LETTER_RE,
+} from "./extractor";
 import type { ExtractOptions, TranslationUnit } from "./extractor";
 import { precomputeStyles, Renderer } from "./renderer";
 import { createWorkPacer, pauseIfBudgetSpent } from "./scheduler";
 import { translateTexts, TranslateError } from "./translate";
-import { inViewport, partition } from "./ui";
+import { inViewport, partition, viewportOrderKey } from "./ui";
 
 // 批量大小（省 token 关键）：每个请求都重复携带"系统提示词 + 整页上下文"，
 // 批量越大 → 请求数越少 → 这份重复开销越小。参照"拼成一大段一次发"的思路调大。
@@ -85,12 +92,16 @@ export class PageEngine {
   /** 最近一次翻译失败的错误（带类型与脱敏诊断）：工具条显示具体原因、可复制诊断 */
   lastError?: TranslateError;
 
-  constructor(renderer: Renderer, settings: Settings) {
+  constructor(renderer: Renderer, settings: Settings, siteRule?: ResolvedSiteRule) {
     this.renderer = renderer;
     this.opts = {
       minTextLength: settings.translate.minTextLength,
       blockMaxChars: settings.translate.blockMaxChars,
       targetLang: settings.translate.targetLang,
+      // 站点规则库（shared/siteRules 解析产物）：排除区选择器 / 不翻译标签 / 强制块级标签
+      excludeTags: siteRule?.excludeTags,
+      forceBlockTags: siteRule?.forceBlockTags,
+      excludeSelector: siteRule?.excludeSelector ?? null,
     };
     this.targetLang = settings.translate.targetLang;
     this.glossary = settings.translate.terminology;
@@ -295,7 +306,7 @@ export class PageEngine {
       for (const el of Array.from(document.querySelectorAll<HTMLElement>(sel))) {
         if (candidates.length >= MAX_ATTR_CANDIDATES) break;
         if (el.hasAttribute("data-it-attr-done")) continue;
-        if (!isTranslatableAttrElement(el, attr)) continue;
+        if (!isTranslatableAttrElement(el, attr, this.opts)) continue;
         const text = (el.getAttribute(attr) ?? "").trim();
         if (!text || text.length > MAX_ATTR_TEXT) continue;
         if (!isTranslatableAttrText(text, this.targetLang)) continue;
@@ -348,14 +359,14 @@ export class PageEngine {
       el.removeAttribute("data-it-attr-done");
     });
     // 兼容旧版 placeholder 专用标记（升级当刻未刷新页面的残留）
-    document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-it-ph-done]").forEach(
-      (el) => {
+    document
+      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-it-ph-done]")
+      .forEach((el) => {
         const orig = el.getAttribute("data-it-ph-orig");
         if (orig !== null) el.placeholder = orig;
         el.removeAttribute("data-it-ph-orig");
         el.removeAttribute("data-it-ph-done");
-      }
-    );
+      });
   }
 
   /** 清理在途批次残留在容器上的处理标记：还原/换页时在途批次的 renderBatch 永远不会执行，
@@ -499,13 +510,20 @@ export class PageEngine {
     }, 60);
   }
 
-  /** 处理一组单元：预留空间 → 标记在途 → 去重分批 → 并发请求 → 按序渲染 */
+  /** 处理一组单元：预留空间 → 标记在途 → 视口优先分批 → 并发请求 → 完成即渲染 */
   async translateUnits(units: TranslationUnit[]): Promise<void> {
     if (units.length === 0) return;
-    for (const u of units) this.scheduledContainers.delete(u.container);
+    // 视口优先排序：距视口近的单元先进批、先请求先渲染（稳定排序，同距离保持 DOM 顺序，
+    // jsdom 等 rect 恒 0 的环境退化为原 DOM 顺序）。整页直译（缓存命中/关懒翻译）时，
+    // 用户停在页面中部也能先看到当前屏幕的译文。
+    const ordered =
+      units.length > 1
+        ? [...units].sort((a, b) => viewportOrderKey(a.container) - viewportOrderKey(b.container))
+        : units;
+    for (const u of ordered) this.scheduledContainers.delete(u.container);
     const gen = this.generation; // 捕获本批代次
     const anchor = this.captureAnchor();
-    for (const u of units) u.container.setAttribute("data-it-processing", "");
+    for (const u of ordered) u.container.setAttribute("data-it-processing", "");
     // 预留译文空间（不可见占位），填充在原位，避免页面跳动。
     // 性能要点（大页面卡顿修复）：
     //  1) 先一次性预读所有容器的样式（getComputedStyle/clientWidth），此时尚无
@@ -514,16 +532,16 @@ export class PageEngine {
     //  3) 占位插入按时间片配速（每 12ms 让出主线程），大页面几十次 DOM 插入不再堆在
     //     一个同步任务里冻结页面；每次让出后校验代次，还原即中止。
     const pacer = createWorkPacer();
-    const styleMap = precomputeStyles(units);
-    for (let i = 0; i < units.length; i++) {
-      const u = units[i];
+    const styleMap = precomputeStyles(ordered);
+    for (let i = 0; i < ordered.length; i++) {
+      const u = ordered[i];
       this.renderer.reserve(u, styleMap.get(u.container));
       await pauseIfBudgetSpent(pacer);
       if (gen !== this.generation) return; // 让出期间被还原 → 中止，不再继续占位/请求
     }
     this.releaseScroll(anchor);
     // 索引登记：allUnits（按 id）+ unitsByText（按文本，retry 用）
-    for (const u of units) {
+    for (const u of ordered) {
       if (this.allUnits.size < MAX_UNITS) {
         this.allUnits.set(u.id, u);
         let list = this.unitsByText.get(u.text);
@@ -534,26 +552,55 @@ export class PageEngine {
     this.setState("translating");
 
     const byText = new Map<string, TranslationUnit[]>();
-    for (const u of units) {
+    for (const u of ordered) {
       const list = byText.get(u.text) ?? [];
       list.push(u);
       byText.set(u.text, list);
     }
     const batches = buildBatches([...byText.entries()]);
 
-    // 顶部优先：请求并发发起（后台统一限流），渲染严格按批次顺序 → 页头先出
-    const fetchMap = new Map<number, Promise<Map<string, string[]> | null>>();
-    for (let i = 0; i < batches.length; i++) {
-      for (let j = i; j < Math.min(batches.length, i + FETCH_WINDOW); j++) {
-        if (!fetchMap.has(j)) fetchMap.set(j, this.fetchBatch(batches[j]));
+    // 视口优先调度：批次按「距视口距离」动态出队——每次出队前按当前视口重选最近的批，
+    // 滚动后未发出的批次会跟随用户位置；先完成的批先渲染（不再按固定批次顺序等待，
+    // 消除队头阻塞）。请求并发度仍由 FETCH_WINDOW 钳制，后台统一限流不变。
+    let batchSeq = 0;
+    const pending: PendingBatch[] = batches.map((batch) => ({
+      batch,
+      anchor: batch[0]![1][0]!.container,
+    }));
+    const inFlight = new Map<number, Promise<BatchResult>>();
+
+    const startNext = (): void => {
+      if (pending.length === 0) return;
+      if (pending.length > 1) {
+        let best = 0;
+        let bestDist = viewportOrderKey(pending[0]!.anchor);
+        for (let i = 1; i < pending.length; i++) {
+          const d = viewportOrderKey(pending[i]!.anchor);
+          if (d < bestDist) {
+            bestDist = d;
+            best = i;
+          }
+        }
+        // 距离并列时不动（保持 DOM 顺序）；仅在有更近批时前移
+        if (best > 0) pending.unshift(pending.splice(best, 1)[0]!);
       }
-      const chunks = await fetchMap.get(i)!;
-      fetchMap.delete(i);
+      const next = pending.shift()!;
+      const id = ++batchSeq;
+      inFlight.set(
+        id,
+        this.fetchBatch(next.batch).then((chunks) => ({ id, batch: next.batch, chunks }))
+      );
+    };
+
+    for (let i = 0; i < FETCH_WINDOW && pending.length > 0; i++) startNext();
+    while (inFlight.size > 0) {
+      const { id, batch, chunks } = await Promise.race(inFlight.values());
+      inFlight.delete(id);
       if (gen !== this.generation) return; // 期间被还原，丢弃后续结果
       if (chunks) {
-        await this.renderBatch(batches[i], chunks, gen, pacer);
+        await this.renderBatch(batch, chunks, gen, pacer);
       } else {
-        const failed = batches[i].flatMap(([, us]) => us);
+        const failed = batch.flatMap(([, us]) => us);
         this.stats.error += failed.length;
         for (const u of failed) {
           this.renderer.fail(u);
@@ -561,6 +608,7 @@ export class PageEngine {
         }
       }
       if (gen !== this.generation) return;
+      startNext();
     }
 
     this.pendingCount = Math.max(0, this.pendingCount - units.length);
@@ -703,6 +751,19 @@ export class PageEngine {
   }
 }
 
+/** 视口优先调度里的待发批次：anchor 取批内首个单元容器，出队时按它重算距视口距离 */
+interface PendingBatch {
+  batch: [string, TranslationUnit[]][];
+  anchor: HTMLElement;
+}
+
+/** fetchBatch 的带批次完成结果（Promise.race 后按 id 回填渲染） */
+interface BatchResult {
+  id: number;
+  batch: [string, TranslationUnit[]][];
+  chunks: Map<string, string[]> | null;
+}
+
 /** 按“≤BATCH_UNITS 单元 / ≤BATCH_CHUNKS chunk”分块，控制单次拼接的提示词体积 */
 function buildBatches(entries: [string, TranslationUnit[]][]): [string, TranslationUnit[]][][] {
   const batches: [string, TranslationUnit[]][][] = [];
@@ -735,7 +796,10 @@ function buildBatches(entries: [string, TranslationUnit[]][]): [string, Translat
  *  - 改用 TreeWalker 原地遍历文本节点，textContent 取词（不触发排版），跳过脚本/样式/我们的 UI；
  *  - 达到 content 预算与字数阈值两者较早的停止点即停，不先拼出整页长字符串再截断；
  *  - 用 skipSubtreeCache 记忆"该子树是否应跳过"，避免每个文本节点都向上爬全部祖先。 */
-function getPageContext(maxChars: number, countUpTo = 0): { context: TranslationContext; totalLen: number } {
+function getPageContext(
+  maxChars: number,
+  countUpTo = 0
+): { context: TranslationContext; totalLen: number } {
   const title = document.title.trim().slice(0, 200);
   const description =
     document
@@ -812,10 +876,17 @@ const MAX_ATTR_TEXT = 500;
 /** 属性候选元素上限：防超大页面扫描与请求量失控 */
 const MAX_ATTR_CANDIDATES = 300;
 
-/** 属性翻译元素级过滤：跳过我们的 UI、脚本/样式区、SVG、可编辑区与 aria-hidden / translate=no 子树。
+/** 属性翻译元素级过滤：跳过我们的 UI、脚本/样式区、SVG、可编辑区、aria-hidden /
+ *  translate=no 子树，以及站点规则命中的排除区/排除标签。
  *  INPUT/TEXTAREA 虽在正文提取的排除标签内（它们的文本不可译），但其 placeholder 属性可译。 */
-function isTranslatableAttrElement(el: HTMLElement, attr: TranslatableAttr): boolean {
+function isTranslatableAttrElement(
+  el: HTMLElement,
+  attr: TranslatableAttr,
+  opts: ExtractOptions
+): boolean {
   if (attr !== "placeholder" && EXCLUDED_TAGS.has(el.tagName)) return false;
+  if (opts.excludeTags?.size && opts.excludeTags.has(el.tagName)) return false;
+  if (opts.excludeSelector && el.closest(opts.excludeSelector) !== null) return false;
   if (el.isContentEditable) return false;
   if (el.closest("[data-it-ui], [data-it-unit], svg") !== null) return false;
   if (el.closest('[aria-hidden="true"], [translate="no"]') !== null) return false;
