@@ -23,6 +23,7 @@ import { initInput } from "./input";
 import { initHoverTranslate, isTopFrame } from "./hover";
 import { applyTranslationStyle } from "./style";
 import { setupSpaNavigation } from "./navigation";
+import { installMasterSwitchSync, watchMasterSwitchReopen } from "./masterSwitch";
 
 /**
  * 真正的凭据/敏感页关键词（保守名单，宁缺毋滥）：命中即整页跳过自动翻译。
@@ -37,27 +38,11 @@ async function main(): Promise<void> {
   const settings = await getSettings();
   if (!shouldTranslatePage(settings)) return; // 黑白名单命中：维持原语义（改动需刷新页面生效）
   if (!settings.enabled) {
-    watchMasterSwitch(); // 总开关关闭：不装配任何功能，只挂监听等待重新开启
+    // 总开关关闭：不装配任何功能，只挂轻量监听等待重新开启（见 masterSwitch.ts）
+    watchMasterSwitchReopen(() => void main());
     return;
   }
   await startTranslation(settings);
-}
-
-/** 总开关关闭时挂在页面上的轻量监听：popup 重新开启后（saveSettings 触发 storage.onChanged）
- *  本 frame 立即补做完整装配，无需刷新。消费到「开启」即注销自我；若注销时开关又已被关回，
- *  重跑的 main() 会按最新设置重新决定（再挂监听或装配）。 */
-function watchMasterSwitch(): void {
-  const listener = (
-    changes: Record<string, chrome.storage.StorageChange>,
-    areaName: string
-  ): void => {
-    if (areaName !== "local") return;
-    const next = (changes.settings?.newValue as Settings | undefined)?.enabled;
-    if (next !== true) return;
-    chrome.storage.onChanged.removeListener(listener);
-    void main();
-  };
-  chrome.storage.onChanged.addListener(listener);
 }
 
 /** 完整装配（总开关开启且未被黑白名单拦截的 frame 才会走到这里）：
@@ -173,28 +158,25 @@ async function startTranslation(settings: Settings): Promise<void> {
         void setPageDisabled(currentPageKey(), false); // 翻译该子页 → 该子页恢复自动翻译
       }
     } else if (msg.command === "cycle-mode" && toolbar) {
+      if (isBlocked()) return; // 敏感页 / 总开关关闭：工具条本就隐藏，快捷键同样不应改显示模式
       toolbar.cycleMode();
     }
   });
 
-  // 插件总开关实时生效：popup / 设置页保存都会写 chrome.storage.local，
-  // storage.onChanged 自动广播到所有扩展上下文（含每个 frame 的 content script），
-  // 无需 background 中继、无需刷新页面。
-  // 关闭 → 还原本 frame 已译内容（engine.restore 同时中止在途请求，不浪费额度）、
-  //         隐藏悬浮工具条、enabledNow 翻转后所有功能入口一律拦截；
+  // 插件总开关实时生效（事件同步 + 装配窗口错过事件的快照回填，见 masterSwitch.ts）：
+  // 关闭 → 还原本 frame 已译内容（同时中止在途请求，不浪费额度；不记用户还原意愿，
+  //         重开后仍允许补译）、隐藏悬浮工具条、enabledNow 翻转后所有功能入口一律拦截；
   // 开启 → 恢复入口与工具条，并按自动翻译设置补译当前页。
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "local") return;
-    const entry = changes.settings;
-    if (!entry) return;
-    const next = (entry.newValue as Settings | undefined)?.enabled ?? true;
-    const prev = (entry.oldValue as Settings | undefined)?.enabled ?? true;
-    if (next === prev) return; // 只响应总开关变化；其它设置项的保存不打扰
-    enabledNow = next;
-    if (!next) {
-      engine.restore();
+  installMasterSwitchSync({
+    getEnabled: () => enabledNow,
+    setEnabled: (v) => {
+      enabledNow = v;
+    },
+    onOff: () => {
+      engine.restoreForSwitchOff();
       toolbar?.setSensitive(true); // 借用敏感页的隐藏机制收起悬浮工具条
-    } else {
+    },
+    onOn: () => {
       toolbar?.setSensitive(isSensitive()); // 按当前 URL 恢复工具条显示状态
       if (
         settings.translate.autoTranslate &&
@@ -204,7 +186,7 @@ async function startTranslation(settings: Settings): Promise<void> {
       ) {
         void engine.translateAll();
       }
-    }
+    },
   });
 
   if (settings.translate.autoTranslate) {
@@ -237,7 +219,7 @@ function matchesDomain(host: string, entry: string): boolean {
 }
 
 /** 页面级守卫：黑白名单（命中则整页禁用；敏感页判断改为动态，见 isSensitive）。
- *  总开关 enabled 不在这里判：关闭时 main 仍要挂 watchMasterSwitch 监听，
+ *  总开关 enabled 不在这里判：关闭时 main 仍要挂 watchMasterSwitchReopen 监听，
  *  保证重新开启无需刷新页面。 */
 function shouldTranslatePage(s: Settings): boolean {
   const host = location.hostname.replace(/^www\./, "").toLowerCase();

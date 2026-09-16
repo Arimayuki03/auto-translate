@@ -140,7 +140,7 @@ describe("仅译文模式：嵌套元素原文替换（回归：译文与原文�
     expect(visibleText(li)).toContain("end");
   });
 
-  it("保护元素：<a> 链接文字保留且 href 不变（可点击）", async () => {
+  it("行内链接：链接文字独立成单元，仅译文下也被原位替换（回归：句子夹英文「漏翻译」）", async () => {
     document.body.innerHTML = `<ul><li id="t">See <a href="#doc">docs page</a> for details</li></ul>`;
     const engine = makeEngine();
     await engine.translateAll();
@@ -148,16 +148,17 @@ describe("仅译文模式：嵌套元素原文替换（回归：译文与原文�
 
     engine.renderer.setMode("translated");
     const a = document.querySelector<HTMLAnchorElement>("#t a")!;
-    expect(a.textContent).toBe("docs page"); // 链接文字不动
-    expect(a.getAttribute("href")).toBe("#doc");
+    expect(a.getAttribute("href")).toBe("#doc"); // 结构与 href 不动：依然可点击
+    expect(visibleText(a)).toBe(TRANS); // 链接文字被译文原位替换
     const shown = visibleText(document.querySelector("#t")!);
     expect(shown).not.toContain("See"); // 非链接原文被替换
+    expect(shown).not.toContain("docs page"); // 不再残留英文片段
     expect(shown).toContain(TRANS);
-    expect(shown).toContain("docs page");
 
     engine.renderer.setMode("bilingual");
     const restored = visibleText(document.querySelector("#t")!);
     expect(restored).toContain("See");
+    expect(restored).toContain("docs page");
     expect(restored).toContain("for details");
   });
 });
@@ -223,5 +224,119 @@ describe("布局保真：译文不新增布局项、不挤走原有组件", () =
     engine.renderer.setMode("translated");
     expect(visibleText(a)).toBe(TRANS);
     expect(a.getAttribute("href")).toBe("/a");
+  });
+});
+
+describe("仅译文模式：链接可点击（回归：包裹路径 CSS 藏原文连链接一起藏）", () => {
+  it("长独立链接：译文原位替换链接文字，href 不变，链接一律行内不套块级包裹", async () => {
+    document.body.innerHTML = `<div><a id="t" href="/post/123">A fairly long standalone link text that definitely exceeds forty characters limit</a></div>`;
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    const a = document.querySelector<HTMLAnchorElement>("#t")!;
+    expect(a.isConnected).toBe(true);
+    expect(a.getAttribute("href")).toBe("/post/123");
+    expect(visibleText(a)).toBe(TRANS); // 译文替换进链接内：可见的译文就是链接本身
+    expect(document.querySelector("[data-it-orig-hidden]")).toBeNull(); // 原文块未被 CSS 藏掉
+    expect(a.closest(".it-wrap")).toBeNull(); // 行内链接绝不套块级 .it-wrap（会在父块里裂出行）
+    const transEl = a.querySelector(":scope > .it-translated")!;
+    expect(transEl).toBeTruthy(); // 双语形态：译文内嵌在链接内
+    expect(transEl.classList.contains("it-translated-hidden")).toBe(true); // 仅译文下隐藏，避免重复
+
+    // 切回双语：链接原文还原、译文元素重新可见
+    engine.renderer.setMode("bilingual");
+    expect(a.textContent).toContain("A fairly long standalone");
+    expect(transEl.classList.contains("it-translated-hidden")).toBe(false);
+  });
+
+  it("标题链接（<h2><a>）：仅译文下链接保持可点击且文字被译文替换", async () => {
+    document.body.innerHTML = `<div><h2><a id="t" href="/x">Headline text long enough to exceed the forty character compact threshold for sure</a></h2></div>`;
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    const a = document.querySelector<HTMLAnchorElement>("#t")!;
+    expect(a.getAttribute("href")).toBe("/x");
+    expect(visibleText(a)).toBe(TRANS);
+    expect(document.querySelector("[data-it-orig-hidden]")).toBeNull();
+
+    engine.renderer.setMode("bilingual");
+    expect(a.textContent).toContain("Headline text");
+  });
+
+  it("段落内嵌链接：链接文字也被原位替换（译文完整），元素与 href 不动仍可点击", async () => {
+    document.body.innerHTML = `<div id="t">Read the docs <a href="/d">here</a> for more info</div>`;
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    const a = document.querySelector<HTMLAnchorElement>("#t a")!;
+    expect(a.getAttribute("href")).toBe("/d");
+    expect(visibleText(a)).toBe(TRANS); // 链接文字被译文替换——不再在译文句子里夹英文残渣
+    const div = document.querySelector("#t")!;
+    const shown = visibleText(div);
+    expect(shown).toContain(TRANS); // 周围文字被替换为译文
+    expect(shown).not.toContain("Read the docs");
+    expect(shown).not.toContain("here");
+
+    engine.renderer.setMode("bilingual");
+    const restored = visibleText(div);
+    expect(restored).toContain("Read the docs");
+    expect(restored).toContain("here");
+    expect(restored).toContain("for more info");
+  });
+
+  it("<li><a> 单链接容器：切回双语后链接原文恢复（回归：标记打在链接上漏还原）", async () => {
+    document.body.innerHTML = `<ul><li id="t"><a href="/m">Menu entry</a></li></ul>`;
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    const a = document.querySelector<HTMLAnchorElement>("#t a")!;
+    expect(visibleText(a)).toBe(TRANS); // 链接文字被替换（保持可点击）
+
+    engine.renderer.setMode("bilingual");
+    expect(a.textContent).toContain("Menu entry"); // 原文恢复（旧实现漏还原，残留译文）
+    const shown = visibleText(document.querySelector("#t")!);
+    expect(shown).toContain("Menu entry");
+    expect(shown).toContain(TRANS); // 行内译文元素恢复显示
+  });
+
+  it("嵌套翻译单元：仅译文替换不越界改写内层单元，切回后内层原文完整", async () => {
+    document.body.innerHTML = `<div id="outer">Intro words <p id="inner">Nested paragraph content</p></div>`;
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    expect(visibleText(document.querySelector("#inner")!)).toBe(TRANS); // 内层单元正常替换
+
+    engine.renderer.setMode("bilingual");
+    expect(document.querySelector("#inner")!.textContent).toContain("Nested paragraph content");
+    expect(visibleText(document.querySelector("#outer")!)).toContain("Intro words");
+  });
+
+  it("包裹容器原文全在保护子树里（video 兜底文案）：退回 CSS 切换，译文可见", async () => {
+    document.body.innerHTML = `<div id="t"><video>Your browser does not support embedded videos, please upgrade to continue watching.</video></div>`;
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    const div = document.querySelector("#t")!;
+    expect(div.getAttribute("data-it-orig-hidden")).toBe(""); // 无可替换文本节点 → 走 CSS 切换路径
+    expect(div.querySelector("video")!.textContent).toContain("Your browser"); // 保护子树文字原样保留
+    const transEl = div.closest(".it-wrap")!.querySelector(":scope > .it-translated")!;
+    expect(transEl.classList.contains("it-translated-hidden")).toBe(false); // 译文顶替显示
+    expect(visibleText(document.body)).toBe(TRANS); // 可见的只有译文
+
+    engine.renderer.setMode("bilingual");
+    expect(div.hasAttribute("data-it-orig-hidden")).toBe(false); // 原文恢复可见
+    expect(visibleText(document.body)).toContain("Your browser");
   });
 });

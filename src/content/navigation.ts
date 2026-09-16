@@ -81,6 +81,11 @@ export function setupSpaNavigation(opts: SpaNavigationOptions): void {
     clearTimeout(navTimer);
     navTimer = window.setTimeout(() => {
       if (document.visibilityState !== "visible") return; // 后台标签页等切回前台再译
+      // 延迟窗口内用户手动还原了本页（restore 置 userRestored、state=off）：
+      // 兜底重译必须让路——否则用户刚点完「还原」，200ms 后整页又被自动译回来
+      if (opts.isPageDisabled() || (opts.engine.state === "off" && opts.engine.restoredByUser)) {
+        return;
+      }
       if (opts.autoTranslate || opts.engine.state !== "off") {
         if (!opts.isSensitive()) {
           void opts.engine.translateAll(); // 已还原/从未翻译/敏感页时不打扰用户

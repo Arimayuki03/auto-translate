@@ -464,8 +464,9 @@ body.it-style-blur .it-translated.it-done.it-inline:hover {
   position: fixed;
   z-index: 2147483001; /* 与划词气泡同级：盖过页面内容，低于无 */
   display: none;
-  width: 20px;
+  min-width: 20px; /* 「译」为方块；「还原」/「Restore」按文案自适应加宽 */
   height: 20px;
+  padding: 0 4px;
   border-radius: 4px;
   background: var(--it-accent);
   color: #ffffff;

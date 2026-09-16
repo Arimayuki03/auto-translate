@@ -209,7 +209,7 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
     expect(restored).not.toContain("「This paragraph");
   }, 180_000);
 
-  it("显示模式切换：双语 → 仅译文（原文隐藏）→ 双语（原文恢复）", async () => {
+  it("显示模式切换：双语 → 仅译文（原文原位替换）→ 双语（原文恢复）", async () => {
     if (!browserAvailable) return;
     const p = await freshPage();
     await translatePage(p);
@@ -217,15 +217,31 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
     // modeSelect 是 .it-panel 里第一个 select（grip/toggle 不是 select）
     const modeSelect = p.locator(".it-panel select").nth(0);
     await modeSelect.selectOption("translated");
+    // 仅译文：段落原文被原位替换为译文（#para 文字以译文引导符开头；
+    // 译文元素本身进入隐藏态，可见译文就在原元素里，链接/结构保留）
     await p.waitForFunction(
-      () => document.querySelectorAll("[data-it-orig-hidden]").length > 0,
+      () => {
+        const para = document.querySelector("#para");
+        return (
+          !!para &&
+          (para.textContent ?? "").trimStart().startsWith("「") &&
+          document.querySelectorAll(".it-translated.it-translated-hidden").length > 0
+        );
+      },
       undefined,
       { timeout: 10_000 }
     );
 
     await modeSelect.selectOption("bilingual");
     await p.waitForFunction(
-      () => document.querySelectorAll("[data-it-orig-hidden]").length === 0,
+      () => {
+        const para = document.querySelector("#para");
+        return (
+          !!para &&
+          (para.textContent ?? "").trimStart().startsWith("This paragraph") &&
+          document.querySelectorAll(".it-translated.it-translated-hidden").length === 0
+        );
+      },
       undefined,
       { timeout: 10_000 }
     );

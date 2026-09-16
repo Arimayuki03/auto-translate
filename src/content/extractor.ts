@@ -12,6 +12,14 @@ export interface TranslationUnit {
   chunks: string[];
   /** 交互控件（button/option）：仅文本原位替换，不插入译文元素、不改 DOM 结构 */
   textOnly?: boolean;
+  /** 含行内链接的块单元：text 保留链接文字（API 必须看到完整源句），子树内锚定到
+   *  <a> 的链接单元按文档序列出于此。仅译文渲染时把整句译文按链接译文拆段嵌入缝隙，
+   *  链接文字原位替换为各自译文——既无破碎源句，也不重复显示。 */
+  linkParts?: { el: HTMLElement; text: string }[];
+  /** 调度批次令牌（engine.translateUnits 赋值，与容器 data-it-processing 的值同源）：
+   *  单元素还原/重排后容器标记被摘掉或换新令牌，渲染时比对失配 → 该单元被丢弃，
+   *  保证还原后的段落不会被仍在途的旧批次回填译文 */
+  batchToken?: string;
 }
 
 export interface ExtractOptions {
@@ -145,21 +153,77 @@ export async function extractUnitsChunked(
   return buildUnitsFromGrouped(grouped, opts);
 }
 
-/** 把已分组的文本节点构建成翻译单元（供同步/分片两个入口复用） */
+/** DOM 文档序比较（compareDocumentPosition 包装） */
+function compareInDoc(a: Node, b: Node): number {
+  if (a === b) return 0;
+  return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+}
+
+/** 把已分组的文本节点构建成翻译单元（供同步/分片两个入口复用）。
+ *  行内链接的关键约定：锚定到 <a> 的链接单元只决定「替换归属」，不决定「送翻内容」——
+ *  父块的 unit.text 会把链接文字并回原位（完整源句进 API，防止「The is a country」
+ *  式破碎句），链接译文如何显示由渲染层依 linkParts 处理（原位替换 + 整句译文拆段嵌入）。 */
 function buildUnitsFromGrouped(
   grouped: Map<HTMLElement, Text[]>,
   opts: ExtractOptions
 ): TranslationUnit[] {
-  const units: TranslationUnit[] = [];
+  const groupKeys = new Set(grouped.keys());
+  // 第一遍：链接组按自身文字判定是否值得翻译，并找归属块
+  const keptLinks = new Map<HTMLElement, { nodes: Text[]; text: string }>();
+  const blockOfLink = new Map<HTMLElement, HTMLElement>();
   for (const [container, nodes] of grouped) {
+    if (container.tagName !== "A") continue;
     const text = joinTextNodes(nodes);
     if (!shouldTranslate(text, opts, container)) continue;
+    keptLinks.set(container, { nodes, text });
+    let p = container.parentElement;
+    while (p && p !== document.body) {
+      if (groupKeys.has(p)) {
+        if (p.tagName !== "A") blockOfLink.set(container, p);
+        break;
+      }
+      p = p.parentElement;
+    }
+  }
+  // 每块的链接部件（文档序）
+  const linksByBlock = new Map<HTMLElement, { el: HTMLElement; text: string }[]>();
+  for (const [el, b] of blockOfLink) {
+    const kept = keptLinks.get(el);
+    if (!kept) continue;
+    const list = linksByBlock.get(b) ?? [];
+    list.push({ el, text: kept.text });
+    linksByBlock.set(b, list);
+  }
+
+  const units: TranslationUnit[] = [];
+  for (const [container, nodes] of grouped) {
+    let text: string;
+    let linkParts: { el: HTMLElement; text: string }[] | undefined;
+    if (container.tagName === "A") {
+      const kept = keptLinks.get(container);
+      if (!kept) continue; // 不值得翻译的链接：单元整个丢弃（文字也不并回父句）
+      text = kept.text;
+    } else {
+      const parts = linksByBlock.get(container);
+      if (parts?.length) {
+        parts.sort((a, b) => compareInDoc(a.el, b.el));
+        const merged: Text[] = [...nodes];
+        for (const p of parts) merged.push(...(keptLinks.get(p.el)?.nodes ?? []));
+        merged.sort(compareInDoc);
+        linkParts = parts;
+        text = joinTextNodes(merged);
+      } else {
+        text = joinTextNodes(nodes);
+      }
+      if (!shouldTranslate(text, opts, container)) continue;
+    }
     units.push({
       id: `it-${++seq}`,
       container,
       text,
       chunks: splitUnitChunks(text, opts.blockMaxChars),
       textOnly: isControl(container),
+      linkParts,
     });
   }
   return units;
@@ -276,6 +340,30 @@ function isExcluded(
   return cum;
 }
 
+/** 图标字体族（ligature 图标）：这类元素里的文字（home / shopping_cart / menu）是
+ *  字形名，由图标字体连字渲染成图标。翻译会破坏连字查找——图标退化成一段中文/英文
+ *  垃圾文字，所在句子也被掺进臆造词。命中 font-family 即整棵子树不参与翻译/替换。 */
+const ICON_FONT_FAMILY_RE =
+  /material\s*[- ]?\s*(icons?|symbols)|iconfont|font\s*awesome|feather|lucide|tabler[\s-]*icons?|remix[\s-]*icons?|bootstrap[\s-]*icons?|box[\s-]*icons?|ionicons?|codicons?|unicons?|phosphor|heroicons?|icomoon|entypo|typicons?|glyphicons|pixelarticons|streamline|segoe[\s-]*(mdl2|fluent)|fluent[\s-]*system[\s-]*icons?/i;
+const iconFontCache = new WeakMap<HTMLElement, boolean>();
+
+/** 元素是否以图标字体渲染（文字是字形名而非文案）。无布局环境（jsdom）拿不到
+ *  真实 font-family → 恒 false，不影响单测。 */
+export function usesIconFont(el: HTMLElement): boolean {
+  let v = iconFontCache.get(el);
+  if (v === undefined) {
+    let ff = "";
+    try {
+      ff = getComputedStyle(el).fontFamily ?? "";
+    } catch {
+      ff = "";
+    }
+    v = ff ? ICON_FONT_FAMILY_RE.test(ff) : false;
+    iconFontCache.set(el, v);
+  }
+  return v;
+}
+
 /** 单个元素自身是否应排除（不含祖先）。隐藏判定走 hiddenCache 记忆化，避免重复 getComputedStyle。
  *  idCache 记忆 document.getElementById 结果，避免链接密集页面重复全局查找。 */
 function isSelfExcluded(
@@ -285,6 +373,8 @@ function isSelfExcluded(
   idCache: Map<string, boolean>
 ): boolean {
   if (EXCLUDED_TAGS.has(el.tagName)) return true;
+  // 图标字体的 ligature 文字（home/shopping_cart 等字形名）不是文案，永不翻译
+  if (usesIconFont(el)) return true;
   // 站点规则：不翻译的标签 / 排除区选择器。选择器只需自匹配——祖先命中会经 cum 传导给整棵子树
   if (opts.excludeTags?.size && opts.excludeTags.has(el.tagName)) return true;
   if (opts.excludeSelector && el.matches(opts.excludeSelector)) return true;
@@ -317,7 +407,7 @@ function isSelfExcluded(
   return false;
 }
 
-/** 一次向上遍历同时判定 control / standalone link / block container。
+/** 一次向上遍历同时判定 control / link / block container。
  *  替代原来 getControlEl → getStandaloneLink → nearestBlockContainer 三次独立爬祖先。
  *  返回锚定容器（控件 / 链接 / 块级容器），或 document.body 表示跳过。 */
 function resolveContainer(node: Text, opts: ExtractOptions): HTMLElement {
@@ -342,8 +432,13 @@ function resolveContainer(node: Text, opts: ExtractOptions): HTMLElement {
   }
   // 控件优先：按钮/选项锚定到控件自身
   if (foundControl) return foundControl;
-  // 独立菜单/导航链接：锚定到链接自身（避免多个链接合并成一块译文）
-  if (foundLink && isStandaloneLink(foundLink)) return foundLink;
+  // 链接文字一律锚定到 <a> 自身（含正文段落里的行内链接）：仅译文模式下链接文字
+  // 也要被原位替换为译文——旧版只拆导航菜单链接，正文行内链接的文字被保护子树
+  // 留在原地，表现为「句子翻了一半、夹着英文」。锚定到链接后 href/结构不动，
+  // 点击跳转不受影响；块级元素里的文字照常锚定到块（爬到块级即 break，够不到外层链接）。
+  // 注意：这只是「替换归属」的拆分；父块送 API 的源句在 buildUnitsFromGrouped 里
+  // 会把链接文字并回（完整语义进请求），渲染层按 linkParts 拆段嵌入，不重复显示。
+  if (foundLink) return foundLink;
   // 否则锚定到最近的块级容器
   return current;
 }
@@ -352,30 +447,6 @@ function resolveContainer(node: Text, opts: ExtractOptions): HTMLElement {
 function isControl(el: HTMLElement): boolean {
   return el.tagName === "BUTTON" || el.tagName === "OPTION";
 }
-
-/** 判断 <a> 是否为独立菜单/导航链接（应单独成单元）。
- *  父级为 nav/ul/ol/header/footer，或父级只含链接（和空白文本）→ 是菜单 */
-function isStandaloneLink(a: HTMLElement): boolean {
-  const parent = a.parentElement;
-  if (!parent) return false;
-  if (NAV_PARENT_TAGS.has(parent.tagName)) return true;
-  // 父级只含链接（和空白文本）→ 是菜单，拆开每个链接
-  const kids = parent.childNodes;
-  let linkCount = 0;
-  let onlyLinksAndWhitespace = true;
-  for (const c of kids) {
-    if (c.nodeName === "A") {
-      linkCount++;
-    } else if (c.nodeType === 3) {
-      if (c.textContent?.trim()) onlyLinksAndWhitespace = false;
-    } else {
-      onlyLinksAndWhitespace = false;
-    }
-  }
-  return linkCount >= 2 && onlyLinksAndWhitespace;
-}
-
-const NAV_PARENT_TAGS = new Set(["NAV", "UL", "OL", "HEADER", "FOOTER"]);
 
 /** 拼接容器内文本节点；相邻换行标签（br / 块级）转成空格 */
 function joinTextNodes(nodes: Text[]): string {

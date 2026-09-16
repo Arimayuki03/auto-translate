@@ -234,7 +234,9 @@ async function readForm(): Promise<Settings> {
   const backupBaseUrl = ($("backup-base-url") as HTMLInputElement).value.trim();
   const backupModel = ($("backup-model") as HTMLInputElement).value.trim();
   const backupFormat = select("backup-format").value as ApiFormat;
-  const backupFree = backupFormat === "googlefree";
+  // 两种免费通道（googlefree / microsoft）都无需 BaseURL/Key/模型。只认 googlefree
+  // 会把选微软免费通道的备用配置判成「未配置」（空 baseUrl+空 model 过不了存在性检查）
+  const backupFree = backupFormat === "googlefree" || backupFormat === "microsoft";
   const backupApi: ApiConfig | undefined =
     backupFree || (backupBaseUrl && backupModel)
       ? {
@@ -424,7 +426,10 @@ function init(): void {
   $("btn-test-backup").addEventListener("click", async () => {
     const s = await readForm();
     if (!s.backupApi) {
-      setStatus("未配置备用 API（填写备用 BaseURL 和模型，或选择 Google 免费通道）", "err");
+      setStatus(
+        "未配置备用 API（填写备用 BaseURL 和模型，或选择 Google / Microsoft 免费通道）",
+        "err"
+      );
       return;
     }
     await runTestConnection(s.backupApi, "btn-test-backup", "备用 API");

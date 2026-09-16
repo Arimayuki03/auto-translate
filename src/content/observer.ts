@@ -139,6 +139,9 @@ export class PageObserver {
     if (this.isSensitive?.()) return; // 敏感页不自动翻译（换页后动态判断）
     if (this.isPageDisabled?.()) return; // 该子页被禁用自动翻译
     if (this.engine.state === "off") return; // 未启用/已还原时不翻译
+    // 记录扫描开始时的代次：await 让出期间用户可能点了「还原」（generation++、state=off），
+    // 扫描结果属于旧会话，调度前必须复核，否则刚还原的整页会又被扫出来的单元译回去
+    const genAtScanStart = this.engine.generation;
     // 增量提取：只扫描防抖窗口内累积的新增子树，而不是整个 body。
     // 点击触发的组件（下拉菜单等）只切换 style 不新增节点 → addedRoots 为空时回退全量扫描。
     const roots = this.addedRoots;
@@ -176,6 +179,11 @@ export class PageObserver {
       );
       units.push(...found);
     }
+    // 让出/等待期间被还原（或换页重置）→ 本次扫描作废，不再调度。
+    // state 经 getter 读出为 EngineState 联合类型，await 前已判过 off；这里快照到
+    // string 再比较，避免 TS 把可变字段当成 await 间不变的收窄类型而报恒假
+    const stateAfterScan: string = this.engine.state;
+    if (genAtScanStart !== this.engine.generation || stateAfterScan === "off") return;
     if (units.length > 0) this.engine.scheduleUnits(units); // 引擎内部：视口内先译，视口外滚动再译
     void this.engine.translateAttributes(); // 新出现的搜索框 placeholder 也翻译
   }

@@ -162,13 +162,14 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
     expect(engine.renderer.getMode()).toBe("translated");
 
     await engine.translateAll();
-    // 仅译文模式：译文元素可见（包裹容器用纯 CSS 切换，译文顶替原文位置）
+    // 仅译文模式：原文文字被原位替换为译文（链接/结构保留，不再是 CSS 藏整块）
     await waitFor(
       () => document.querySelectorAll(".it-translated.it-done").length > 0
     );
     expect(document.querySelectorAll(".it-translated.it-done").length).toBeGreaterThan(0);
-    // 原文被隐藏
-    expect(document.querySelectorAll("[data-it-orig-hidden]").length).toBeGreaterThan(0);
+    // 原文已被替换：容器文字以译文开头（mock 译文 = 【译】+原文；双语下则应以原文开头）
+    expect((document.querySelector("h1")!.textContent ?? "").trimStart()).toMatch(/^【译】/);
+    expect((document.querySelector("p")!.textContent ?? "").trimStart()).toMatch(/^【译】/);
   });
 
   it("自动翻译本身不写入 per-site 设置（无写冲突）", async () => {

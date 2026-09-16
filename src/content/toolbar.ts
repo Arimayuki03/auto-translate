@@ -1,6 +1,7 @@
 /** 悬浮翻译按钮：红色小圆圈，点开显示详细设置（可拖动 / 位置记忆） */
 import type { DisplayMode } from "../shared/types";
 import type { EngineState, EngineStats, PageEngine } from "./engine";
+import { placeFixedInViewport } from "./placement";
 import { copyText, makeDraggable } from "./ui";
 import { currentHost, currentPageKey, savePerSite, setPageDisabled } from "./perSite";
 import { t } from "../shared/i18n";
@@ -125,6 +126,7 @@ export class Toolbar {
     );
     this.el.append(this.fab, this.panel);
     document.body.appendChild(this.el);
+    this.anchorToCorner();
 
     // 红点：拖动移动 / 轻点展开（handle 传 undefined，整个红点可拖且可点）
     makeDraggable(this.el, undefined, {
@@ -179,9 +181,20 @@ export class Toolbar {
     this.statusEl.textContent = ok ? t("copiedCount", texts.length) : t("copyFailed");
   }
 
+  /** 初始定位到视口右上角（12px 边距）。placeFixedInViewport 会同时把工具条重挂到
+   *  <html>：body 带 transform/filter 的站点上，挂在 body 的 fixed 元素随文档滚走。
+   *  敏感页隐藏态量不到渲染位置（rect 全 0），由 placement 的兜底路径直写，恢复显示
+   *  时在 setSensitive(false) 里再吸附一次。 */
+  private anchorToCorner(): void {
+    const w = this.el.offsetWidth || 38; // fab 收起态宽度
+    this.el.style.right = "auto"; // 改以 left/top 为定位基准（与拖动/吸附逻辑一致）
+    placeFixedInViewport(this.el, Math.max(8, innerWidth - w - 12), 12);
+  }
+
   /** 敏感页（登录/密码/2FA 等）隐藏工具条，避免诱导翻译敏感内容 */
   setSensitive(v: boolean): void {
     this.el.classList.toggle("it-toolbar-sensitive", v);
+    if (!v) this.clampToViewport(); // 隐藏期间错过定位校正，显示时补一次视口吸附
   }
 
   destroy(): void {

@@ -89,7 +89,12 @@ export class PageEngine {
   private lazyPending: TranslationUnit[] = [];
   private lazyTimer: number | undefined;
   /** 代次：restore 后 +1，在途翻译结果作废，防止还原后译文又冒出来 */
-  private generation = 0;
+  private generationValue = 0;
+  /** 批次令牌源：每次 translateUnits 进入时自增。同时写到单元对象的 batchToken 与
+   *  容器 data-it-processing 属性值上——渲染时比对「单元令牌 === 容器当前令牌」，
+   *  restoreElement/重排把容器标记摘掉或换成新批次的令牌后，旧批次结果即被作废，
+   *  保证「还原该段」后不会又被在途的旧翻译回填出译文 */
+  private batchSeq = 0;
   /** 用户是否手动还原过本页（点「还原」）：自动翻译不应再把本页译回来 */
   private userRestored = false;
   /** 最近一次翻译失败的错误（带类型与脱敏诊断）：工具条显示具体原因、可复制诊断 */
@@ -169,6 +174,11 @@ export class PageEngine {
     return this.userRestored;
   }
 
+  /** 当前会话代次：观察器扫描跨 await 让出，用「扫描前后代次一致」判断扫描期间是否被还原 */
+  get generation(): number {
+    return this.generationValue;
+  }
+
   /** 该文本是否已处理（已译或在途），SPA / 段落按钮去重用 */
   isSkipped(text: string): boolean {
     return this.doneTexts.has(text) || this.pendingTexts.has(text);
@@ -190,7 +200,7 @@ export class PageEngine {
     this.suppressPageState = false; // 整页翻译解除悬停单译的状态钳制
     this.lastError = undefined; // 新一轮翻译开始，清掉上一轮的失败信息
     try {
-      const gen = this.generation;
+      const gen = this.generationValue;
       const collected = this.contextEnabled
         ? getPageContext(this.contextMaxChars, this.summaryEnabled ? this.summaryMinChars : 0)
         : undefined;
@@ -218,9 +228,9 @@ export class PageEngine {
       const extracted = await extractUnitsChunked(
         document.body,
         this.opts,
-        () => gen === this.generation
+        () => gen === this.generationValue
       );
-      if (gen !== this.generation) return;
+      if (gen !== this.generationValue) return;
       const units = extracted.filter(
         (u) =>
           !u.container.hasAttribute("data-it-src") &&
@@ -237,7 +247,7 @@ export class PageEngine {
       }
       // 页面大部分内容已有缓存（之前翻过）→ 整页直译；否则视口懒翻译省 token
       const cachedRatio = await this.checkPageCacheRatio(units);
-      if (gen !== this.generation) return; // 等待期间被还原，放弃本次
+      if (gen !== this.generationValue) return; // 等待期间被还原，放弃本次
       this.scheduleUnits(units, cachedRatio >= 0.6);
       void this.translateAttributes();
     } finally {
@@ -308,7 +318,7 @@ export class PageEngine {
     try {
       const res = (await chrome.runtime.sendMessage(req)) as PageSummaryResponseMessage | undefined;
       if (!res?.ok || !res.summary) return;
-      if (gen !== this.generation) return;
+      if (gen !== this.generationValue) return;
       if (this.pageContext !== base) return;
       this.pageContext = { ...base, summary: res.summary };
     } catch {
@@ -319,7 +329,7 @@ export class PageEngine {
   /** 翻译页面属性文案（placeholder / title / alt / aria-label）：去重 + 术语表 + 防重复 */
   async translateAttributes(): Promise<void> {
     if (!this.attributesEnabled) return;
-    const gen = this.generation;
+    const gen = this.generationValue;
     // 一次性收集全部可译属性候选，按文本去重后一次批译（与 placeholder 管线同思路）
     const candidates: Array<{ el: HTMLElement; attr: TranslatableAttr; text: string }> = [];
     for (const attr of TRANSLATABLE_ATTRS) {
@@ -352,7 +362,7 @@ export class PageEngine {
     } catch {
       return; // 属性翻译失败不阻塞正文翻译，也无需报错占位
     }
-    if (gen !== this.generation) return; // 期间被还原，放弃
+    if (gen !== this.generationValue) return; // 期间被还原，放弃
 
     for (let i = 0; i < texts.length && i < results.length; i++) {
       const t = results[i]?.trim();
@@ -405,8 +415,9 @@ export class PageEngine {
    */
   resetForNavigation(): void {
     this.suppressPageState = false; // 换页后按新页面语义重新开始
-    this.cancelSession(this.generation); // SPA 换页：中止旧页在途请求
-    this.generation++; // 在途翻译结果作废（旧页容器已脱离文档）
+    this.userRestored = false; // 旧页的「还原过」标记不带到新页：新页照常自动翻译
+    this.cancelSession(this.generationValue); // SPA 换页：中止旧页在途请求
+    this.generationValue++; // 在途翻译结果作废（旧页容器已脱离文档）
     this.renderer.restore();
     this.clearProcessingMarks();
     this.restoreAttributes(); // SPA 换页后重置 placeholder，避免旧译文残留
@@ -432,12 +443,20 @@ export class PageEngine {
     if (this.state === "translating") this.setState("done");
   }
 
+  /** 总开关关闭触发的还原：系统行为，不是用户的「还原」意愿——restore() 会置
+   *  userRestored（visibilitychange 补译路径会永久拒绝），若照搬，后台标签页里
+   *  关开一轮后切回前台永远不再自动翻译。还原动作照常做，做完清掉意愿标记。 */
+  restoreForSwitchOff(): void {
+    this.restore();
+    this.userRestored = false;
+  }
+
   /** 一键还原 */
   restore(): void {
     this.userRestored = true; // 用户明确还原，自动翻译不再把本页译回来
     this.suppressPageState = false; // 解除悬停单译的状态钳制
-    this.cancelSession(this.generation); // 中止当前会话在途请求，不浪费额度/算力
-    this.generation++; // 在途翻译结果作废
+    this.cancelSession(this.generationValue); // 中止当前会话在途请求，不浪费额度/算力
+    this.generationValue++; // 在途翻译结果作废
     this.renderer.restore();
     this.clearProcessingMarks();
     this.restoreAttributes();
@@ -455,6 +474,69 @@ export class PageEngine {
     this.lazyPending = [];
     clearTimeout(this.lazyTimer);
     this.setState("off");
+  }
+
+  /**
+   * 单元素还原（悬停「还原」角标）：只还原该元素承载的译文，不推整页状态机、
+   * 不动代次（其他段落的在途翻译不受影响）。文本级去重同步移除对应原文——
+   * 否则再悬停同段会被 isSkipped 压住，出不了「译」角标。
+   * 同时把该元素从一切排队/在途管线里摘出来：否则用户刚点完还原，同一批次
+   * 或后续懒翻译到达后又会把译文填回去（表现为「还原不掉、译文不断冒出来」）。
+   */
+  restoreElement(el: Element): void {
+    if (!(el instanceof HTMLElement) || !el.isConnected) return;
+    // 先解包还原再提取：包裹态下原文容器位于 .it-wrap（带 data-it-unit 排除标记）内部，
+    // 提取器会把整棵子树当译文结构跳过，先还原才能拿到原文文本
+    this.renderer.restoreElement(el);
+    // 撤销排队：懒观察队列中的单元直接丢出队列；处理标记一并摘除，容器回到「未译」态
+    for (const c of [...this.lazyUnits.keys()]) {
+      if (c === el || el.contains(c)) {
+        this.lazyUnits.delete(c);
+        this.lazyIO?.unobserve(c);
+      }
+    }
+    this.lazyPending = this.lazyPending.filter(
+      (u) => !(u.container === el || el.contains(u.container))
+    );
+    // 索引里登记过的单元逐个撤销：摘处理标记（在途批次的渲染阶段会因令牌失配丢弃结果）、
+    // 退出调度集合、清理索引与文本级去重（共享文本仅在无兄弟单元时清）
+    const removed: TranslationUnit[] = [];
+    for (const u of this.allUnits.values()) {
+      if (u.container === el || el.contains(u.container)) removed.push(u);
+    }
+    for (const u of removed) {
+      u.container.removeAttribute("data-it-processing");
+      this.scheduledContainers.delete(u.container);
+      this.allUnits.delete(u.id);
+      const list = this.unitsByText.get(u.text);
+      if (list) {
+        const idx = list.indexOf(u);
+        if (idx >= 0) list.splice(idx, 1);
+        if (list.length === 0) this.unitsByText.delete(u.text);
+      }
+    }
+    // 兜底摘除残留处理标记：占位阶段（reserve 让出窗口内）的容器尚未登记进 allUnits，
+    // 上面按索引的撤销够不着它们；再悬停同段时这里保证容器回到「未译」态
+    if (el.hasAttribute("data-it-processing")) el.removeAttribute("data-it-processing");
+    el.querySelectorAll<HTMLElement>("[data-it-processing]").forEach((c) =>
+      c.removeAttribute("data-it-processing")
+    );
+    // 文本级去重同步移除对应原文（本元素独有的文本；共享文本仅在无兄弟单元时清）
+    const texts = new Set(extractUnits(el, this.opts).map((u) => u.text));
+    let doneRevoked = 0;
+    let revoked = 0;
+    for (const text of texts) {
+      if (this.doneTexts.delete(text)) {
+        doneRevoked++;
+        revoked++;
+      } else if (this.pendingTexts.delete(text)) {
+        revoked++;
+      }
+    }
+    // 只有已完成文本占过 stats.done：在途段落撤销只该冲抵 total，
+    // done 一并反扣会把其它段落的完成数少计（工具条「已译 N 段」缩水）
+    this.stats.done = Math.max(0, this.stats.done - doneRevoked);
+    this.stats.total = Math.max(0, this.stats.total - revoked);
   }
 
   /** 中止某会话的在途翻译请求（还原/换页时）：background 按 sessionId 批量 abort。
@@ -543,9 +625,16 @@ export class PageEngine {
         ? [...units].sort((a, b) => viewportOrderKey(a.container) - viewportOrderKey(b.container))
         : units;
     for (const u of ordered) this.scheduledContainers.delete(u.container);
-    const gen = this.generation; // 捕获本批代次
+    const gen = this.generationValue; // 捕获本批代次
     const anchor = this.captureAnchor();
-    for (const u of ordered) u.container.setAttribute("data-it-processing", "");
+    // 批次令牌：同时落在单元对象与容器 data-it-processing 的属性值上。
+    // 单元素还原（restoreElement）/ 重试会摘掉或换掉容器标记，渲染时据此丢弃被撤销的单元，
+    // 保证「还原该段」后不会又被仍在途的旧批次把译文填回去。
+    const token = `it-batch-${++this.batchSeq}`;
+    for (const u of ordered) {
+      u.batchToken = token;
+      u.container.setAttribute("data-it-processing", token);
+    }
     // 预留译文空间（不可见占位），填充在原位，避免页面跳动。
     // 性能要点（大页面卡顿修复）：
     //  1) 先一次性预读所有容器的样式（getComputedStyle/clientWidth），此时尚无
@@ -557,13 +646,27 @@ export class PageEngine {
     const styleMap = precomputeStyles(ordered);
     for (let i = 0; i < ordered.length; i++) {
       const u = ordered[i];
-      this.renderer.reserve(u, styleMap.get(u.container));
+      // 撤销守卫：容器令牌已被 restoreElement 摘掉/换新 → 不再复活占位。
+      // 否则重新套壳的 .it-wrap + 隐形占位会因渲染守卫丢弃结果而永久残留
+      if (u.container.getAttribute("data-it-processing") === u.batchToken) {
+        this.renderer.reserve(u, styleMap.get(u.container));
+      }
       await pauseIfBudgetSpent(pacer);
-      if (gen !== this.generation) return; // 让出期间被还原 → 中止，不再继续占位/请求
+      if (gen !== this.generationValue) return; // 让出期间被还原 → 中止，不再继续占位/请求
     }
     this.releaseScroll(anchor);
+    // 让出窗口内被还原的单元就此完全退场：不登记索引（否则 retry/观察器把它当在途）、
+    // 不参与请求（省额度）；渲染守卫只是最后防线，不是去重出口
+    const alive = ordered.filter(
+      (u) => u.container.getAttribute("data-it-processing") === u.batchToken
+    );
+    if (alive.length === 0) {
+      // 全部被还原：不推状态、不发请求，但调度计数照常冲减（与末尾口径一致）
+      this.pendingCount = Math.max(0, this.pendingCount - units.length);
+      return;
+    }
     // 索引登记：allUnits（按 id）+ unitsByText（按文本，retry 用）
-    for (const u of ordered) {
+    for (const u of alive) {
       if (this.allUnits.size < MAX_UNITS) {
         this.allUnits.set(u.id, u);
         let list = this.unitsByText.get(u.text);
@@ -574,7 +677,7 @@ export class PageEngine {
     this.setState("translating");
 
     const byText = new Map<string, TranslationUnit[]>();
-    for (const u of ordered) {
+    for (const u of alive) {
       const list = byText.get(u.text) ?? [];
       list.push(u);
       byText.set(u.text, list);
@@ -584,7 +687,7 @@ export class PageEngine {
     // 视口优先调度：批次按「距视口距离」动态出队——每次出队前按当前视口重选最近的批，
     // 滚动后未发出的批次会跟随用户位置；先完成的批先渲染（不再按固定批次顺序等待，
     // 消除队头阻塞）。请求并发度仍由 FETCH_WINDOW 钳制，后台统一限流不变。
-    let batchSeq = 0;
+    let batchIdSeq = 0;
     const pending: PendingBatch[] = batches.map((batch) => ({
       batch,
       anchor: batch[0]![1][0]!.container,
@@ -607,7 +710,7 @@ export class PageEngine {
         if (best > 0) pending.unshift(pending.splice(best, 1)[0]!);
       }
       const next = pending.shift()!;
-      const id = ++batchSeq;
+      const id = ++batchIdSeq;
       inFlight.set(
         id,
         this.fetchBatch(next.batch).then((chunks) => ({ id, batch: next.batch, chunks }))
@@ -618,18 +721,20 @@ export class PageEngine {
     while (inFlight.size > 0) {
       const { id, batch, chunks } = await Promise.race(inFlight.values());
       inFlight.delete(id);
-      if (gen !== this.generation) return; // 期间被还原，丢弃后续结果
+      if (gen !== this.generationValue) return; // 期间被还原，丢弃后续结果
       if (chunks) {
         await this.renderBatch(batch, chunks, gen, pacer);
       } else {
-        const failed = batch.flatMap(([, us]) => us);
-        this.stats.error += failed.length;
-        for (const u of failed) {
+        for (const u of batch.flatMap(([, us]) => us)) {
+          // 撤销守卫与成功路径（renderBatch）同口径：已被还原的段落不显示失败占位、
+          // 不计入失败数——否则「翻译失败 + 点过还原」会把错误条塞回用户刚还原的原文处
+          if (u.container.getAttribute("data-it-processing") !== u.batchToken) continue;
+          this.stats.error++;
           this.renderer.fail(u);
           u.container.removeAttribute("data-it-processing");
         }
       }
-      if (gen !== this.generation) return;
+      if (gen !== this.generationValue) return;
       startNext();
     }
 
@@ -647,7 +752,7 @@ export class PageEngine {
   private async fetchBatch(
     batch: [string, TranslationUnit[]][]
   ): Promise<Map<string, string[]> | null> {
-    const session = this.generation; // 会话 id：还原/换页时 background 据此中止在途请求
+    const session = this.generationValue; // 会话 id：还原/换页时 background 据此中止在途请求
     const batchTexts = batch.map(([text]) => text);
     for (const t of batchTexts) this.pendingTexts.add(t);
 
@@ -675,7 +780,7 @@ export class PageEngine {
 
     // 会话在请求期间被还原/换页：结果作废。绝不能把文本写进 doneTexts——
     // 否则重新翻译时这些段落会被去重口径跳过，刷新页面前永远拿不到译文（F-2）。
-    if (session !== this.generation) {
+    if (session !== this.generationValue) {
       for (const t of batchTexts) this.pendingTexts.delete(t);
       return null;
     }
@@ -688,7 +793,13 @@ export class PageEngine {
 
     for (const t of batchTexts) {
       this.pendingTexts.delete(t);
-      if (this.doneTexts.size < MAX_DONE_TEXTS) this.doneTexts.add(t);
+      // 该文本的全部单元在请求期间被单元素还原撤销（容器 processing 标记已摘或换了新令牌）
+      // → 文本不再记入 doneTexts：否则再悬停「译」时被 isSkipped 压住，刷新页面前出不了角标
+      const units = batch.find(([text]) => text === t)?.[1] ?? [];
+      const allRevoked =
+        units.length > 0 &&
+        units.every((u) => u.container.getAttribute("data-it-processing") !== u.batchToken);
+      if (!allRevoked && this.doneTexts.size < MAX_DONE_TEXTS) this.doneTexts.add(t);
     }
 
     // 同文单元共享译文；chunk 顺序与 flat 一致
@@ -715,6 +826,9 @@ export class PageEngine {
     for (const [text, us] of batch) {
       const chunks = textToChunks.get(text);
       for (const u of us) {
+        // 渲染守卫（按单元）：令牌失配 = 该单元已被还原/重试撤销，丢弃旧批次结果，
+        // 不回填译文、不误计统计；标记由撤销方（restoreElement/retryState）负责清理
+        if (u.container.getAttribute("data-it-processing") !== u.batchToken) continue;
         u.container.removeAttribute("data-it-processing");
         if (chunks && chunks.length > 0) {
           this.renderer.fill(u, chunks);
@@ -724,7 +838,7 @@ export class PageEngine {
           failed++;
         }
         await pauseIfBudgetSpent(pacer);
-        if (gen !== this.generation) {
+        if (gen !== this.generationValue) {
           this.stats.done += filled;
           this.stats.error += failed;
           this.emitStats();
