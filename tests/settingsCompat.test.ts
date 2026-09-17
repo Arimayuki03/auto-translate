@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_SETTINGS,
   decryptApiKey,
   encryptApiKey,
   exportSettings,
@@ -243,6 +244,62 @@ describe("导出 / 导入往返", () => {
     expect(s.sites.whitelist).toEqual([]); // 字符串名单整体剔除
     expect(s.sites.blacklist).toEqual(["ok.example.com"]); // 非字符串项被过滤
     expect(s.cache.enabled).toBe(true); // cache 段无效 → 整段默认
+  });
+});
+
+describe("导入合并语义（P0-4：不再静默清空）", () => {
+  it("部分导入：文件没写的字段保持原值（API Key / 黑白名单不被清空）", async () => {
+    mockStorage({ settings: structuredClone(fullSettings()) });
+    await importSettings({ translate: { targetLang: "en" } });
+    const s = await getSettings();
+    expect(s.translate.targetLang).toBe("en"); // 文件字段生效
+    expect(s.api.apiKey).toBe("sk-original-key"); // 未提及 → 保持
+    expect(s.api.baseUrl).toBe("https://api.example.com/v1");
+    expect(s.sites.whitelist).toEqual(["docs.example.com"]);
+    expect(s.sites.blacklist).toEqual(["login.example.com"]);
+  });
+
+  it("导入不含任何设置段的 JSON（package.json 等）直接拒绝，而非清空全部", async () => {
+    mockStorage({ settings: structuredClone(fullSettings()) });
+    await expect(
+      importSettings({ name: "auto-translate", version: "1.2.3", scripts: { build: "vite build" } })
+    ).rejects.toThrow("未找到任何可识别的设置段");
+    await expect(importSettings({})).rejects.toThrow("未找到任何可识别的设置段");
+    // 拒绝即未落盘：既有设置完好
+    const s = await getSettings();
+    expect(s.api.apiKey).toBe("sk-original-key");
+    expect(s.sites.whitelist).toEqual(["docs.example.com"]);
+  });
+
+  it("合法 Base64 形态的明文 Key 导入不会被当成密文解成乱码", async () => {
+    // 旧实现：导入明文不加密直接落盘，读取路径无条件解密——
+    // "abcd1234"（恰为合法 Base64）会被解成乱码；含 "-" 的 Key 因 atob 抛错回退才幸免
+    mockStorage();
+    await importSettings({ api: { format: "openai", apiKey: "abcd1234" } });
+    expect((await getSettings()).api.apiKey).toBe("abcd1234");
+    await importSettings({ api: { format: "openai", apiKey: "sk12345678" } });
+    expect((await getSettings()).api.apiKey).toBe("sk12345678");
+    await importSettings({ api: { format: "openai", apiKey: "AKIAIOSFODNN7EXAMPLE" } });
+    expect((await getSettings()).api.apiKey).toBe("AKIAIOSFODNN7EXAMPLE");
+  });
+
+  it("自家导出的密文 Key 导入后正常解回明文", async () => {
+    mockStorage();
+    await importSettings({ api: { format: "openai", apiKey: encryptApiKey("sk-round-trip") } });
+    expect((await getSettings()).api.apiKey).toBe("sk-round-trip");
+  });
+});
+
+describe("getSettings 返回值的数组引用不外泄默认对象（P1-21）", () => {
+  it("就地修改返回的白名单不污染 DEFAULT_SETTINGS 与后续读取", async () => {
+    // 存储里完全没有 sites 段：mergeSettings 若直接外带 DEFAULT 的数组引用，
+    // popup addSite 的 push 会写进全局默认值，此后所有 getSettings 持续返回被污染名单
+    mockStorage({ settings: { version: 5, api: { format: "openai" } } });
+    const s = await getSettings();
+    s.sites.whitelist.push("evil.example.com");
+    expect(DEFAULT_SETTINGS.sites.whitelist).toEqual([]);
+    const s2 = await getSettings();
+    expect(s2.sites.whitelist).toEqual([]);
   });
 });
 

@@ -12,7 +12,8 @@ let timer: ReturnType<typeof setInterval> | undefined;
 
 function poke(): void {
   try {
-    void chrome.runtime.getPlatformInfo();
+    // no-op 探针只为重置空闲计时器，rejection 一并吞掉（unhandled rejection 会污染 SW 日志）
+    void chrome.runtime.getPlatformInfo().catch(() => undefined);
   } catch {
     // 无 runtime 的环境（单测）：保活只在真实扩展环境有意义，跳过即可
   }

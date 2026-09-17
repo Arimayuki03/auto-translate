@@ -136,10 +136,11 @@ const SUPPORTED_FORMATS = [
   "microsoft",
 ] as const;
 
-/** 导入设置的逐字段校验：只接受已知字段与正确类型，非法字段剔除（回退默认值）。
- *  此前只校验 api.format：手工编辑的导入文件若把 sites.blacklist 写成字符串等，
+/** 导入文件的逐字段校验：只产出「文件里出现且类型合法」的字段补丁（unknown 字段与
+ *  类型错乱字段剔除），由 importSettings 以当前设置为底合并落盘。
+ *  此前只校验 api.format：手工编辑的文件若把 sites.blacklist 写成字符串等，
  *  落盘后 content 侧 shouldTranslatePage 调 .some 会抛错，导致所有页面注入失败。 */
-function sanitizeImportSettings(raw: unknown): Settings {
+function buildImportPatch(raw: unknown): SettingsPatch {
   const r = (raw ?? {}) as Record<string, unknown>;
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   const num = (v: unknown): number | undefined =>
@@ -232,13 +233,41 @@ function sanitizeImportSettings(raw: unknown): Settings {
       ...pick(r.backupApi, apiSpec),
     } as unknown as Partial<ApiConfig>;
   }
-  const merged = mergeSettings(DEFAULT_SETTINGS, patch);
-  merged.version = SETTINGS_VERSION;
-  return merged;
+  return patch;
+}
+
+/** 文件里至少要出现一个已知设置段，才认作设置文件——否则「误选 package.json」
+ *  这类对象会被当成全空补丁静默导入（P0-4 的第一道防线） */
+const KNOWN_IMPORT_SECTIONS = [
+  "enabled",
+  "api",
+  "translate",
+  "sites",
+  "tts",
+  "security",
+  "cache",
+  "backupApi",
+] as const;
+
+/** 导入文件里的 Key 可能是本插件导出的密文，也可能是用户手填的明文。
+ *  只有「能解码为 Base64 且解出内容带 KEY_SALT 前缀」才算自家密文；
+ *  其余一律视为明文——包括恰好是合法 Base64 的明文 Key（此前落盘不加密，
+ *  读取路径无条件解密会把它们解成乱码，P0-4 第二道防线）。 */
+function normalizeImportedKey(value: string): string {
+  if (!value) return value;
+  try {
+    const raw = xor(atob(value));
+    if (raw.startsWith(KEY_SALT)) return raw.slice(KEY_SALT.length);
+  } catch {
+    // 非合法 Base64 → 明文
+  }
+  return value;
 }
 
 /** 导入设置。兼容直接设置对象以及 { settings: ... } 包装；密钥可为本插件导出的密文或明文。
- *  内容经逐字段校验后合并出完整设置落盘：缺失段回退默认值，类型错乱字段被剔除。 */
+ *  以「当前设置」为底合并文件中的合法字段后落盘：文件没写的字段保持原值，
+ *  不再被静默重置为默认值（P0-4）。Key 统一归一为明文，经 saveSettings 加密落盘，
+ *  维持「磁盘上永远是密文」的读取不变量。 */
 export async function importSettings(input: unknown): Promise<void> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("不是有效的设置文件");
@@ -256,8 +285,19 @@ export async function importSettings(input: unknown): Promise<void> {
   if (candidate.backupApi?.format && !formats.has(candidate.backupApi.format)) {
     throw new Error(`不支持的备用 API 格式：${String(candidate.backupApi.format)}`);
   }
-  const merged = sanitizeImportSettings(raw);
-  await chrome.storage.local.set({ settings: structuredClone(merged) });
+  const rawObj = raw as Record<string, unknown>;
+  if (!KNOWN_IMPORT_SECTIONS.some((section) => section in rawObj)) {
+    throw new Error("不是有效的设置文件：未找到任何可识别的设置段");
+  }
+  const patch = buildImportPatch(rawObj);
+  if (patch.api?.apiKey) patch.api.apiKey = normalizeImportedKey(patch.api.apiKey);
+  if (patch.backupApi?.apiKey) {
+    patch.backupApi.apiKey = normalizeImportedKey(patch.backupApi.apiKey);
+  }
+  const current = await getSettings(); // 明文完整设置（含既有迁移）
+  const merged = mergeSettings(current, patch);
+  merged.version = SETTINGS_VERSION;
+  await saveSettings(merged); // Key 经 encryptApiKey 落盘，读取路径的解密恒成立
   // 立即走一次完整读取/迁移，确保导入内容可用；不会覆盖原始导入数据。
   await getSettings();
 }
@@ -277,18 +317,23 @@ type SettingsPatch = {
 };
 
 function mergeSettings(base: Settings, patch: SettingsPatch): Settings {
-  const api: ApiConfig = { ...base.api, ...(patch.api ?? {}) };
-  const enabled: boolean = patch.enabled ?? base.enabled;
+  // 深拷贝 base 再合并：返回值不得外带 DEFAULT_SETTINGS（或存储对象）的引用——
+  // 调用方会在 getSettings() 结果上就地 push/splice 数组（popup 加白名单），
+  // 共享引用会污染全局默认值（P1-21）
+  const b = structuredClone(base);
+  const api: ApiConfig = { ...b.api, ...(patch.api ?? {}) };
+  const enabled: boolean = patch.enabled ?? b.enabled;
   return {
-    ...base,
+    ...b,
     ...patch,
     api,
-    backupApi: patch.backupApi ? { ...api, ...patch.backupApi } : undefined,
-    translate: { ...base.translate, ...(patch.translate ?? {}) },
-    sites: { ...base.sites, ...(patch.sites ?? {}) },
-    tts: { ...base.tts, ...(patch.tts ?? {}) },
-    security: { ...base.security, ...(patch.security ?? {}) },
-    cache: { ...base.cache, ...(patch.cache ?? {}) },
+    // 文件/存储没提 backupApi 时保留 base 的既有备用通道（导入语义：只更新出现的字段）
+    backupApi: patch.backupApi ? { ...api, ...patch.backupApi } : b.backupApi,
+    translate: { ...b.translate, ...(patch.translate ?? {}) },
+    sites: { ...b.sites, ...(patch.sites ?? {}) },
+    tts: { ...b.tts, ...(patch.tts ?? {}) },
+    security: { ...b.security, ...(patch.security ?? {}) },
+    cache: { ...b.cache, ...(patch.cache ?? {}) },
     enabled,
   };
 }

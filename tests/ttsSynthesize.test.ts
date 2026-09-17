@@ -37,7 +37,9 @@ function audioResponse(): Response {
 }
 
 /** 区分令牌端点与合成端点的 fetch mock，记录每次调用 */
-function routeFetch(handler: (url: string) => Response | Promise<Response>): ReturnType<typeof vi.fn> {
+function routeFetch(
+  handler: (url: string) => Response | Promise<Response>
+): ReturnType<typeof vi.fn> {
   return vi.fn(async (input: RequestInfo | URL) => handler(String(input)));
 }
 
@@ -115,14 +117,18 @@ describe("synthesizeSpeech 合成请求", () => {
     // 二次调用复用缓存的令牌：不再请求令牌端点
     await synthesizeSpeech("第二条", "zh-CN");
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    const synthCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("cognitiveservices"));
+    const synthCalls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("cognitiveservices")
+    );
     expect(synthCalls.length).toBe(2);
     const init = synthCalls[0]?.[1] as RequestInit;
     expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>)["Authorization"]).toContain(".sig-t1");
-    expect(String(init.body)).toContain("<voice name=\"zh-CN-XiaoxiaoNeural\">");
+    expect(String(init.body)).toContain('<voice name="zh-CN-XiaoxiaoNeural">');
     // base64 音频可解回原字节
-    expect(Array.from(Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0)))).toEqual([1, 2, 3, 4]);
+    expect(Array.from(Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0)))).toEqual([
+      1, 2, 3, 4,
+    ]);
   });
 
   it("超长文本截断到 TTS_MAX_TEXT_CHARS", async () => {
@@ -151,12 +157,14 @@ describe("synthesizeSpeech 合成请求", () => {
     const res = await synthesizeSpeech("重试", "zh-CN");
     expect(res.audioBase64.length).toBeGreaterThan(0);
     // 令牌端点 2 次（重取）+ 合成端点 2 次（首次 401 + 重试成功）
-    const tokenCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("dev.microsofttranslator"));
+    const tokenCalls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("dev.microsofttranslator")
+    );
     expect(tokenCalls.length).toBe(2);
     expect(synthCalls).toBe(2);
-    const retryAuth = ((fetchMock.mock.calls[3]?.[1] as RequestInit).headers as Record<string, string>)[
-      "Authorization"
-    ];
+    const retryAuth = (
+      (fetchMock.mock.calls[3]?.[1] as RequestInit).headers as Record<string, string>
+    )["Authorization"];
     expect(retryAuth).toContain(".sig-t2");
   });
 
@@ -200,11 +208,20 @@ describe("TTS 熔断", () => {
 // ===== 设置导入：tts 段逐字段校验 =====
 
 function mockStorage(): void {
+  // 内存持久化：importSettings 现在先读当前设置为底再合并（P0-4），需要真实的读回
+  const memory = new Map<string, unknown>();
   (globalThis as { chrome?: unknown }).chrome = {
     storage: {
       local: {
-        get: vi.fn(async () => ({})),
-        set: vi.fn(async () => undefined),
+        get: vi.fn(async (keys: string | string[]) => {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out: Record<string, unknown> = {};
+          for (const k of list) if (memory.has(k)) out[k] = memory.get(k);
+          return out;
+        }),
+        set: vi.fn(async (items: Record<string, unknown>) => {
+          for (const [k, v] of Object.entries(items)) memory.set(k, structuredClone(v));
+        }),
         remove: vi.fn(async () => undefined),
       },
     },
@@ -217,23 +234,34 @@ describe("importSettings 的 tts 段校验", () => {
     (globalThis as { chrome?: unknown }).chrome = undefined;
   });
 
-  it("合法 tts 字段导入后保留；缺失字段回退默认值", async () => {
+  it("合法 tts 字段导入后保留；文件未提段维持现值（无历史即默认值）", async () => {
     await importSettings({ tts: { enabled: false, voice: "en-US-BrianNeural", rate: 25 } });
-    const stored = await (globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } })
-      .chrome.storage.local.set.mock.calls.at(-1)?.[0] as { settings: Settings };
+    const stored = (await (
+      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+    ).chrome.storage.local.set.mock.calls.at(-1)?.[0]) as { settings: Settings };
     expect(stored.settings.tts).toEqual({ enabled: false, voice: "en-US-BrianNeural", rate: 25 });
 
-    // 整段缺失 → 默认值
-    await importSettings({});
-    const stored2 = await (globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } })
-      .chrome.storage.local.set.mock.calls.at(-1)?.[0] as { settings: Settings };
-    expect(stored2.settings.tts).toEqual({ enabled: true, voice: "", rate: 0 });
+    // 文件没提 tts → 以当前设置为底，保留上一次导入的值（P0-4：不再静默清空）
+    await importSettings({ enabled: true });
+    const stored2 = (await (
+      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+    ).chrome.storage.local.set.mock.calls.at(-1)?.[0]) as { settings: Settings };
+    expect(stored2.settings.tts).toEqual({ enabled: false, voice: "en-US-BrianNeural", rate: 25 });
+    expect(stored2.settings.enabled).toBe(true);
+  });
+
+  it("拒绝不含任何设置段的文件（误选 package.json 等）", async () => {
+    await expect(importSettings({})).rejects.toThrow("未找到任何可识别的设置段");
+    await expect(
+      importSettings({ name: "some-package", version: "1.0.0", dependencies: {} })
+    ).rejects.toThrow("未找到任何可识别的设置段");
   });
 
   it("类型错乱字段剔除回退默认", async () => {
     await importSettings({ tts: { enabled: "yes", voice: 123, rate: "fast" } });
-    const stored = await (globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } })
-      .chrome.storage.local.set.mock.calls.at(-1)?.[0] as { settings: Settings };
+    const stored = (await (
+      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+    ).chrome.storage.local.set.mock.calls.at(-1)?.[0]) as { settings: Settings };
     expect(stored.settings.tts).toEqual({ enabled: true, voice: "", rate: 0 });
   });
 });

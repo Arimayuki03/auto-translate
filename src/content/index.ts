@@ -154,7 +154,7 @@ async function startTranslation(settings: Settings): Promise<void> {
         engine.restore();
         void setPageDisabled(currentPageKey(), true); // 还原该子页 → 该子页禁用自动翻译
       } else {
-        void engine.translateAll();
+        void engine.translateAll(true); // 快捷键显式译回：属用户意图（P0-2）
         void setPageDisabled(currentPageKey(), false); // 翻译该子页 → 该子页恢复自动翻译
       }
     } else if (msg.command === "cycle-mode" && toolbar) {

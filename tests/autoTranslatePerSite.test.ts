@@ -104,8 +104,12 @@ describe("自动翻译 vs 还原", () => {
     engine.restore();
     expect(engine.restoredByUser).toBe(true); // 还原后应阻止自动翻译重译
 
-    // 用户再次主动翻译 → 标记清除
+    // 自动触发路径（无用户意图）不清除还原标记：还原意愿得以保留
     await engine.translateAll();
+    expect(engine.restoredByUser).toBe(true);
+
+    // 用户再次主动翻译（显式意图入口）→ 标记清除
+    await engine.translateAll(true);
     expect(engine.restoredByUser).toBe(false);
   });
 
@@ -125,7 +129,9 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
   it("还原的 targetLang 会被自动翻译使用（请求语言一致，无冲突）", async () => {
     // 该站已保存 targetLang=en
     storageGet.mockImplementation(async (key: string) =>
-      key === "it-site:github.com" ? { "it-site:github.com": { targetLang: "en", displayMode: "bilingual" } } : {}
+      key === "it-site:github.com"
+        ? { "it-site:github.com": { targetLang: "en", displayMode: "bilingual" } }
+        : {}
     );
     const per = await getPerSite(HOST);
     expect(per?.targetLang).toBe("en");
@@ -163,9 +169,7 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
 
     await engine.translateAll();
     // 仅译文模式：原文文字被原位替换为译文（链接/结构保留，不再是 CSS 藏整块）
-    await waitFor(
-      () => document.querySelectorAll(".it-translated.it-done").length > 0
-    );
+    await waitFor(() => document.querySelectorAll(".it-translated.it-done").length > 0);
     expect(document.querySelectorAll(".it-translated.it-done").length).toBeGreaterThan(0);
     // 原文已被替换：容器文字以译文开头（mock 译文 = 【译】+原文；双语下则应以原文开头）
     expect((document.querySelector("h1")!.textContent ?? "").trimStart()).toMatch(/^【译】/);
@@ -176,7 +180,9 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
     const engine = makeEngine(makeSettings());
     await engine.translateAll();
     // 自动翻译完成后，不应有任何 savePerSite 调用
-    const setMock = (globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }).chrome.storage.local.set;
+    const setMock = (
+      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+    ).chrome.storage.local.set;
     expect(setMock).not.toHaveBeenCalled();
   });
 
@@ -190,8 +196,7 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
     expect(disabled.has("github.com/settings/admin")).toBe(false);
 
     // 复刻 main() 的 isPageDisabled 判断：只命中被还原的那个子页
-    const isPageDisabledFor = (path: string): boolean =>
-      disabled.has("github.com" + path);
+    const isPageDisabledFor = (path: string): boolean => disabled.has("github.com" + path);
     expect(isPageDisabledFor("/settings/security")).toBe(true);
     expect(isPageDisabledFor("/settings/profile")).toBe(false); // 其它子页不受影响
     expect(isPageDisabledFor("/settings/admin")).toBe(false);
@@ -199,7 +204,9 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
 
   it("setPageDisabled 持久化且可移除（手动翻译后恢复）", async () => {
     const setMock = vi.fn(async () => undefined);
-    (globalThis as { chrome: { storage: { local: { set: typeof setMock } } } }).chrome.storage.local.set = setMock;
+    (
+      globalThis as { chrome: { storage: { local: { set: typeof setMock } } } }
+    ).chrome.storage.local.set = setMock;
 
     await setPageDisabled("github.com/settings/security", true);
     expect(await getDisabledPages()).toContain("github.com/settings/security");

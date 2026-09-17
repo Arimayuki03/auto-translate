@@ -68,6 +68,9 @@ export class PageEngine {
   /** 防止自动翻译/可见性/SPA 信号同时触发时重复扫描并重复计数 */
   private translateAllRunning = false;
   private translateAllQueued = false;
+  /** 排队是否由用户显式意图触发（工具条/快捷键/换语言）。在跑任务收尾重放时据此判定：
+   *  用户还原过本页（userRestored）后，只有显式意图的排队才允许重放（P0-2） */
+  private translateAllQueuedByUser = false;
   /** 悬停单元素翻译期间钳制整页状态机：观察器与自动翻译都以 state === "off" 判定
    *  “整页未翻译”，若单译把 state 推到 translating/done，下一次点击兜底扫描或动态内容
    *  变化就会经观察器把整页补译掉，破坏“只译该段”语义。translateAll / restore /
@@ -189,14 +192,18 @@ export class PageEngine {
     return this.scheduledContainers.has(container) || this.lazyUnits.has(container);
   }
 
-  /** 全页翻译：提取新增单元，视口内先译，视口外进入时再译 */
-  async translateAll(): Promise<void> {
+  /** 全页翻译：提取新增单元，视口内先译，视口外进入时再译。
+   *  userIntent=true 仅由显式用户入口传入（工具条「翻译」、Alt+T 译回、切换语言）：
+   *  清除「用户已还原」标记并允许重入排队重放；自动路径（可见性/换页/开关）不得传
+   *  true，各自在调用点自检 restoredByUser 后放弃。 */
+  async translateAll(userIntent = false): Promise<void> {
     if (this.translateAllRunning) {
       this.translateAllQueued = true;
+      if (userIntent) this.translateAllQueuedByUser = true;
       return;
     }
     this.translateAllRunning = true;
-    this.userRestored = false; // 主动翻译即代表用户想翻译，重置还原标记
+    if (userIntent) this.userRestored = false; // 主动翻译才代表用户想翻译；自动触发的准入由调用点把关
     this.suppressPageState = false; // 整页翻译解除悬停单译的状态钳制
     this.lastError = undefined; // 新一轮翻译开始，清掉上一轮的失败信息
     try {
@@ -253,8 +260,13 @@ export class PageEngine {
     } finally {
       this.translateAllRunning = false;
       if (this.translateAllQueued) {
+        const replayByUser = this.translateAllQueuedByUser;
         this.translateAllQueued = false;
-        void this.translateAll();
+        this.translateAllQueuedByUser = false;
+        this.translateAllQueuedByUser = false;
+        // 在途期间用户还原（userRestored）且排队不含显式用户意图 → 放弃重放：
+        // 否则「还原」刚点完，旧任务一收尾整页又被译回，还把 userRestored 清零（P0-2）
+        if (replayByUser || !this.userRestored) void this.translateAll(replayByUser);
       }
     }
   }
@@ -431,6 +443,7 @@ export class PageEngine {
     this.stats = { done: 0, error: 0, total: 0 };
     this.pendingCount = 0;
     this.translateAllQueued = false;
+    this.translateAllQueuedByUser = false;
     this.lazyIO?.disconnect();
     this.lazyIO = null;
     this.lazyUnits.clear();
@@ -467,6 +480,7 @@ export class PageEngine {
     this.stats = { done: 0, error: 0, total: 0 };
     this.pendingCount = 0;
     this.translateAllQueued = false;
+    this.translateAllQueuedByUser = false;
     this.lazyIO?.disconnect();
     this.lazyIO = null;
     this.lazyUnits.clear();

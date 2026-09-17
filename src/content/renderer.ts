@@ -282,6 +282,8 @@ export class Renderer {
     for (const [container, transEl] of this.byContainer) {
       // 脱离文档的容器/译文及时清掉：无限滚动、虚拟列表等长会话页面下 Map 不再无界增长
       if (!container.isConnected || !transEl.isConnected) {
+        // 丢索引前先把标记与包裹层解干净：回收节点之后可能再挂回，只删索引会留下永久孤儿译文块
+        this.discardContainer(container, transEl);
         this.byContainer.delete(container);
         this.unitByContainer.delete(container);
         this.pendingSplits.delete(container);
@@ -299,7 +301,13 @@ export class Renderer {
   private applyTextOnlyMode(): void {
     for (const c of this.controlContainers) {
       if (!c.isConnected) {
-        this.controlContainers.delete(c); // 同 byContainer：失连即清，防泄漏
+        // 失连即清（防泄漏），但清之前先把控件文字与标记还原：回收节点再挂回时不能带着译文/标记
+        const raw = c.getAttribute("data-it-ctl-orig");
+        if (raw) restoreTextNodes(c, raw);
+        c.removeAttribute("data-it-ctl-orig");
+        c.removeAttribute("data-it-ctl-trans");
+        c.removeAttribute("data-it-src");
+        this.controlContainers.delete(c);
         continue;
       }
       if (this.mode === "original") {
@@ -316,7 +324,11 @@ export class Renderer {
   private applyTranslatedMode(): void {
     for (const [container, transEl] of this.byContainer) {
       if (!container.isConnected || !transEl.isConnected) {
+        this.discardContainer(container, transEl); // 丢索引前解干净标记，回收节点再挂回不留孤儿
         this.byContainer.delete(container);
+        this.unitByContainer.delete(container);
+        this.pendingSplits.delete(container);
+        this.inplaceTargets.delete(container);
         continue;
       }
       // 失败占位（双语下产生的）切到仅译文时隐藏：原文未被替换，红字错误块不该混在译文里
@@ -448,9 +460,7 @@ export class Renderer {
   }
 
   /** 一个行内链接单元当前的译文文本（供父块拆段匹配） */
-  private linkTranslation(
-    part: { el: HTMLElement; text: string }
-  ): string | "pending" | "gone" {
+  private linkTranslation(part: { el: HTMLElement; text: string }): string | "pending" | "gone" {
     const el = this.byContainer.get(part.el);
     if (el?.isConnected) {
       if (el.classList.contains("it-error")) return "gone";
@@ -523,7 +533,10 @@ export class Renderer {
     });
     for (const [container, transEl] of ordered) {
       if (!container.isConnected) {
-        this.byContainer.delete(container); // 失连即清：恢复流程无从处理，留着只会泄漏
+        // 失连即清（留着只会泄漏），但清之前把替换文字/包裹层/标记全部解干净：
+        // 虚拟列表等回收节点之后可能挂回，残留会成永久孤儿译文块（P0-1）
+        this.discardContainer(container, transEl);
+        this.byContainer.delete(container);
         continue;
       }
       // 包裹容器退回过 CSS 切换的（无可替换文本节点）：恢复原文可见
@@ -557,18 +570,54 @@ export class Renderer {
         if (newEl) {
           this.byContainer.set(container, newEl);
         } else {
+          this.discardContainer(container, transEl); // 译文节点已被站点移除：原位替换的文字与标记也要还原
           this.byContainer.delete(container);
         }
       }
     }
   }
 
+  /**
+   * 彻底丢弃一个 byContainer 条目：还原原位替换文字 → 解包移除译文 → 清除全部标记。
+   * 对已脱离文档的子树同样有效（DOM 读写不需要节点在文档里）——这是防孤儿残留的关键：
+   * 虚拟列表/回收式渲染只是暂时摘下容器，之后可能挂回，若丢索引时不清理，
+   * 重新挂载的节点带着 .it-wrap/.it-translated 与 data-it-src，永久脱离一切索引（P0-1）。
+   */
+  private discardContainer(container: HTMLElement, transEl: HTMLElement): void {
+    // ① 撤销仅译文的原位文字替换（快照在 target——容器自身或唯一链接上）
+    const target = this.inplaceTargets.get(container) ?? getSourceTarget(container);
+    this.inplaceTargets.delete(container);
+    if (target.hasAttribute("data-it-inplace")) {
+      const raw = target.getAttribute("data-it-orig-text");
+      if (raw) restoreTextNodes(target, raw);
+      target.removeAttribute("data-it-orig-text");
+      target.removeAttribute("data-it-inplace");
+    }
+    this.clearSplitHiddenLinks(container);
+    container.removeAttribute("data-it-orig-hidden");
+    // ② 解包：译文随包裹层移除。整棵子树已脱离 → 就地解包，让回收节点回到原始结构；
+    // 包裹层在文档里但容器已被站点摘走 → 不把站点已删的原文复活，译文随包裹层摘除
+    const wrap = transEl.closest?.(".it-wrap") as HTMLElement | null;
+    if (wrap) {
+      const orig = wrap.querySelector(":scope > .it-orig");
+      if (orig && (!wrap.isConnected || container.isConnected)) wrap.before(orig);
+      wrap.remove();
+    } else {
+      transEl.remove();
+    }
+    // ③ 清容器标记（removeAttribute 对脱离节点同样有效，重挂不能带着我们的状态）
+    container.removeAttribute("data-it-src");
+    container.classList.remove("it-orig");
+    this.pendingSplits.delete(container);
+    this.unitByContainer.delete(container);
+  }
+
   /** 一键还原：解包把原文移回原位，移除全部译文与标记 */
   restore(): void {
     this.clearTranslatedMode();
     // 控件（按钮/选项）：恢复原文文字（结构始终未动）——用 controlContainers 代替 querySelectorAll
+    // 失连控件同样处理：回收节点挂回时不能带着译文与标记
     for (const c of this.controlContainers) {
-      if (!c.isConnected) continue;
       const raw = c.getAttribute("data-it-ctl-orig");
       if (raw) restoreTextNodes(c, raw);
       c.removeAttribute("data-it-ctl-orig");
@@ -577,20 +626,7 @@ export class Renderer {
     }
     // 解包：原文移回原位，译文随包裹层一起移除——用 byContainer 找包裹层代替 querySelectorAll
     for (const [container, transEl] of this.byContainer) {
-      if (!container.isConnected) continue;
-      const wrap = transEl.closest?.(".it-wrap");
-      if (wrap) {
-        const orig = wrap.querySelector(":scope > .it-orig");
-        if (orig) wrap.before(orig);
-        wrap.remove();
-      } else if (transEl.isConnected) {
-        transEl.remove();
-      }
-      // 清理仅译文模式标记
-      container.removeAttribute("data-it-src");
-      container.removeAttribute("data-it-orig-hidden");
-      container.removeAttribute("data-it-inplace");
-      container.classList.remove("it-orig");
+      this.discardContainer(container, transEl);
     }
     document.body.classList.remove("it-mode-translated", "it-mode-original");
     this.byContainer.clear();

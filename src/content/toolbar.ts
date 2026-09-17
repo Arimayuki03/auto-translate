@@ -225,7 +225,7 @@ export class Toolbar {
 
   private onToggle(): void {
     if (this.engine.state === "off") {
-      void this.engine.translateAll();
+      void this.engine.translateAll(true); // 显式用户意图：可覆盖「已还原」状态并解除抑制（P0-2）
       void savePerSite(currentHost(), {
         targetLang: this.engine.targetLanguage,
         displayMode: this.engine.renderer.getMode(),
@@ -246,7 +246,7 @@ export class Toolbar {
   private onLangChange(lang: string): void {
     this.engine.setTargetLang(lang);
     this.engine.restore();
-    void this.engine.translateAll();
+    void this.engine.translateAll(true); // restore 刚置的 userRestored 不应挡住换语言后的重译
     void savePerSite(currentHost(), {
       targetLang: lang,
       displayMode: this.engine.renderer.getMode(),
@@ -292,7 +292,9 @@ export class Toolbar {
       ...(err.errorCode ? [`${t("diagErrorCode")}：${err.errorCode}`] : []),
       ...(d?.provider ? [`${t("diagProvider")}：${d.provider}`] : []),
       ...(d?.source
-        ? [`${t("diagSource")}：${d.source === "main" ? t("diagSourceMain") : t("diagSourceBackup")}`]
+        ? [
+            `${t("diagSource")}：${d.source === "main" ? t("diagSourceMain") : t("diagSourceBackup")}`,
+          ]
         : []),
       ...(d?.endpoint ? [`${t("diagEndpoint")}：${d.endpoint}`] : []),
       ...(d?.hostname ? [`${t("diagHostname")}：${d.hostname}`] : []),

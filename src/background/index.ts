@@ -20,6 +20,11 @@ import { createProvider } from "./providers";
 import { TranslateService, TranslationCancelledError } from "./translate";
 import { ApiError } from "./providers/http";
 import { beginKeepAlive, endKeepAlive } from "./keepAlive";
+import {
+  abortSession,
+  registerSessionController,
+  unregisterSessionController,
+} from "./sessionRegistry";
 import { synthesizeSpeech } from "./edgeTts";
 import { ttsPlay, ttsStop } from "./ttsPlayback";
 
@@ -32,25 +37,6 @@ const CACHE_CLEANUP_ALARM = "it-cache-cleanup";
 
 function ensureCacheCleanupAlarm(): void {
   chrome.alarms.create(CACHE_CLEANUP_ALARM, { periodInMinutes: 24 * 60, delayInMinutes: 1 });
-}
-
-/** 翻译会话 → 该会话在途请求的 AbortController。还原/换页时按会话批量中止，避免浪费额度。
- *  无 sessionId 的旧式请求（划词/输入框等）不参与会话中止。 */
-const sessionControllers = new Map<number, Set<AbortController>>();
-
-function registerController(sessionId: number | undefined, controller: AbortController): void {
-  if (sessionId === undefined) return;
-  let set = sessionControllers.get(sessionId);
-  if (!set) sessionControllers.set(sessionId, (set = new Set()));
-  set.add(controller);
-}
-
-function unregisterController(sessionId: number | undefined, controller: AbortController): void {
-  if (sessionId === undefined) return;
-  const set = sessionControllers.get(sessionId);
-  if (!set) return;
-  set.delete(controller);
-  if (set.size === 0) sessionControllers.delete(sessionId);
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
@@ -76,24 +62,27 @@ chrome.commands.onCommand.addListener((command) => {
   void (async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return;
-    const msg: ItCommandMessage = { type: "it-command", command: command as ItCommandMessage["command"] };
+    const msg: ItCommandMessage = {
+      type: "it-command",
+      command: command as ItCommandMessage["command"],
+    };
     await chrome.tabs.sendMessage(tab.id, msg).catch(() => undefined);
   })();
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "translate") {
     const req = message as TranslateRequestMessage;
     const controller = new AbortController();
-    registerController(req.sessionId, controller);
+    // 会话按「发送方 tab+frame+sessionId」隔离：sessionId 是各 frame 从 0 起的代次，跨页会撞号（P0-3）
+    registerSessionController(sender, req.sessionId, controller);
     // 整批翻译可能远超 SW 空闲回收窗口（30s）：在途期间周期性重置空闲计时器，
     // 否则 sendResponse 通道随 worker 一起被回收，整批结果丢失
     beginKeepAlive();
     translateService
       .translate(req.texts, req.targetLang, req.context, controller.signal)
       .then(
-        (results) =>
-          sendResponse({ id: req.id, ok: true, results } as TranslateResponseMessage),
+        (results) => sendResponse({ id: req.id, ok: true, results } as TranslateResponseMessage),
         (err) => {
           // 会话中止是用户主动还原/换页，属预期行为：静默返回，不当作失败上报
           if (err instanceof TranslationCancelledError) {
@@ -112,37 +101,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       )
       .finally(() => {
         endKeepAlive();
-        unregisterController(req.sessionId, controller);
+        unregisterSessionController(sender, req.sessionId, controller);
       });
     return true;
   }
 
-  // 中止某个翻译会话的全部在途请求（content 还原/换页时发出）
+  // 中止「该标签页该 frame」指定会话的全部在途请求（content 还原/换页时发出）；
+  // 其它标签页/iframe 的同值 sessionId 会话不受牵连（P0-3）
   if (message?.type === "cancel-translation") {
     const req = message as CancelTranslationMessage;
-    const set = sessionControllers.get(req.sessionId);
-    if (set) {
-      for (const controller of set) controller.abort();
-      sessionControllers.delete(req.sessionId);
-    }
+    abortSession(sender, req.sessionId);
     return false;
   }
 
   if (message?.type === "test-connection") {
     const req = message as TestConnectionRequestMessage;
-    testConnection(req.api)
-      .then(
-        (reply) =>
-          sendResponse({ id: req.id, ok: true, message: reply } as TestConnectionResponseMessage),
-        (err) =>
-          sendResponse({
-            id: req.id,
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-            ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
-            ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
-          } as TestConnectionResponseMessage)
-      );
+    testConnection(req.api).then(
+      (reply) =>
+        sendResponse({ id: req.id, ok: true, message: reply } as TestConnectionResponseMessage),
+      (err) =>
+        sendResponse({
+          id: req.id,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
+          ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
+        } as TestConnectionResponseMessage)
+    );
     return true;
   }
 
@@ -174,7 +159,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "page-summary") {
     const req = message as PageSummaryRequestMessage;
     const controller = new AbortController();
-    registerController(req.sessionId, controller);
+    registerSessionController(sender, req.sessionId, controller);
     beginKeepAlive();
     translateService
       .generatePageSummary(req.title, req.content, controller.signal)
@@ -189,7 +174,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       )
       .finally(() => {
         endKeepAlive();
-        unregisterController(req.sessionId, controller);
+        unregisterSessionController(sender, req.sessionId, controller);
       });
     return true;
   }
@@ -199,7 +184,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     translateService
       .cacheStats()
       .then((count) => sendResponse({ count }))
-      .catch((err) => sendResponse({ count: 0, error: err instanceof Error ? err.message : String(err) }));
+      .catch((err) =>
+        sendResponse({ count: 0, error: err instanceof Error ? err.message : String(err) })
+      );
     return true;
   }
 
@@ -332,7 +319,10 @@ async function testConnection(api: ApiConfig): Promise<string> {
   const isFree = api.format === "googlefree" || api.format === "microsoft";
   const prompt = isFree
     ? [
-        { role: "system" as const, content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+        {
+          role: "system" as const,
+          content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。",
+        },
         { role: "user" as const, content: "Connection test" },
       ]
     : [{ role: "user" as const, content: "请只回复：连接成功" }];
