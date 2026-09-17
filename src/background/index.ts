@@ -206,6 +206,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // 合成：Edge TTS 免费（无 Key）；声音/语速按设置解析（用户显式声音 > 目标语言自动）
   if (message?.type === "tts-synthesize") {
     const req = message as TtsSynthesizeMessage;
+    // 合成要跑两次外部请求（取令牌 + 合成音频，各自带硬超时），
+    // 期间 SW 不能被发现空闲而回收，否则回包丢失、气泡永远不出声
+    beginKeepAlive();
     getSettings()
       .then((settings) =>
         synthesizeSpeech(req.text, req.targetLang, {
@@ -222,7 +225,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ok: false,
             error: err instanceof Error ? err.message : String(err),
           })
-      );
+      )
+      .finally(() => endKeepAlive());
     return true;
   }
 

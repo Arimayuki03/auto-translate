@@ -31,6 +31,7 @@ const LONG_EN_2 = "Pack my box with five dozen liquor jugs while the museum open
 
 function makeSettings(overrides: Partial<Settings["translate"]> = {}): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://test",
@@ -54,6 +55,7 @@ function makeSettings(overrides: Partial<Settings["translate"]> = {}): Settings 
       ...overrides,
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -78,7 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
-  const doc = document as Document & { caretRangeFromPoint?: unknown };
+  const doc = document as { caretRangeFromPoint?: unknown };
   delete doc.caretRangeFromPoint;
 });
 
@@ -349,7 +351,7 @@ describe("悬停角标交互", () => {
     const { badge } = setup();
     const a = document.getElementById("a")!;
     stubRect(a);
-    const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    const doc = document as { caretRangeFromPoint?: (x: number, y: number) => Range | null };
     const ws = document.createTextNode("   ");
     a.appendChild(ws);
     doc.caretRangeFromPoint = () => {

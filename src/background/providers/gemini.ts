@@ -24,7 +24,9 @@ function buildBody(messages: ChatMessage[], temperature: number) {
   };
 }
 
-/** 构造带 key 查询参数的接口 URL（stream 为 true 时用 SSE 版 streamGenerateContent） */
+/** 构造接口 URL（stream 为 true 时用 SSE 版 streamGenerateContent）。
+ *  Key 一律走 authHeaders() 的请求头，不进 URL —— 查询参数会被中转站 / 反向代理 / CDN
+ *  的 access log 原样记录，而本插件的主场景恰恰是中转站。 */
 function buildUrl(options: ChatOptions, stream: boolean): string {
   const url = new URL(
     buildApiUrl(
@@ -36,15 +38,19 @@ function buildUrl(options: ChatOptions, stream: boolean): string {
   );
   // alt=sse：SSE 增量协议（缺省时 streamGenerateContent 返回一次性 JSON 数组，不是流）
   if (stream) url.searchParams.set("alt", "sse");
-  url.searchParams.set("key", options.apiKey);
   return url.toString();
+}
+
+/** x-goog-api-key：Google 官方文档的鉴权头，中转站/兼容实现普遍支持 */
+function authHeaders(options: ChatOptions): Record<string, string> {
+  return options.apiKey ? { "x-goog-api-key": options.apiKey } : {};
 }
 
 /** 非流式请求（原实现）：POST {base}/v1beta/models/{model}:generateContent */
 async function chatOnce(messages: ChatMessage[], options: ChatOptions): Promise<ChatResult> {
   const { data, diagnostic } = await postJson<GeminiGenerateContentResponse>(
     buildUrl(options, false),
-    {},
+    authHeaders(options),
     buildBody(messages, options.temperature),
     options.timeoutMs,
     "gemini",
@@ -70,7 +76,7 @@ async function chatStream(
   let text = "";
   const diagnostic = await postSSE(
     buildUrl(options, true),
-    {},
+    authHeaders(options),
     buildBody(messages, options.temperature),
     options.timeoutMs,
     "gemini",

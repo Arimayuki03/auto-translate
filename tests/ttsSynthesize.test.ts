@@ -237,14 +237,14 @@ describe("importSettings 的 tts 段校验", () => {
   it("合法 tts 字段导入后保留；文件未提段维持现值（无历史即默认值）", async () => {
     await importSettings({ tts: { enabled: false, voice: "en-US-BrianNeural", rate: 25 } });
     const stored = (await (
-      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+      globalThis as unknown as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
     ).chrome.storage.local.set.mock.calls.at(-1)?.[0]) as { settings: Settings };
     expect(stored.settings.tts).toEqual({ enabled: false, voice: "en-US-BrianNeural", rate: 25 });
 
     // 文件没提 tts → 以当前设置为底，保留上一次导入的值（P0-4：不再静默清空）
     await importSettings({ enabled: true });
     const stored2 = (await (
-      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+      globalThis as unknown as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
     ).chrome.storage.local.set.mock.calls.at(-1)?.[0]) as { settings: Settings };
     expect(stored2.settings.tts).toEqual({ enabled: false, voice: "en-US-BrianNeural", rate: 25 });
     expect(stored2.settings.enabled).toBe(true);
@@ -260,7 +260,7 @@ describe("importSettings 的 tts 段校验", () => {
   it("类型错乱字段剔除回退默认", async () => {
     await importSettings({ tts: { enabled: "yes", voice: 123, rate: "fast" } });
     const stored = (await (
-      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+      globalThis as unknown as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
     ).chrome.storage.local.set.mock.calls.at(-1)?.[0]) as { settings: Settings };
     expect(stored.settings.tts).toEqual({ enabled: true, voice: "", rate: 0 });
   });

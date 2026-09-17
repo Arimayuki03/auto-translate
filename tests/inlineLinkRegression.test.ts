@@ -15,6 +15,7 @@ const SENT = "The United States is a country in North America.";
 
 function makeSettings(displayMode: "bilingual" | "translated"): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://t",
@@ -37,9 +38,10 @@ function makeSettings(displayMode: "bilingual" | "translated"): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
-  } as Settings;
+  };
 }
 
 let sentTexts: string[];
@@ -128,7 +130,7 @@ describe("P1 回归：行内链接不破坏父块源句", () => {
     await flush();
     await flush();
 
-    const p = document.querySelector("#w")!;
+    const p = document.querySelector<HTMLElement>("#w")!;
     const usa = document.querySelector<HTMLAnchorElement>('a[href="/w/USA"]')!;
     const na = document.querySelector<HTMLAnchorElement>('a[href="/w/NA"]')!;
     expect(visibleOnly(p)).toBe("美国是一个北美洲的国家。"); // 与整句译文一字不差：不重不漏
@@ -149,7 +151,7 @@ describe("P1 回归：行内链接不破坏父块源句", () => {
     await flush();
     await flush();
 
-    const p = document.querySelector("#w")!;
+    const p = document.querySelector<HTMLElement>("#w")!;
     expect(p.textContent).toContain("The "); // 父块原文未被原位替换
     expect(document.querySelector('a[href="/w/USA"]')!.getAttribute("href")).toBe("/w/USA");
     expect(document.body.textContent).toContain("美国是一个北美洲的国家。"); // 整句译文（完整源句翻出来的）

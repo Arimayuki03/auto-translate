@@ -29,6 +29,7 @@ const BASE_OPTS: ChatOptions = {
 function freeSettings(format: "googlefree" | "microsoft", backup?: Settings["backupApi"]): Settings {
   return {
     version: 4,
+    enabled: true,
     api: {
       format,
       baseUrl: "",
@@ -52,6 +53,7 @@ function freeSettings(format: "googlefree" | "microsoft", backup?: Settings["bac
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: false, maxEntries: 100 },
   };
@@ -84,7 +86,9 @@ describe("microsoftProvider 请求形状", () => {
   });
 
   it("单段：POST 裸 JSON 字符串数组到 edge.microsoft.com，from 为空", async () => {
-    const fetchMock = vi.fn(async () => microsoftOk(["hello"]));
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      microsoftOk(["hello"])
+    );
     vi.stubGlobal("fetch", fetchMock);
     const messages: ChatMessage[] = [
       { role: "system", content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
@@ -118,7 +122,9 @@ describe("microsoftProvider 请求形状", () => {
   });
 
   it("语言码归一化：zh-TW → zh-Hant，en → en", async () => {
-    const fetchMock = vi.fn(async () => microsoftOk(["x"]));
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      microsoftOk(["x"])
+    );
     vi.stubGlobal("fetch", fetchMock);
     const messages: ChatMessage[] = [
       { role: "system", content: "你是专业翻译引擎。将用户输入翻译为zh-TW，只输出译文。" },
@@ -136,7 +142,7 @@ describe("microsoftProvider 请求形状", () => {
   });
 
   it("正文含 < > & 时转义发送、返回解码一次（标签对齐器保护）", async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
       new Response(JSON.stringify([{ translations: [{ text: "A &lt; B &amp; C &gt; D" }] }]), {
         status: 200,
       })

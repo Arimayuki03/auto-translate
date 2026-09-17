@@ -24,6 +24,7 @@ const LONG2 = "Pack my box with five dozen liquor jugs while the museum opens it
 
 function makeSettings(): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://test",
@@ -46,6 +47,7 @@ function makeSettings(): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -313,7 +315,9 @@ describe("SPA 导航延迟重译 vs 手动还原", () => {
     vi.useFakeTimers();
     vi.spyOn(console, "debug").mockImplementation(() => undefined);
     // 假定时器环境下所有等待都走 advanceTimers：真实 setTimeout 不会被推进，会永久挂起
-    const tick = (ms: number): Promise<void> => vi.advanceTimersByTimeAsync(ms);
+    const tick = async (ms: number): Promise<void> => {
+      await vi.advanceTimersByTimeAsync(ms);
+    };
 
     const settings = makeSettings();
     const renderer = new Renderer(settings.translate.displayMode);

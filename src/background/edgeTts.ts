@@ -152,30 +152,58 @@ async function generateTranslatorSignature(now = new Date()): Promise<string> {
   return `${SIGNATURE_APP_ID}::${sig}::${date}::${requestId}`;
 }
 
+/** 外部请求硬超时：没有超时的话，网络挂起会让 promise 永不 settle ——
+ *  keepAlive 一直被续命、并发槽被永久占用，划词气泡无限转圈。 */
+const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+const SYNTH_REQUEST_TIMEOUT_MS = 30_000;
+
+/** 在硬超时内执行一段请求逻辑：signal 透传给 fetch，run 内部请把响应体也读完——
+ *  只计时到响应头到达的话，卡死的流式 body 依然会让 promise 永不 settle。 */
+async function withRequestTimeout<T>(
+  timeoutMs: number,
+  run: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await run(controller.signal);
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error(`Edge TTS 请求超时（${timeoutMs}ms）`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getEndpointToken(): Promise<EndpointToken> {
   const now = Date.now();
   if (cachedToken && now < cachedToken.expiredAt - TOKEN_REFRESH_BEFORE_EXPIRY_MS) {
     return cachedToken;
   }
   const signature = await generateTranslatorSignature();
-  const res = await fetch(ENDPOINT_URL, {
-    method: "POST",
-    headers: {
-      "Accept-Language": "zh-Hans",
-      "X-ClientVersion": CLIENT_VERSION,
-      "X-UserId": USER_ID,
-      "X-HomeGeographicRegion": HOME_REGION,
-      "X-ClientTraceId": randomTraceId(),
-      "X-MT-Signature": signature,
-      "User-Agent": USER_AGENT,
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    body: "",
+  const data = await withRequestTimeout(TOKEN_REQUEST_TIMEOUT_MS, async (signal) => {
+    const res = await fetch(ENDPOINT_URL, {
+      method: "POST",
+      headers: {
+        "Accept-Language": "zh-Hans",
+        "X-ClientVersion": CLIENT_VERSION,
+        "X-UserId": USER_ID,
+        "X-HomeGeographicRegion": HOME_REGION,
+        "X-ClientTraceId": randomTraceId(),
+        "X-MT-Signature": signature,
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: "",
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Edge TTS 令牌获取失败（HTTP ${res.status}）`);
+    }
+    return (await res.json()) as { t?: unknown; r?: unknown };
   });
-  if (!res.ok) {
-    throw new Error(`Edge TTS 令牌获取失败（HTTP ${res.status}）`);
-  }
-  const data = (await res.json()) as { t?: unknown; r?: unknown };
   if (typeof data.t !== "string" || typeof data.r !== "string" || !data.t || !data.r) {
     throw new Error("Edge TTS 令牌响应格式无效");
   }
@@ -272,28 +300,35 @@ export async function synthesizeSpeech(
 
 async function synthOnce(ssml: string): Promise<ArrayBuffer> {
   let token = await getEndpointToken();
-  let res = await postSSML(token, ssml);
-  if ((res.status === 401 || res.status === 403) && !cachedTokenInvalidated(token)) {
-    // 令牌可能已失效：清缓存重取一次（仅一次，避免风暴）
-    clearEdgeTTSTokenCache();
-    token = await getEndpointToken();
-    res = await postSSML(token, ssml);
-  }
-  if (!res.ok) {
-    throw new Error(`Edge TTS 合成失败（HTTP ${res.status}）`);
-  }
-  const audio = await res.arrayBuffer();
-  if (audio.byteLength === 0) {
-    throw new Error("Edge TTS 返回了空音频（当前声音可能不支持该语言）");
-  }
-  return audio;
+  // 计时作用域覆盖「合成请求 + 音频响应体读取」，含令牌失效后的那一次重发
+  return withRequestTimeout(SYNTH_REQUEST_TIMEOUT_MS, async (signal) => {
+    let res = await postSSML(token, ssml, signal);
+    if ((res.status === 401 || res.status === 403) && !cachedTokenInvalidated(token)) {
+      // 令牌可能已失效：清缓存重取一次（仅一次，避免风暴）
+      clearEdgeTTSTokenCache();
+      token = await getEndpointToken();
+      res = await postSSML(token, ssml, signal);
+    }
+    if (!res.ok) {
+      throw new Error(`Edge TTS 合成失败（HTTP ${res.status}）`);
+    }
+    const audio = await res.arrayBuffer();
+    if (audio.byteLength === 0) {
+      throw new Error("Edge TTS 返回了空音频（当前声音可能不支持该语言）");
+    }
+    return audio;
+  });
 }
 
 function cachedTokenInvalidated(token: EndpointToken): boolean {
   return cachedToken !== token;
 }
 
-function postSSML(token: EndpointToken, ssml: string): Promise<Response> {
+function postSSML(
+  token: EndpointToken,
+  ssml: string,
+  signal: AbortSignal
+): Promise<Response> {
   return fetch(`https://${token.region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
     method: "POST",
     headers: {
@@ -303,5 +338,6 @@ function postSSML(token: EndpointToken, ssml: string): Promise<Response> {
       "X-Microsoft-OutputFormat": TTS_OUTPUT_FORMAT,
     },
     body: ssml,
+    signal,
   });
 }

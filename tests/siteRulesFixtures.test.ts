@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveSiteRules } from "../src/shared/siteRules";
 import { extractUnits } from "../src/content/extractor";
-import type { ExtractOptions } from "../content/extractor";
+import type { ExtractOptions } from "../src/content/extractor";
 
 const here = dirname(fileURLToPath(import.meta.url));
 

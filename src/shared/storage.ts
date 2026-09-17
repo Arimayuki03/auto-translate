@@ -52,31 +52,77 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 const KEY_SALT = "at-v1:";
+/** v2：载荷先按 UTF-8 编码再做字节级 XOR，因此对任意 Unicode Key 都能编码。
+ *  v1 是「UTF-16 码元 XOR 后 btoa」，含非 Latin-1 字符时 btoa 抛错 → catch 返回
+ *  明文原文，等于把用户的 Key 直接写盘。读取路径仍兼容 v1，下次保存自动升级为 v2。 */
+const KEY_PREFIX = "at-v2:";
 
-/** 轻量混淆（真实隔离依赖 chrome.storage 与用户自行保管 Key） */
+/**
+ * Key 的落盘混淆（**不是加密**：固定常量密钥流、无秘密输入，能还原）。
+ * 这里保证的是两条工程不变量：
+ *  1) 磁盘上永远不出现明文 Key（任何字符集都成立）；
+ *  2) 真实隔离依赖 chrome.storage 的作用域与用户自行保管。
+ * 需要真加密时须引入不可导出的密钥（crypto.subtle + storage.session），不要指望本函数。
+ */
 export function encryptApiKey(plain: string): string {
   if (!plain) return "";
-  try {
-    return btoa(xor(KEY_SALT + plain));
-  } catch {
-    return plain;
-  }
+  return base64FromBytes(xorBytes(new TextEncoder().encode(KEY_PREFIX + plain)));
 }
 
+/** 解码落盘值：v2 → v1 → 原样返回（视为历史明文 / 用户手填明文） */
 export function decryptApiKey(encoded: string): string {
   if (!encoded) return "";
+  const bytes = bytesFromBase64(encoded);
+  if (!bytes) return encoded;
+  const v2 = decodeUtf8(xorBytes(bytes));
+  if (v2.startsWith(KEY_PREFIX)) return v2.slice(KEY_PREFIX.length);
+  const v1 = legacyXorString(binaryFromBytes(bytes));
+  if (v1.startsWith(KEY_SALT)) return v1.slice(KEY_SALT.length);
+  return encoded;
+}
+
+function keystreamByte(i: number): number {
+  return 0x5a ^ (i & 0xff);
+}
+
+function xorBytes(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ keystreamByte(i);
+  return out;
+}
+
+/** v1 历史格式：在 UTF-16 码元上做同样的位置相关 XOR（仅用于读老数据） */
+function legacyXorString(text: string): string {
+  return Array.from(text)
+    .map((c, i) => String.fromCharCode(c.charCodeAt(0) ^ keystreamByte(i)))
+    .join("");
+}
+
+function base64FromBytes(bytes: Uint8Array): string {
+  return btoa(binaryFromBytes(bytes));
+}
+
+function binaryFromBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return binary;
+}
+
+/** 非 Base64（含 v1 里 btoa 失败留下的明文 Key）返回 null，调用方按明文处理 */
+function bytesFromBase64(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
   try {
-    const raw = xor(atob(encoded));
-    return raw.startsWith(KEY_SALT) ? raw.slice(KEY_SALT.length) : raw;
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
   } catch {
-    return encoded;
+    return null;
   }
 }
 
-function xor(text: string): string {
-  return Array.from(text)
-    .map((c, i) => String.fromCharCode(c.charCodeAt(0) ^ (0x5a ^ (i & 0xff))))
-    .join("");
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -145,6 +191,16 @@ function buildImportPatch(raw: unknown): SettingsPatch {
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   const num = (v: unknown): number | undefined =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  /** 带区间的数值校验：越界一律当作「字段未提供」丢弃（回退当前值/默认值）。
+   *  blockMaxChars / minTextLength / cache.maxEntries 在设置页**没有输入控件**，
+   *  导入文件是它们的唯一入口——此前无范围校验，写 blockMaxChars: 0 会让
+   *  extractor 的 `i += maxChars` 永不推进，整页提取时主线程无限卡死。 */
+  const numOf =
+    (min: number, max: number) =>
+    (v: unknown): number | undefined => {
+      const n = num(v);
+      return n === undefined || n < min || n > max ? undefined : n;
+    };
   const bool = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
   const strArr = (v: unknown): string[] | undefined =>
     Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : undefined;
@@ -172,10 +228,10 @@ function buildImportPatch(raw: unknown): SettingsPatch {
     baseUrl: str,
     apiKey: str,
     model: str,
-    temperature: num,
-    timeoutMs: num,
-    maxConcurrency: num,
-    minRequestIntervalMs: num,
+    temperature: numOf(0, 2),
+    timeoutMs: numOf(5000, 300000),
+    maxConcurrency: numOf(1, 10),
+    minRequestIntervalMs: numOf(50, 10000),
     batchMode: enumOf(["lines", "separator"] as const),
     customSystemPrompt: str,
     freeEndpoint: str,
@@ -189,17 +245,17 @@ function buildImportPatch(raw: unknown): SettingsPatch {
       displayMode: enumOf(["bilingual", "translated", "original"] as const),
       autoTranslate: bool,
       autoDetectSource: bool,
-      minTextLength: num,
-      blockMaxChars: num,
+      minTextLength: numOf(0, 200),
+      blockMaxChars: numOf(100, 5000),
       translateOnSelect: bool,
       translateInput: bool,
       translateHover: bool,
       viewportLazy: bool,
       terminology: strArr,
       contextEnabled: bool,
-      contextMaxChars: num,
+      contextMaxChars: numOf(0, 20000),
       summaryEnabled: bool,
-      summaryMinChars: num,
+      summaryMinChars: numOf(0, 100000),
       style: enumOf(["gray", "outline", "underline", "blur"] as const),
       customCss: str,
       translateAttributes: bool,
@@ -214,7 +270,7 @@ function buildImportPatch(raw: unknown): SettingsPatch {
     tts: pick(r.tts, {
       enabled: bool,
       voice: str,
-      rate: num,
+      rate: numOf(-50, 100),
     }) as unknown as Partial<Settings["tts"]>,
     security: pick(r.security, {
       encryptApiKey: bool,
@@ -222,8 +278,8 @@ function buildImportPatch(raw: unknown): SettingsPatch {
     }) as unknown as Partial<Settings["security"]>,
     cache: pick(r.cache, {
       enabled: bool,
-      maxEntries: num,
-      ttlDays: num,
+      maxEntries: numOf(1, 100000),
+      ttlDays: numOf(0, 365),
     }) as unknown as Partial<Settings["cache"]>,
   };
   // 备用 API 显式给出对象时才存在（沿用主备字段继承语义：缺的字段拿主 API 补）
@@ -249,19 +305,13 @@ const KNOWN_IMPORT_SECTIONS = [
   "backupApi",
 ] as const;
 
-/** 导入文件里的 Key 可能是本插件导出的密文，也可能是用户手填的明文。
- *  只有「能解码为 Base64 且解出内容带 KEY_SALT 前缀」才算自家密文；
- *  其余一律视为明文——包括恰好是合法 Base64 的明文 Key（此前落盘不加密，
- *  读取路径无条件解密会把它们解成乱码，P0-4 第二道防线）。 */
+/** 导入文件里的 Key 可能是本插件导出的混淆值（v1/v2），也可能是用户手填的明文。
+ *  只有解出内容带自家前缀才算导出值；其余一律视为明文——包括恰好是合法 Base64
+ *  的明文 Key（此前落盘不混淆，读取路径无条件解码会把它们解成乱码，P0-4 第二道防线）。 */
 function normalizeImportedKey(value: string): string {
   if (!value) return value;
-  try {
-    const raw = xor(atob(value));
-    if (raw.startsWith(KEY_SALT)) return raw.slice(KEY_SALT.length);
-  } catch {
-    // 非合法 Base64 → 明文
-  }
-  return value;
+  const decoded = decryptApiKey(value);
+  return decoded === value ? value : decoded;
 }
 
 /** 导入设置。兼容直接设置对象以及 { settings: ... } 包装；密钥可为本插件导出的密文或明文。

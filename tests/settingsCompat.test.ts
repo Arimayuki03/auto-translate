@@ -16,7 +16,12 @@ import {
 } from "../src/shared/storage";
 import type { Settings } from "../src/shared/types";
 
-function fullSettings(overrides?: Partial<Settings>): Settings {
+/** v4 时代的存档设置：尚无 enabled / tts 字段（二者均为 v5 之后加入，
+ *  「旧数据缺字段 → 迁移补默认」正是本文件要锁的行为，不能提前写进 fixture） */
+type LegacyStoredSettings = Omit<Settings, "enabled" | "tts"> &
+  Partial<Pick<Settings, "enabled" | "tts">>;
+
+function fullSettings(overrides?: Partial<Settings>): LegacyStoredSettings {
   return {
     version: 4,
     api: {

@@ -8,19 +8,20 @@
 | --- | --- | --- | --- |
 | `openai`（默认） | OpenAI 官方 / DeepSeek / Kimi / OneAPI / new-api / vLLM / 各类中转 | `POST {baseURL}/chat/completions` | `Authorization: Bearer {key}` |
 | `anthropic` | Anthropic Claude / 兼容系 | `POST {baseURL}/v1/messages` | `x-api-key: {key}` + `anthropic-version: 2023-06-01` |
-| `gemini` | Google Gemini | `POST {baseURL}/v1beta/models/{model}:generateContent?key={key}` | `?key=` 查询参数（附在 URL） |
+| `gemini` | Google Gemini | `POST {baseURL}/v1beta/models/{model}:generateContent` | `x-goog-api-key: {key}` 请求头（**不进 URL**，避免被中转/代理的访问日志记录） |
 | `ollama` | Ollama 原生 | `POST {baseURL}/api/chat` | 无（本地默认） |
 | `googlefree` | Google 免费翻译通道 | `GET translate.googleapis.com/translate_a/single`（可自定义主/备端点） | 无（免 Key，有频率限制） |
+| `microsoft` | Microsoft / Edge 免费翻译通道 | `POST edge.microsoft.com/translate/translatetext` | 无（免 Key，有频率限制） |
 
-> 提示：Ollama 也可开启 OpenAI 兼容模式（`/v1`），两种方式都支持；OneAPI / new-api / 中转一般建议直接用 `openai` 格式。没有 Key 时选 `googlefree` 开箱即用。
+> 提示：Ollama 也可开启 OpenAI 兼容模式（`/v1`），两种方式都支持；OneAPI / new-api / 中转一般建议直接用 `openai` 格式。没有 Key 时选 `googlefree` 或 `microsoft` 开箱即用——两个免费通道互为备份，其中一个被限流（429/不可达）时会自动切到另一个再试一次。
 
 ## 2. 通用配置项
 
 | 配置 | 必填 | 说明 |
 | --- | --- | --- |
-| API 格式 | 是 | 上述五种之一，默认 `openai` |
+| API 格式 | 是 | 上述六种之一，默认 `openai` |
 | BaseURL | 看格式 | LLM 格式必填，**不要**带完整请求路径，如 `https://xxx.com/v1`；`googlefree` 留空 |
-| API Key | 看格式 | OpenAI/Claude/Gemini 必填；Ollama / googlefree 可留空 |
+| API Key | 看格式 | OpenAI/Claude/Gemini 必填；Ollama / googlefree / microsoft 可留空 |
 | 模型 | 看格式 | LLM 格式必填，如 `gpt-4o-mini`、`claude-sonnet-4-20250514`、`gemini-2.0-flash`、`qwen2.5`；`googlefree` 留空 |
 | 温度 | 否 | 默认 0.3，翻译建议保持低温度 |
 | 超时 | 否 | 默认 60 秒 |

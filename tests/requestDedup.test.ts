@@ -11,6 +11,7 @@ import type { Settings } from "../src/shared/types";
 function openaiSettings(): Settings {
   return {
     version: 4,
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "https://example.test/v1",
@@ -33,6 +34,7 @@ function openaiSettings(): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: false, maxEntries: 100 },
   };

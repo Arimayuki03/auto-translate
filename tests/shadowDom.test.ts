@@ -112,6 +112,7 @@ describe("extractor：shadow root 遍历", () => {
 
 function makeSettings(): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://t",
@@ -134,6 +135,7 @@ function makeSettings(): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -143,14 +145,16 @@ function makeSettings(): Settings {
 function shadowSheetText(shadowRoot: ShadowRoot): string {
   const style = shadowRoot.querySelector("style[data-it-ui]");
   if (style) return style.textContent ?? "";
-  const adopted = (shadowRoot as unknown as { adoptedStyleSheets?: CSSStyleSheet[] })
+  // CSSStyleSheet.cssText 非标准（Chrome 私有），标准口径是逐条 cssRules[].cssText
+  const adopted = (shadowRoot as unknown as { adoptedStyleSheets?: readonly CSSStyleSheet[] })
     .adoptedStyleSheets;
-  return adopted?.[0]?.cssText ?? "";
+  const sheet = adopted?.[0];
+  return sheet ? Array.from(sheet.cssRules, (r) => r.cssText).join("\n") : "";
 }
 
 function shadowInjectionCount(shadowRoot: ShadowRoot): number {
   const styles = shadowRoot.querySelectorAll("style[data-it-ui]").length;
-  const adopted = (shadowRoot as unknown as { adoptedStyleSheets?: CSSStyleSheet[] })
+  const adopted = (shadowRoot as unknown as { adoptedStyleSheets?: readonly CSSStyleSheet[] })
     .adoptedStyleSheets?.length;
   return styles + (adopted ?? 0);
 }

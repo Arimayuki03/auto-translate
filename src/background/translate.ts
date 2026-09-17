@@ -124,6 +124,13 @@ function isRetryable(err: unknown): boolean {
   return err instanceof ApiError && err.retryable;
 }
 
+/** API 级硬失败（鉴权失败 / 模型不存在 / 参数错误）：与请求粒度无关，
+ *  整批、小批量、逐段用的是同一个 Key 与同一份请求体，重发必然同样失败。
+ *  这类错误必须短路，否则会把 1 次 401 放大成 1+N 次（见 translateBatch 降级链）。 */
+function isHardApiFailure(err: unknown): boolean {
+  return err instanceof ApiError && !err.retryable;
+}
+
 /** 指数退避 + 抖动：带 ±10% 随机抖动，避免并发重试在同一时刻齐发再次触发限流 */
 function backoffDelayMs(attempt: number): number {
   const base = 500 * 2 ** attempt;
@@ -333,6 +340,10 @@ export class TranslateService {
       } catch (err) {
         // API 失败：错误先记下，若降级后仍全失败则上抛
         if (!firstError) firstError = err;
+        // 硬失败短路：鉴权/404/参数错误下，逐段降级只会把 1 次 401 变成 1+N 次，
+        // 每次还要过一遍请求启动限速（默认 500ms），既烧风控又拖死页面。
+        // 可重试类（429/5xx/网络/超时）保留降级——小批量确实可能挤过限流。
+        if (isHardApiFailure(err)) throw err;
       }
 
       // 仅「响应正常但解析失败」才值得拆小批量；API 报错（鉴权/网络/限流）拆了也没用
@@ -353,6 +364,8 @@ export class TranslateService {
               return group;
             } catch (err) {
               if (!firstError) firstError = err;
+              // 同上：硬失败不再往逐段降级带（借 Promise.all 直接中断整批）
+              if (isHardApiFailure(err)) throw err;
               return group;
             }
           })

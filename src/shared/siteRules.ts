@@ -235,25 +235,59 @@ export function normalizeUrlPattern(raw: string): string | null {
   return `${host}${path}`;
 }
 
-function escapeRe(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+/** 通配符个数上限：超出视为可疑规则，一律不命中 */
+const MAX_HOST_WILDCARDS = 8;
 
-/** host 匹配：精确 / 子域后缀；带 * 时走正则（开头的 *. 匹配零或多级子域，含主域） */
+/**
+ * host 匹配：精确 / 子域后缀 / 通配符。
+ * 旧实现把 pattern 拼成正则（`*` → `[a-z0-9.-]*`）再 `new RegExp` 匹配，遇到
+ * `*a*a*a*a*a*a*b` 这类模式会发生灾难性回溯：实测 6 组通配符对 60 字符 host 耗时
+ * 4.2 秒、8 组 187 秒，而本函数经 resolveSiteRules 在 **content 主线程同步执行**，
+ * 导入一条坏规则就能冻结整个标签页。现在全部走线性字符串比较，不构造正则。
+ */
 function hostMatches(host: string, pattern: string): boolean {
   if (pattern === "*") return true;
   if (!pattern.includes("*")) {
     return host === pattern || host.endsWith("." + pattern);
   }
-  let source = pattern.split("*").map(escapeRe).join("[a-z0-9.-]*");
-  if (source.startsWith("[a-z0-9.-]*\\.")) {
-    source = `(?:[^.]+\\.)*${source.slice("[a-z0-9.-]*\\.".length)}`;
+  // "*.example.com" = 主域自身或其任意层级子域（内置规则的主流形态，与旧正则等价）
+  if (pattern.startsWith("*.")) {
+    const suffix = pattern.slice(2);
+    if (!suffix.includes("*")) {
+      return !suffix || host === suffix || host.endsWith("." + suffix);
+    }
   }
-  try {
-    return new RegExp(`^${source}$`, "i").test(host);
-  } catch {
-    return false;
+  const segments = pattern.split("*");
+  if (segments.length - 1 > MAX_HOST_WILDCARDS) return false;
+  return wildcardMatch(host, segments);
+}
+
+/**
+ * 无回溯的 `*` 通配匹配：`*` = 任意长度任意字符。首段锚定开头、末段锚定结尾，
+ * 中间段取最左出现位置（消耗最少，不会因贪心而漏配），全程 indexOf 线性推进。
+ */
+function wildcardMatch(value: string, segments: string[]): boolean {
+  const first = segments[0] ?? "";
+  let pos = 0;
+  if (first) {
+    if (!value.startsWith(first)) return false;
+    pos = first.length;
   }
+  for (let i = 1; i < segments.length - 1; i++) {
+    const seg = segments[i] ?? "";
+    if (!seg) continue;
+    const at = value.indexOf(seg, pos);
+    if (at === -1) return false;
+    pos = at + seg.length;
+  }
+  if (segments.length > 1) {
+    const last = segments[segments.length - 1] ?? "";
+    if (!last) return true;
+    if (!value.endsWith(last)) return false;
+    // 末段必须落在已消费位置之后，不得与中间段重叠
+    return value.length - last.length >= pos;
+  }
+  return true;
 }
 
 /**
@@ -268,6 +302,18 @@ function pathMatches(pathname: string, pattern: string): boolean {
   );
 }
 
+/** 路径归一：解码百分号转义 + 小写，与 normalizeUrlPattern 的小写模式同口径。
+ *  畸形转义（如 "%zz"）会让 decodeURIComponent 抛错，退回原样路径。 */
+function pathnameForMatch(pathname: string): string {
+  let decoded = pathname;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    // 非法百分号编码：按原样比对
+  }
+  return decoded.toLowerCase();
+}
+
 /** 单条模式是否命中 URL（非法模式一律不命中） */
 export function urlMatchesPattern(url: URL, rawPattern: string): boolean {
   const normalized = normalizeUrlPattern(rawPattern);
@@ -276,7 +322,10 @@ export function urlMatchesPattern(url: URL, rawPattern: string): boolean {
   const hostPattern = slash === -1 ? normalized : normalized.slice(0, slash);
   const pathPattern = slash === -1 ? "" : normalized.slice(slash);
   if (!hostMatches(url.hostname.toLowerCase(), hostPattern)) return false;
-  return !pathPattern || pathMatches(url.pathname, pathPattern);
+  // normalizeUrlPattern 已把模式整体小写，pathname 必须同口径归一，
+  // 否则 `/Docs`、`/%E6%96%87%E6%A1%A3` 这类规则永远不命中（大小写敏感的静默失效）
+  if (!pathPattern) return true;
+  return pathMatches(pathnameForMatch(url.pathname), pathPattern);
 }
 
 /** 规则是否命中 URL：matches 至少命中一个，且不落在 excludeMatches 里 */

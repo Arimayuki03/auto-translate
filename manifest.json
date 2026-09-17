@@ -33,7 +33,7 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "offscreen"],
+  "permissions": ["storage", "alarms", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "commands": {
     "toggle-translate": {

@@ -5,6 +5,8 @@ node_modules/
 dist/
 release/
 *.zip
+# zip.mjs 打包暂存目录（异常中断时可能残留）
+.zip-staging/
 
 # 日志
 *.log

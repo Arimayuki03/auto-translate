@@ -15,6 +15,7 @@ import type { Settings } from "../src/shared/types";
 
 function makeSettings(): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://t",
@@ -37,6 +38,7 @@ function makeSettings(): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -231,7 +233,7 @@ describe("行内链接：<a> 独立替换单元 + 父块保留完整源句（P1 
     await flush();
 
     const a = document.querySelector<HTMLAnchorElement>("#t a")!;
-    const p = document.querySelector("#t")!;
+    const p = document.querySelector<HTMLElement>("#t")!;
     expect(a.getAttribute("href")).toBe("/c"); // 元素与 href 原样：点击跳转不受影响
     expect(a.firstChild?.textContent).toBe("我们的支持团队"); // 链接文字被译文原位替换
     const hidden = a.querySelector(".it-translated");
@@ -251,7 +253,7 @@ describe("行内链接：<a> 独立替换单元 + 父块保留完整源句（P1 
     await flush();
 
     const a = document.querySelector<HTMLAnchorElement>("#t2 a")!;
-    const p = document.querySelector("#t2")!;
+    const p = document.querySelector<HTMLElement>("#t2")!;
     // 可见文本只有完整整句译文：链接词不重复（原文被剥走的破碎句不会出现）
     expect(visibleOnly(p)).toBe("【译】Please read the license terms carefully.");
     expect(a.hasAttribute("data-it-orig-hidden")).toBe(true); // 失配的链接被隐藏
@@ -270,7 +272,7 @@ describe("行内链接：<a> 独立替换单元 + 父块保留完整源句（P1 
     await flush();
 
     engine.renderer.setMode("bilingual");
-    const p = document.querySelector("#t")!;
+    const p = document.querySelector<HTMLElement>("#t")!;
     const a = document.querySelector<HTMLAnchorElement>("#t a")!;
     expect(visibleOnly(p)).toContain("Contact"); // 父块原文（链接前文字）完整还原
     expect(visibleOnly(p)).toContain("anytime"); // 链接后文字还原

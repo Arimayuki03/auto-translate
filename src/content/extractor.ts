@@ -526,6 +526,9 @@ const SENTENCE_SPLIT_RE = /(?<=[。！？!?…；;])|(?<=[.!?;])\s+/;
  *  2) 聚簇目标块大小 = 总长/块数（块数按硬上限估算），各块尽量均衡，
  *     避免「前满后尖」——老实现贪心填满上限，最后一块只剩零头。 */
 export function splitBySentences(text: string, maxChars: number): string[] {
+  // 兜底钳制：maxChars <= 0 / NaN 会让下面的 `i += maxChars` 永不推进 → 主线程无限循环，
+  // 整个标签页冻结。导入路径已有范围校验，这里再守一道，覆盖手工改写 chrome.storage 的情况。
+  maxChars = Math.max(1, Math.floor(Number.isFinite(maxChars) ? maxChars : CHUNK_SPLIT_CHARS));
   if (text.length <= maxChars) return [text];
   const pieces: string[] = [];
   for (const token of text.split(SENTENCE_SPLIT_RE)) {

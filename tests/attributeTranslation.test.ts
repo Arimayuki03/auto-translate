@@ -13,6 +13,7 @@ import type { Settings } from "../src/shared/types";
 
 function makeSettings(overrides?: { translateAttributes?: boolean }): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://t",
@@ -36,6 +37,7 @@ function makeSettings(overrides?: { translateAttributes?: boolean }): Settings {
       translateAttributes: overrides?.translateAttributes ?? true,
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -78,7 +80,7 @@ describe("HTML 属性翻译", () => {
 
     // 一次批译请求携带全部去重后的文本
     const translateCall = sendMessage.mock.calls.find(
-      (c: [{ type: string }]) => c[0]?.type === "translate"
+      (c: unknown[]) => (c[0] as { type?: string })?.type === "translate"
     ) as [{ texts: string[] }] | undefined;
     expect(translateCall?.[0].texts).toEqual([
       "Search here",

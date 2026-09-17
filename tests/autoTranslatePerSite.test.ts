@@ -21,6 +21,7 @@ const HOST = "github.com";
 
 function makeSettings(overrides: Partial<Settings["translate"]> = {}): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://test",
@@ -44,6 +45,7 @@ function makeSettings(overrides: Partial<Settings["translate"]> = {}): Settings 
       ...overrides,
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -181,7 +183,7 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
     await engine.translateAll();
     // 自动翻译完成后，不应有任何 savePerSite 调用
     const setMock = (
-      globalThis as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
+      globalThis as unknown as { chrome: { storage: { local: { set: ReturnType<typeof vi.fn> } } } }
     ).chrome.storage.local.set;
     expect(setMock).not.toHaveBeenCalled();
   });
@@ -205,7 +207,7 @@ describe("按站点还原翻译设置 vs 自动翻译", () => {
   it("setPageDisabled 持久化且可移除（手动翻译后恢复）", async () => {
     const setMock = vi.fn(async () => undefined);
     (
-      globalThis as { chrome: { storage: { local: { set: typeof setMock } } } }
+      globalThis as unknown as { chrome: { storage: { local: { set: typeof setMock } } } }
     ).chrome.storage.local.set = setMock;
 
     await setPageDisabled("github.com/settings/security", true);

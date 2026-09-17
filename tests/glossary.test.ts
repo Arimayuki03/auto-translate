@@ -14,9 +14,13 @@ describe("tokenizeGlossary", () => {
     expect(restore(tokenized[0])).toBe("OpenAI released GPT");
   });
 
-  it("长术语优先替换，避免子串误伤", () => {
-    const { tokenized } = tokenizeGlossary(["Translate is a word"], ["Translate", "Translate is"]);
-    expect(tokenized[0]).toContain("⟦0⟧"); // 更长的 "Translate is" 被保护
-    expect(tokenized[0]).not.toContain("⟦1⟧"); // "Translate" 子串不再单独替换
+  it("长术语优先替换，短术语不得抢先拆碎长术语", () => {
+    // 断言必须是**替换后的实际文本**，不能断言 ⟦n⟧ 的下标：
+    // 下标按排序后的 terms 数组分配，把排序反转成短术语优先，⟦0⟧ 只是换了含义，
+    // `toContain("⟦0⟧")` / `not.toContain("⟦1⟧")` 会逐字继续成立（此用例曾因此空转）。
+    const { tokenized, restore } = tokenizeGlossary(["AI Agent works"], ["AI", "AI Agent"]);
+    // 整个 "AI Agent" 被保护成单个 token；短术语抢跑会留下裸的 " Agent"
+    expect(tokenized[0]).toBe("⟦0⟧ works");
+    expect(restore(tokenized[0])).toBe("AI Agent works");
   });
 });

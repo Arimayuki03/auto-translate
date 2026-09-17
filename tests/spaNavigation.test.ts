@@ -31,6 +31,7 @@ const PAGES = {
 
 function makeSettings(): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://test",
@@ -53,6 +54,7 @@ function makeSettings(): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: true },
     cache: { enabled: true, maxEntries: 500 },
   };

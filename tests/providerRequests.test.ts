@@ -27,6 +27,7 @@ const BASE_API: ApiConfig = {
 function openAiSettings(overrides?: { api?: Partial<ApiConfig>; backupApi?: ApiConfig }): Settings {
   return {
     version: 4,
+    enabled: true,
     api: { ...BASE_API, ...(overrides?.api ?? {}) },
     ...(overrides?.backupApi ? { backupApi: overrides.backupApi } : {}),
     translate: {
@@ -44,13 +45,14 @@ function openAiSettings(overrides?: { api?: Partial<ApiConfig>; backupApi?: ApiC
       contextMaxChars: 3000,
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: true, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
 }
 
-/** 拦截 fetch：记录请求，按 handler 返回响应 */
-function stubFetch(handler: (url: string, init: RequestInit) => Response): {
+/** 拦截 fetch：记录请求，按 handler 返回响应（允许返回 Promise，fetch 本就是异步的） */
+function stubFetch(handler: (url: string, init: RequestInit) => Response | Promise<Response>): {
   calls: { url: string; init: RequestInit }[];
 } {
   const calls: { url: string; init: RequestInit }[] = [];
@@ -189,7 +191,7 @@ describe("Anthropic 通道请求协议", () => {
 });
 
 describe("Gemini 通道请求协议", () => {
-  it("GET 参数带 key，请求体 contents/system_instruction", async () => {
+  it("x-goog-api-key 请求头带 key（不进 URL），请求体 contents/system_instruction", async () => {
     const { calls } = stubFetch(() =>
       jsonResponse({ candidates: [{ content: { parts: [{ text: "译文" }] } }] })
     );
@@ -203,7 +205,9 @@ describe("Gemini 通道请求协议", () => {
     expect(result.text).toBe("译文");
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toContain("/v1beta/models/gemini:generateContent");
-    expect(calls[0].url).toContain("key=g-key");
+    // key 走 x-goog-api-key 鉴权头（URL 查询参数会被中转站/CDN access log 记录）；URL 中不得再出现 key
+    expect(calls[0].init.headers).toMatchObject({ "x-goog-api-key": "g-key" });
+    expect(calls[0].url).not.toContain("g-key");
     const body = JSON.parse(calls[0].init.body as string);
     expect(body.system_instruction).toEqual({ parts: [{ text: "sys" }] });
     expect(body.contents).toEqual([{ role: "user", parts: [{ text: "Hello" }] }]);
@@ -522,8 +526,8 @@ describe("降级放大上限（批量解析失败 → 先拆 8 段小批量，�
     expect(calls).toHaveLength(4);
   });
 
-  it("API 报错（非解析失败）不触发小批量重试：整批 401 → 直接逐段（与旧行为一致）", async () => {
-    // minRequestIntervalMs: 50 同时验证「请求间隔设置」贯通到限速器（21 个请求 ≈1s 跑完）
+  it("API 硬失败（401 鉴权）短路：不拆小批量、不逐段降级，整批只发 1 次请求", async () => {
+    // （限速器贯通由下方 minRequestIntervalMs 专项用例覆盖，此处不再借 21 次请求验证）
     mockStorage(openAiSettings({ api: { minRequestIntervalMs: 50 } }));
     const { calls } = stubFetch(() => jsonResponse({ error: "unauthorized" }, 401));
     const { TranslateService } = await import("../src/background/translate");
@@ -535,8 +539,8 @@ describe("降级放大上限（批量解析失败 → 先拆 8 段小批量，�
     } catch (err) {
       expect((err as ApiError).code).toBe("auth");
     }
-    // 1 次整批 + 20 次逐段 = 21；不应有额外的小批量请求
-    expect(calls).toHaveLength(21);
+    // 鉴权失败与请求粒度无关：硬失败直接上抛，不得放大成 1+N 次（旧「401 逐段 21 次」行为已废弃）
+    expect(calls).toHaveLength(1);
   });
 
   it("minRequestIntervalMs 生效：间隔 1000ms 时第 3 个请求须等待令牌补充", async () => {

@@ -32,6 +32,7 @@ const BASE_API: ApiConfig = {
 function openAiSettings(overrides?: { api?: Partial<ApiConfig>; backupApi?: ApiConfig }): Settings {
   return {
     version: 4,
+    enabled: true,
     api: { ...BASE_API, ...(overrides?.api ?? {}) },
     ...(overrides?.backupApi ? { backupApi: overrides.backupApi } : {}),
     translate: {
@@ -49,6 +50,7 @@ function openAiSettings(overrides?: { api?: Partial<ApiConfig>; backupApi?: ApiC
       contextMaxChars: 3000,
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: true, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
   };
@@ -339,7 +341,9 @@ describe("Gemini 流式协议", () => {
     expect(result.text).toBe("昨天下雨了");
     expect(calls[0].url).toContain(":streamGenerateContent");
     expect(calls[0].url).toContain("alt=sse");
-    expect(calls[0].url).toContain("key=g-key");
+    // key 走 x-goog-api-key 鉴权头，不进 URL（中转站日志不泄密）
+    expect(calls[0].init.headers).toMatchObject({ "x-goog-api-key": "g-key" });
+    expect(calls[0].url).not.toContain("g-key");
   });
 });
 

@@ -124,9 +124,15 @@ describe("缓存条目校验（F-4：哈希碰撞不返回错误译文）", () =
     const memory = mockStorageMemory();
     const cache = new TranslationCache();
     await cache.set("zh-CN", "hello", "你好");
-    memory.set(firstCacheKey(memory), { src: "-other-text-", val: "错误译文" }); // 模拟碰撞覆盖
-    const fresh = new TranslationCache();
-    expect(await fresh.get("zh-CN", "hello")).toBeUndefined();
+    const key = firstCacheKey(memory);
+    // ts 必须是新鲜时间戳：缺 ts 的条目会先被 TTL 判过期（无 ts 按 0 处理），
+    // 那「未命中」就来自过期而不是 src 校验 —— 删掉源码里的 src 比对，用例照样全绿（此用例曾因此空转）。
+    memory.set(key, { src: "-other-text-", val: "错误译文", ts: Date.now() });
+    expect(await new TranslationCache().get("zh-CN", "hello")).toBeUndefined();
+    // 反向对照：同一条键、原文匹配时必须命中。没有这条，上面的断言可以靠
+    // 「get 恒返回 undefined」成立，仍然测不出碰撞校验。
+    memory.set(key, { src: "hello", val: "你好", ts: Date.now() });
+    expect(await new TranslationCache().get("zh-CN", "hello")).toBe("你好");
   });
 
   it("历史纯字符串条目视为未命中（无 src 校验/无 ts，重译后以新结构落盘）", async () => {

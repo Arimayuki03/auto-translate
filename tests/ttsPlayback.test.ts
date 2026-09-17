@@ -78,7 +78,7 @@ function makeContext(): { contextType: string } {
 describe("offscreen 文档管理", () => {
   it("不存在时创建 offscreen 文档再转发播放", async () => {
     const sendMessage = vi.fn(async () => ({ ok: true, finished: true }));
-    const createDocument = vi.fn(async () => undefined);
+    const createDocument = vi.fn(async (_opts: unknown) => undefined);
     installChrome({ sendMessage, createDocument });
     const { ttsPlay } = await loadModule();
 
@@ -135,7 +135,7 @@ describe("offscreen 文档管理", () => {
 
 describe("ttsPlay 消息转发", () => {
   it("消息形状包含 type/requestId/audioBase64/contentType", async () => {
-    const sendMessage = vi.fn(async () => ({ ok: true, finished: true }));
+    const sendMessage = vi.fn(async (_msg: unknown) => ({ ok: true, finished: true }));
     installChrome({ sendMessage, contexts: [makeContext()] });
     const { ttsPlay } = await loadModule();
 

@@ -16,6 +16,7 @@ import type { Settings } from "../src/shared/types";
 
 function makeSettings(): Settings {
   return {
+    enabled: true,
     api: {
       format: "openai",
       baseUrl: "http://t",
@@ -39,9 +40,10 @@ function makeSettings(): Settings {
       terminology: [],
     },
     sites: { whitelist: [], blacklist: [] },
+    tts: { enabled: true, voice: "", rate: 0 },
     security: { encryptApiKey: false, sensitivePages: false },
     cache: { enabled: true, maxEntries: 500 },
-  } as Settings;
+  };
 }
 
 let sendMessage: ReturnType<typeof vi.fn>;

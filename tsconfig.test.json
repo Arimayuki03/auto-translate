@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // 测试跑在 node 环境（vitest environment: "node"），要 node:fs / process 等类型。
+    // 只给测试 project 开，是为了让 src 保持 types: ["chrome"] —— 否则 content script
+    // 里误用 process / Buffer 也能通过编译，运行时才炸。
+    "types": ["chrome", "node"]
+  },
+  "include": ["tests", "vitest.config.ts"]
+}
