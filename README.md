@@ -40,9 +40,9 @@ npm run dev          # 构建并监听（产物在 dist/）
 | [docs/需求分析.md](docs/需求分析.md) | 功能需求与优先级 |
 | [docs/设计文档.md](docs/设计文档.md) | 系统架构与技术设计 |
 | [docs/API对接说明.md](docs/API对接说明.md) | 自建 AI API 对接指南 |
-| [docs/开发计划.md](docs/开发计划.md) | 分阶段开发任务清单 |
 | [docs/测试计划.md](docs/测试计划.md) | 测试用例与验收标准 |
 | [docs/使用说明.md](docs/使用说明.md) | 用户使用手册 |
+| [docs/未来方向.md](docs/未来方向.md) | 对照 read-frog 的路线图与待验证清单 |
 
 ## 项目结构
 
