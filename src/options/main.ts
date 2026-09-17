@@ -7,7 +7,7 @@ import type {
 } from "../shared/messages";
 import { BUILT_IN_RULES, sanitizeSiteRules } from "../shared/siteRules";
 import type { SiteRule } from "../shared/siteRules";
-import { exportSettings, getSettings, importSettings, saveSettings } from "../shared/storage";
+import { exportSettings, getSettings, importSettings, saveSettings, SETTING_RANGES } from "../shared/storage";
 import type { ApiConfig, ApiFormat, BatchMode, Settings, TranslationStyle } from "../shared/types";
 
 const FORMAT_INFO: Record<ApiFormat, { url: string; model: string; hint: string }> = {
@@ -200,23 +200,37 @@ async function refreshCacheStats(): Promise<void> {
   }
 }
 
+/** 表单数值解析：parseInt 失败/NaN 回退 fallback，结果钳制到该字段的合法区间。
+ *  区间来自 storage 的 SETTING_RANGES（与导入校验同一份），防止 UI 与导入两套规则。 */
+function rangedInt(input: HTMLInputElement, fallback: number, range: readonly [number, number]) {
+  const parsed = parseInt(input.value, 10);
+  if (Number.isNaN(parsed)) return fallback;
+  return Math.min(range[1], Math.max(range[0], parsed));
+}
+
 async function readForm(): Promise<Settings> {
   const current = await getSettings();
   // temperature 允许为 0（parseFloat 结果 NaN 才回退默认值，0 是合法值不能被 || 吞掉）
   const tempParsed = parseFloat(($("temperature") as HTMLInputElement).value);
+  const tempRange = SETTING_RANGES.temperature;
   const api: ApiConfig = {
     format: select("api-format").value as ApiFormat,
     baseUrl: ($("base-url") as HTMLInputElement).value.trim(),
     apiKey: ($("api-key") as HTMLInputElement).value.trim(),
     model: ($("model") as HTMLInputElement).value.trim(),
-    temperature: Number.isNaN(tempParsed) ? 0.3 : tempParsed,
-    timeoutMs: (parseInt(($("timeout") as HTMLInputElement).value, 10) || 60) * 1000,
-    // 兜底与默认值一致（2），并钳制 ≥1
-    maxConcurrency: Math.max(1, parseInt(($("concurrency") as HTMLInputElement).value, 10) || 2),
-    // 请求启动间隔：默认 500ms，钳制 50–10000，适配限流严格的中转站可调大
-    minRequestIntervalMs: Math.min(
-      10000,
-      Math.max(50, parseInt(($("request-interval") as HTMLInputElement).value, 10) || 500)
+    temperature: Number.isNaN(tempParsed)
+      ? 0.3
+      : Math.min(tempRange[1], Math.max(tempRange[0], tempParsed)),
+    timeoutMs: rangedInt($("timeout") as HTMLInputElement, 60, SETTING_RANGES.timeoutSeconds) * 1000,
+    maxConcurrency: rangedInt(
+      $("concurrency") as HTMLInputElement,
+      2,
+      SETTING_RANGES.maxConcurrency
+    ),
+    minRequestIntervalMs: rangedInt(
+      $("request-interval") as HTMLInputElement,
+      500,
+      SETTING_RANGES.minRequestIntervalMs
     ),
     batchMode: select("batch-mode").value as BatchMode,
     // 自定义附加指令：拼在系统提示词最前（批量协议段保留在其后），限长防提示词膨胀
@@ -264,16 +278,18 @@ async function readForm(): Promise<Settings> {
       translateInput: ($("translate-input") as HTMLInputElement).checked,
       translateHover: ($("translate-hover") as HTMLInputElement).checked,
       contextEnabled: ($("context-enabled") as HTMLInputElement).checked,
-      contextMaxChars: Math.max(
-        0,
-        parseInt(($("context-max-chars") as HTMLInputElement).value, 10) || 3000
+      contextMaxChars: rangedInt(
+        $("context-max-chars") as HTMLInputElement,
+        3000,
+        SETTING_RANGES.contextMaxChars
       ),
       summaryEnabled: ($("summary-enabled") as HTMLInputElement).checked,
-      // 空/非法输入回退默认 6000；显式 0（=长短页都生成）是合法值，不能被 || 吞掉
-      summaryMinChars: (() => {
-        const v = parseInt(($("summary-min-chars") as HTMLInputElement).value, 10);
-        return Number.isNaN(v) ? 6000 : Math.max(0, v);
-      })(),
+      // 显式 0（=长短页都生成）是合法值，不能被 || 吞掉；rangedInt 的 NaN 分支保证这一点
+      summaryMinChars: rangedInt(
+        $("summary-min-chars") as HTMLInputElement,
+        6000,
+        SETTING_RANGES.summaryMinChars
+      ),
       style: (document.querySelector<HTMLInputElement>("input[name='style-theme']:checked")
         ?.value ?? "gray") as TranslationStyle,
       customCss: ($("custom-css") as HTMLTextAreaElement).value.slice(0, 8000),
@@ -304,12 +320,11 @@ async function readForm(): Promise<Settings> {
     cache: {
       ...current.cache,
       // 0 = 永不过期是合法值，不能用 || 兜底吞掉
-      ttlDays: (() => {
-        const parsed = parseInt(($("cache-ttl-days") as HTMLInputElement).value, 10);
-        return Number.isNaN(parsed)
-          ? (current.cache.ttlDays ?? 7)
-          : Math.min(365, Math.max(0, parsed));
-      })(),
+      ttlDays: rangedInt(
+        $("cache-ttl-days") as HTMLInputElement,
+        current.cache.ttlDays ?? 7,
+        SETTING_RANGES.cacheTtlDays
+      ),
     },
   };
 }

@@ -305,13 +305,18 @@ function pathMatches(pathname: string, pattern: string): boolean {
 /** 路径归一：解码百分号转义 + 小写，与 normalizeUrlPattern 的小写模式同口径。
  *  畸形转义（如 "%zz"）会让 decodeURIComponent 抛错，退回原样路径。 */
 function pathnameForMatch(pathname: string): string {
-  let decoded = pathname;
+  return decodePathSafely(pathname).toLowerCase();
+}
+
+/** 模式路径同样解码：地址栏复制来的模式常带 %XX 编码（如 /%E6%96%87%E6%A1%A3），
+ *  而 URL 比对前会先解码——不解码模式侧，这类规则永不命中。两侧同口径后按解码形态比对。 */
+function decodePathSafely(path: string): string {
   try {
-    decoded = decodeURIComponent(pathname);
+    return decodeURIComponent(path);
   } catch {
     // 非法百分号编码：按原样比对
+    return path;
   }
-  return decoded.toLowerCase();
 }
 
 /** 单条模式是否命中 URL（非法模式一律不命中） */
@@ -322,10 +327,10 @@ export function urlMatchesPattern(url: URL, rawPattern: string): boolean {
   const hostPattern = slash === -1 ? normalized : normalized.slice(0, slash);
   const pathPattern = slash === -1 ? "" : normalized.slice(slash);
   if (!hostMatches(url.hostname.toLowerCase(), hostPattern)) return false;
-  // normalizeUrlPattern 已把模式整体小写，pathname 必须同口径归一，
-  // 否则 `/Docs`、`/%E6%96%87%E6%A1%A3` 这类规则永远不命中（大小写敏感的静默失效）
+  // 两侧路径都归一（解码 + 小写）：normalizeUrlPattern 已把模式整体小写，URL 的 pathname
+  // 也须同口径，否则 `/Docs` 这类规则永不命中；模式侧不解码则 /%E6%96%87%E6%A1%A3 永不命中
   if (!pathPattern) return true;
-  return pathMatches(pathnameForMatch(url.pathname), pathPattern);
+  return pathMatches(pathnameForMatch(url.pathname), decodePathSafely(pathPattern));
 }
 
 /** 规则是否命中 URL：matches 至少命中一个，且不落在 excludeMatches 里 */

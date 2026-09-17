@@ -182,6 +182,24 @@ const SUPPORTED_FORMATS = [
   "microsoft",
 ] as const;
 
+/** 数值设置项的合法区间：导入校验与设置页保存钳制共用这一份，与 options.html
+ *  输入框的 min/max 属性保持一致。改区间只动这里，别在两处各写一套数字。 */
+export const SETTING_RANGES = {
+  temperature: [0, 2],
+  /** 设置页以「秒」输入超时（落盘为毫秒），单独存秒区间 */
+  timeoutSeconds: [5, 300],
+  timeoutMs: [5000, 300_000],
+  maxConcurrency: [1, 10],
+  minRequestIntervalMs: [50, 10_000],
+  minTextLength: [0, 200],
+  blockMaxChars: [100, 5000],
+  contextMaxChars: [0, 20_000],
+  summaryMinChars: [0, 100_000],
+  ttsRate: [-50, 100],
+  cacheMaxEntries: [1, 100_000],
+  cacheTtlDays: [0, 365],
+} as const;
+
 /** 导入文件的逐字段校验：只产出「文件里出现且类型合法」的字段补丁（unknown 字段与
  *  类型错乱字段剔除），由 importSettings 以当前设置为底合并落盘。
  *  此前只校验 api.format：手工编辑的文件若把 sites.blacklist 写成字符串等，
@@ -228,10 +246,10 @@ function buildImportPatch(raw: unknown): SettingsPatch {
     baseUrl: str,
     apiKey: str,
     model: str,
-    temperature: numOf(0, 2),
-    timeoutMs: numOf(5000, 300000),
-    maxConcurrency: numOf(1, 10),
-    minRequestIntervalMs: numOf(50, 10000),
+    temperature: numOf(...SETTING_RANGES.temperature),
+    timeoutMs: numOf(...SETTING_RANGES.timeoutMs),
+    maxConcurrency: numOf(...SETTING_RANGES.maxConcurrency),
+    minRequestIntervalMs: numOf(...SETTING_RANGES.minRequestIntervalMs),
     batchMode: enumOf(["lines", "separator"] as const),
     customSystemPrompt: str,
     freeEndpoint: str,
@@ -245,17 +263,17 @@ function buildImportPatch(raw: unknown): SettingsPatch {
       displayMode: enumOf(["bilingual", "translated", "original"] as const),
       autoTranslate: bool,
       autoDetectSource: bool,
-      minTextLength: numOf(0, 200),
-      blockMaxChars: numOf(100, 5000),
+      minTextLength: numOf(...SETTING_RANGES.minTextLength),
+      blockMaxChars: numOf(...SETTING_RANGES.blockMaxChars),
       translateOnSelect: bool,
       translateInput: bool,
       translateHover: bool,
       viewportLazy: bool,
       terminology: strArr,
       contextEnabled: bool,
-      contextMaxChars: numOf(0, 20000),
+      contextMaxChars: numOf(...SETTING_RANGES.contextMaxChars),
       summaryEnabled: bool,
-      summaryMinChars: numOf(0, 100000),
+      summaryMinChars: numOf(...SETTING_RANGES.summaryMinChars),
       style: enumOf(["gray", "outline", "underline", "blur"] as const),
       customCss: str,
       translateAttributes: bool,
@@ -270,7 +288,7 @@ function buildImportPatch(raw: unknown): SettingsPatch {
     tts: pick(r.tts, {
       enabled: bool,
       voice: str,
-      rate: numOf(-50, 100),
+      rate: numOf(...SETTING_RANGES.ttsRate),
     }) as unknown as Partial<Settings["tts"]>,
     security: pick(r.security, {
       encryptApiKey: bool,
@@ -278,8 +296,8 @@ function buildImportPatch(raw: unknown): SettingsPatch {
     }) as unknown as Partial<Settings["security"]>,
     cache: pick(r.cache, {
       enabled: bool,
-      maxEntries: numOf(1, 100000),
-      ttlDays: numOf(0, 365),
+      maxEntries: numOf(...SETTING_RANGES.cacheMaxEntries),
+      ttlDays: numOf(...SETTING_RANGES.cacheTtlDays),
     }) as unknown as Partial<Settings["cache"]>,
   };
   // 备用 API 显式给出对象时才存在（沿用主备字段继承语义：缺的字段拿主 API 补）

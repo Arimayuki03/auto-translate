@@ -155,10 +155,14 @@ async function generateTranslatorSignature(now = new Date()): Promise<string> {
 /** 外部请求硬超时：没有超时的话，网络挂起会让 promise 永不 settle ——
  *  keepAlive 一直被续命、并发槽被永久占用，划词气泡无限转圈。 */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+/** 单次合成请求的计时窗口（含音频响应体读完）。令牌失效重发另起独立窗口，
+ *  避免「首次请求耗尽大半窗口后 401 → 重发只剩零头」把一次可恢复的失败变成超时。 */
 const SYNTH_REQUEST_TIMEOUT_MS = 30_000;
 
 /** 在硬超时内执行一段请求逻辑：signal 透传给 fetch，run 内部请把响应体也读完——
- *  只计时到响应头到达的话，卡死的流式 body 依然会让 promise 永不 settle。 */
+ *  只计时到响应头到达的话，卡死的流式 body 依然会让 promise 永不 settle。
+ *  只在「超时先于业务错误发生」时才替换成超时错误：run 自己抛的错（HTTP 4xx、
+ *  响应格式无效等）带真实原因，不能被笼统的超时文案吞掉。 */
 async function withRequestTimeout<T>(
   timeoutMs: number,
   run: (signal: AbortSignal) => Promise<T>
@@ -168,13 +172,18 @@ async function withRequestTimeout<T>(
   try {
     return await run(controller.signal);
   } catch (err) {
-    if (controller.signal.aborted) {
+    if (controller.signal.aborted && isAbortError(err)) {
       throw new Error(`Edge TTS 请求超时（${timeoutMs}ms）`);
     }
     throw err;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** fetch 收到 abort 时抛 DOMException("AbortError")；其余错误与超时无关，原样上抛 */
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
 }
 
 async function getEndpointToken(): Promise<EndpointToken> {
@@ -300,24 +309,34 @@ export async function synthesizeSpeech(
 
 async function synthOnce(ssml: string): Promise<ArrayBuffer> {
   let token = await getEndpointToken();
-  // 计时作用域覆盖「合成请求 + 音频响应体读取」，含令牌失效后的那一次重发
+  // 重发用独立计时窗口：若与首次请求共用一个 30s 作用域，首次请求耗尽大半窗口后
+  // 返回 401，重发只剩零头时间，一次可恢复的令牌失效会被误报成超时。
   return withRequestTimeout(SYNTH_REQUEST_TIMEOUT_MS, async (signal) => {
     let res = await postSSML(token, ssml, signal);
     if ((res.status === 401 || res.status === 403) && !cachedTokenInvalidated(token)) {
-      // 令牌可能已失效：清缓存重取一次（仅一次，避免风暴）
+      // 令牌可能已失效：清缓存重取一次（仅一次，避免风暴），重发单独计时
       clearEdgeTTSTokenCache();
       token = await getEndpointToken();
-      res = await postSSML(token, ssml, signal);
+      return withRequestTimeout(SYNTH_REQUEST_TIMEOUT_MS, (retrySignal) =>
+        finishSynthFrom(postSSML(token, ssml, retrySignal))
+      );
     }
-    if (!res.ok) {
-      throw new Error(`Edge TTS 合成失败（HTTP ${res.status}）`);
-    }
-    const audio = await res.arrayBuffer();
-    if (audio.byteLength === 0) {
-      throw new Error("Edge TTS 返回了空音频（当前声音可能不支持该语言）");
-    }
-    return audio;
+    return finishSynthFrom(Promise.resolve(res));
   });
+}
+
+/** 合成响应收尾：非 2xx 报错、空音频报错。挂在计时作用域内调用，
+ *  保证音频响应体也在窗口内读完（卡死的 body 同样不放过）。 */
+async function finishSynthFrom(pending: Promise<Response>): Promise<ArrayBuffer> {
+  const res = await pending;
+  if (!res.ok) {
+    throw new Error(`Edge TTS 合成失败（HTTP ${res.status}）`);
+  }
+  const audio = await res.arrayBuffer();
+  if (audio.byteLength === 0) {
+    throw new Error("Edge TTS 返回了空音频（当前声音可能不支持该语言）");
+  }
+  return audio;
 }
 
 function cachedTokenInvalidated(token: EndpointToken): boolean {

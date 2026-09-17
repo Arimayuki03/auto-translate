@@ -14,6 +14,7 @@ import {
   getSettings,
   importSettings,
   DEFAULT_SETTINGS,
+  SETTING_RANGES,
 } from "../src/shared/storage";
 import type { Settings } from "../src/shared/types";
 import { splitBySentences } from "../src/content/extractor";
@@ -107,6 +108,21 @@ describe("API Key 落盘混淆", () => {
 
 // ===== 2. blockMaxChars 越界不再导致死循环 =====
 
+describe("SETTING_RANGES 区间契约", () => {
+  // 防止有人只改一处：UI 保存钳制、导入校验、options.html 的 min/max 三者共用这份常量
+  it("关键区间与 UI 输入框能力一致", () => {
+    expect(SETTING_RANGES.maxConcurrency).toEqual([1, 10]);
+    expect(SETTING_RANGES.timeoutMs).toEqual([5000, 300_000]);
+    // UI 按秒输入（min=5 max=300），落盘乘 1000 后须恰好落在 ms 区间内
+    expect(SETTING_RANGES.timeoutSeconds).toEqual([5, 300]);
+    expect(SETTING_RANGES.timeoutMs[0]).toBe(SETTING_RANGES.timeoutSeconds[0] * 1000);
+    expect(SETTING_RANGES.timeoutMs[1]).toBe(SETTING_RANGES.timeoutSeconds[1] * 1000);
+    expect(SETTING_RANGES.minRequestIntervalMs).toEqual([50, 10_000]);
+    expect(SETTING_RANGES.temperature).toEqual([0, 2]);
+    expect(SETTING_RANGES.blockMaxChars).toEqual([100, 5000]);
+  });
+});
+
 describe("blockMaxChars 越界防护", () => {
   const longText = "句子。".repeat(500); // 远超任何 maxChars，必然进入切分循环
 
@@ -191,6 +207,12 @@ describe("host 通配符匹配", () => {
     expect(
       urlMatchesPattern(new URL("https://a.com/" + encodeURIComponent("文档") + "/x"), "a.com/文档")
     ).toBe(true);
+    // 模式侧带百分号编码（从地址栏复制）同样要命中：URL 侧解码，模式侧也须解码
+    expect(
+      urlMatchesPattern(new URL("https://a.com/文档/x"), "a.com/%E6%96%87%E6%A1%A3")
+    ).toBe(true);
+    // 两侧都不解码的畸形转义按字面原样比对，不抛错
+    expect(urlMatchesPattern(new URL("https://a.com/%zz"), "a.com/%zz")).toBe(true);
   });
 });
 

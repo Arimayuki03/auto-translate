@@ -177,6 +177,74 @@ describe("synthesizeSpeech 合成请求", () => {
     vi.stubGlobal("fetch", fetchMock);
     await expect(synthesizeSpeech("空", "zh-CN")).rejects.toThrow(/空音频/);
   });
+
+  it("业务错误不被超时文案吞掉（实现回归检测：把 isAbortError 放宽成 aborted 即判全部超时）", async () => {
+    // withRequestTimeout 只允许在「超时先于业务错误发生」时报超时：
+    // fetch 正常返回 HTTP 500 → run 抛「合成失败」，此时计时器未触发、signal 未 aborted，
+    // 必须原样抛出 HTTP 错误。若实现退回「signal.aborted 即超时」的笼统判断，
+    // 本用例借「计时器已清理」的时序差保证仍指向 HTTP 500 而非超时。
+    const fetchMock = routeFetch((url) =>
+      url.includes("dev.microsofttranslator.com")
+        ? tokenResponse("t1")
+        : new Response("server error", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(synthesizeSpeech("错", "zh-CN")).rejects.toThrow(/合成失败（HTTP 500）/);
+  });
+
+  it("令牌失效重发拥有独立计时窗口：重发前等待数秒也不吃掉重发自身的 30s", async () => {
+    // 旧实现把首次请求与重发放在同一个 withRequestTimeout 作用域：
+    // 首次请求若耗掉大半窗口后返回 401，重发只剩零头时间，可恢复的令牌失效被误报成超时。
+    // 现在 401 后清缓存重取令牌 + 重发各自计时；这里用真实计时器验证重发全程畅通。
+    let synthCalls = 0;
+    let tokenCount = 0;
+    const fetchMock = routeFetch(async (url) => {
+      if (url.includes("dev.microsofttranslator.com")) {
+        tokenCount++;
+        return tokenResponse(`t${tokenCount}`);
+      }
+      synthCalls++;
+      // 首次合成请求挂 3 秒才返回 401（老实现若共用窗口，剩余 27s 仍够——
+      // 所以再把首次返回后的令牌获取也拖 3 秒，压缩共用窗口下的余量并确保语义成立）
+      if (synthCalls === 1) {
+        await new Promise((r) => setTimeout(r, 3000));
+        return new Response("", { status: 401 });
+      }
+      return audioResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await synthesizeSpeech("重试", "zh-CN");
+    expect(res.audioBase64.length).toBeGreaterThan(0);
+    expect(synthCalls).toBe(2);
+    expect(tokenCount).toBe(2);
+  });
+
+  it("合成请求挂起超过 30s 被硬超时打断（计时覆盖到响应体）", async () => {
+    vi.useFakeTimers();
+    try {
+      // 模拟真实 fetch：signal abort 时以 AbortError 拒绝（真实浏览器行为）
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("dev.microsofttranslator.com")) return tokenResponse("t1");
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("This operation was aborted", "AbortError"))
+          );
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = synthesizeSpeech("挂起", "zh-CN");
+      const assertion = expect(pending).rejects.toThrow(/请求超时（30000ms）/);
+      // 先推 1s：等令牌签名链（crypto.subtle 真异步）走完、30s 超时计时器注册进 fake clock；
+      // 再推 60s：覆盖「注册点 + 30s 窗口」。一次性推 30s 会错过中途注册的计时器。
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("TTS 熔断", () => {

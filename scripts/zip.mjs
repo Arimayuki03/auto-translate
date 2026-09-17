@@ -40,7 +40,9 @@ const sourceMtime = Math.max(
 if (sourceMtime > distMtime) {
   console.error(
     `dist/ 早于源码（源码 ${new Date(sourceMtime).toISOString()} > 构建 ${new Date(distMtime).toISOString()}）。\n` +
-      "请先运行 npm run build 再打包，否则会发布过期代码。"
+      "请先运行 npm run build 再打包，否则会发布过期代码。\n" +
+      "注意：git checkout / 切分支会把源码 mtime 刷新为当前时间，之后即使 dist 内容仍然有效也会被拦下——" +
+      "这是保守方向的误报，重跑一次 npm run build 即可。"
   );
   process.exit(1);
 }
