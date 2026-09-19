@@ -16,8 +16,8 @@
 
 ## 技术栈
 
-- Edge / Chrome 扩展（Manifest V3）
-- TypeScript + Vite（@crxjs/vite-plugin）
+- Edge / Chrome 扩展（Manifest V3，Chrome 109+）
+- TypeScript + Vite（@crxjs/vite-plugin，内容脚本 standalone IIFE 产出）
 
 ## 快速开始（开发调试）
 

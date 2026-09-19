@@ -74,76 +74,96 @@ async function requestTranslate(
     else signal.addEventListener("abort", onSessionAbort);
   }
   let res: Response;
+  // 响应体读取必须留在超时/中止作用域内：只计时到响应头到达的话，卡死的 body
+  // 依然会让 promise 永不 settle（与 http.ts postJson / googlefree 同一套约定）。
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(texts.map(escapeHtml)),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      if (signal?.aborted) throw new Error("cancelled");
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(texts.map(escapeHtml)),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        if (signal?.aborted) throw new Error("cancelled");
+        throw new ApiError(
+          "timeout",
+          `Microsoft 免费翻译请求超时（${Math.round(timeoutMs / 1000)}s）`,
+          makeDiagnostic("microsoft", url, { code: "timeout" })
+        );
+      }
       throw new ApiError(
-        "timeout",
-        `Microsoft 免费翻译请求超时（${Math.round(timeoutMs / 1000)}s）`,
-        makeDiagnostic("microsoft", url, { code: "timeout" })
+        "network",
+        `Microsoft 免费翻译网络不可达：${err instanceof Error ? err.message : String(err)}`,
+        makeDiagnostic("microsoft", url, { code: "network" })
       );
     }
-    throw new ApiError(
-      "network",
-      `Microsoft 免费翻译网络不可达：${err instanceof Error ? err.message : String(err)}`,
-      makeDiagnostic("microsoft", url, { code: "network" })
-    );
+    // 读体本身失败（连接中断/超时中止打断悬挂 body）不得吞成空串：
+    // AbortError 按超时/中止分类，其余按可重试 network 错误抛出
+    const raw = await res.text().catch((err: unknown) => {
+      if (err instanceof Error && err.name === "AbortError") {
+        if (signal?.aborted) throw new Error("cancelled");
+        throw new ApiError(
+          "timeout",
+          `Microsoft 免费翻译请求超时（${Math.round(timeoutMs / 1000)}s）`,
+          makeDiagnostic("microsoft", url, { code: "timeout" })
+        );
+      }
+      throw new ApiError(
+        "network",
+        `Microsoft 免费翻译读取响应体失败：${err instanceof Error ? err.message : String(err)}`,
+        makeDiagnostic("microsoft", url, { code: "network" })
+      );
+    });
+    if (!res.ok) {
+      const code =
+        res.status === 429
+          ? "rate_limit"
+          : res.status >= 500
+            ? "server"
+            : res.status === 404
+              ? "not_found"
+              : "bad_request";
+      const label = code === "rate_limit" ? "频率限制" : code === "server" ? "服务端错误" : "请求失败";
+      throw new ApiError(code, `Microsoft 免费翻译${label}（${res.status}）`, {
+        ...makeDiagnostic("microsoft", url, {
+          status: res.status,
+          responsePreview: raw.slice(0, 300),
+        }),
+        code,
+      });
+    }
+    let data: MicrosoftTranslation[];
+    try {
+      data = JSON.parse(raw) as MicrosoftTranslation[];
+    } catch {
+      throw new ApiError("bad_response", "Microsoft 免费翻译响应不是有效 JSON", {
+        ...makeDiagnostic("microsoft", url, { status: res.status, responsePreview: raw.slice(0, 300) }),
+        code: "bad_response",
+      });
+    }
+    if (!Array.isArray(data) || data.length !== texts.length) {
+      throw new ApiError(
+        "bad_response",
+        `Microsoft 免费翻译响应段数不符（期望 ${texts.length}，实际 ${Array.isArray(data) ? data.length : "非数组"}）`,
+        { ...makeDiagnostic("microsoft", url, { status: res.status }), code: "bad_response" }
+      );
+    }
+    return data.map((item, i) => {
+      const text = item?.translations?.[0]?.text;
+      if (typeof text !== "string") {
+        throw new ApiError("bad_response", `Microsoft 免费翻译第 ${i + 1} 段返回空结果`, {
+          ...makeDiagnostic("microsoft", url, { status: res.status }),
+          code: "bad_response",
+        });
+      }
+      return unescapeHtml(text);
+    });
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onSessionAbort);
   }
-  const raw = await res.text().catch(() => "");
-  if (!res.ok) {
-    const code =
-      res.status === 429
-        ? "rate_limit"
-        : res.status >= 500
-          ? "server"
-          : res.status === 404
-            ? "not_found"
-            : "bad_request";
-    const label = code === "rate_limit" ? "频率限制" : code === "server" ? "服务端错误" : "请求失败";
-    throw new ApiError(code, `Microsoft 免费翻译${label}（${res.status}）`, {
-      ...makeDiagnostic("microsoft", url, {
-        status: res.status,
-        responsePreview: raw.slice(0, 300),
-      }),
-      code,
-    });
-  }
-  let data: MicrosoftTranslation[];
-  try {
-    data = JSON.parse(raw) as MicrosoftTranslation[];
-  } catch {
-    throw new ApiError("bad_response", "Microsoft 免费翻译响应不是有效 JSON", {
-      ...makeDiagnostic("microsoft", url, { status: res.status, responsePreview: raw.slice(0, 300) }),
-      code: "bad_response",
-    });
-  }
-  if (!Array.isArray(data) || data.length !== texts.length) {
-    throw new ApiError(
-      "bad_response",
-      `Microsoft 免费翻译响应段数不符（期望 ${texts.length}，实际 ${Array.isArray(data) ? data.length : "非数组"}）`,
-      { ...makeDiagnostic("microsoft", url, { status: res.status }), code: "bad_response" }
-    );
-  }
-  return data.map((item, i) => {
-    const text = item?.translations?.[0]?.text;
-    if (typeof text !== "string") {
-      throw new ApiError("bad_response", `Microsoft 免费翻译第 ${i + 1} 段返回空结果`, {
-        ...makeDiagnostic("microsoft", url, { status: res.status }),
-        code: "bad_response",
-      });
-    }
-    return unescapeHtml(text);
-  });
 }
 
 /** 免费端点请求启动限速：相邻请求最小间隔（googlefree 同思路，独立计数） */

@@ -1,10 +1,11 @@
 /**
  * e2e 冒烟：playwright（persistent context + Chromium 新 headless）加载 dist/ 扩展，
  * 拦截免费通道 API 返回固定译文，走一遍「翻译 → 译文出现 → 切模式 → 还原」核心链路。
- * 需要 `npm run build` 先产出 dist/ 与 playwright chromium；无浏览器环境时自动跳过。
+ * 需要 `npm run build` 先产出 dist/ 与 playwright chromium；
+ * 无浏览器/dist 或设置 SKIP_E2E=1 时用 it.skipIf 跳过（报告中显示为 skipped 而非 passed）。
  */
 import { createServer, type Server } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,9 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const distDir = join(here, "..", "dist");
+/** 守卫条件：浏览器可用且 dist 存在才真正跑；SKIP_E2E=1 时同样跳过。 */
+const canRunE2e = (): boolean =>
+  !process.env.SKIP_E2E && browserAvailable && existsSync(distDir);
 
 const TEST_PAGE = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"></head>
@@ -27,6 +31,26 @@ let context: BrowserContext | undefined;
 let server: Server | undefined;
 let baseUrl = "";
 
+// 浏览器探测必须在模块顶层完成（而非 beforeAll）：it.skipIf 的条件在收集阶段求值，
+// 早于 beforeAll。SKIP_E2E=1 时直接不探测；launch 失败则置 false 并 warn 原因便于 CI 排查。
+if (!process.env.SKIP_E2E) {
+  try {
+    // MV3 扩展必须用 persistent context + Chromium 新 headless（channel "chromium"）
+    context = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "e2e-it-")), {
+      channel: "chromium",
+      headless: true,
+      args: [`--disable-extensions-except=${distDir}`, `--load-extension=${distDir}`],
+    });
+    browserAvailable = true;
+  } catch (err) {
+    browserAvailable = false; // 无浏览器环境（CI 未装）：用例经 it.skipIf 跳过并在报告中可见
+    console.warn(
+      "[e2eSmoke] browser probe failed, e2e cases will be skipped:",
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
 beforeAll(async () => {
   // 测试页 http 服务：content_scripts只匹配 http(s)，data: URL 不会注入
   server = createServer((req, res) => {
@@ -37,30 +61,19 @@ beforeAll(async () => {
   const port = (server.address() as { port: number }).port;
   baseUrl = `http://127.0.0.1:${port}/`;
 
-  if (process.env.SKIP_E2E) return;
-  try {
-    // MV3 扩展必须用 persistent context + Chromium 新 headless（channel "chromium"）
-    context = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "e2e-it-")), {
-      channel: "chromium",
-      headless: true,
-      args: [`--disable-extensions-except=${distDir}`, `--load-extension=${distDir}`],
+  if (!browserAvailable) return;
+  // 免费通道 mock 在 context 级注册一次（覆盖所有用例新开的页面，不随用例叠加）：
+  // 任何 translate.googleapis.com 请求都返回固定译文
+  await context!.route("**://translate.googleapis.com/**", (route) => {
+    const url = new URL(route.request().url());
+    const q = url.searchParams.get("q") ?? "";
+    const translated = `「${q}」`;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([[[translated, q, null, null, 10]], null, "en"]),
     });
-    browserAvailable = true;
-    // 免费通道 mock 在 context 级注册一次（覆盖所有用例新开的页面，不随用例叠加）：
-    // 任何 translate.googleapis.com 请求都返回固定译文
-    await context.route("**://translate.googleapis.com/**", (route) => {
-      const url = new URL(route.request().url());
-      const q = url.searchParams.get("q") ?? "";
-      const translated = `「${q}」`;
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify([[[translated, q, null, null, 10]], null, "en"]),
-      });
-    });
-  } catch {
-    browserAvailable = false; // 无浏览器环境（CI 未装）：跳过
-  }
+  });
 }, 120_000);
 
 afterAll(async () => {
@@ -147,8 +160,7 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
     }, v);
   }
 
-  it("总开关：关闭立即还原页面并收起工具条；重新开启恢复翻译（无需刷新）", async () => {
-    if (!browserAvailable) return;
+  it.skipIf(!canRunE2e())("总开关：关闭立即还原页面并收起工具条；重新开启恢复翻译（无需刷新）", async () => {
     const p = await freshPage();
     await translatePage(p);
     expect(
@@ -181,8 +193,7 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
     ).toBe(true);
   }, 180_000);
 
-  it("翻译 → 译文出现 → 状态完成 →还原", async () => {
-    if (!browserAvailable) return;
+  it.skipIf(!canRunE2e())("翻译 → 译文出现 → 状态完成 →还原", async () => {
     const p = await freshPage();
     await translatePage(p);
 
@@ -209,8 +220,7 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
     expect(restored).not.toContain("「This paragraph");
   }, 180_000);
 
-  it("显示模式切换：双语 → 仅译文（原文原位替换）→ 双语（原文恢复）", async () => {
-    if (!browserAvailable) return;
+  it.skipIf(!canRunE2e())("显示模式切换：双语 → 仅译文（原文原位替换）→ 双语（原文恢复）", async () => {
     const p = await freshPage();
     await translatePage(p);
 
@@ -248,8 +258,7 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
     expect(true).toBe(true);
   }, 180_000);
 
-  it("service worker 已启动", async () => {
-    if (!browserAvailable) return;
+  it.skipIf(!canRunE2e())("service worker 已启动", async () => {
     if (!context) throw new Error("SKIP");
     // SW 异步注册：轮询而非 waitForEvent（可能在我们监听前就已启动）
     const deadline = Date.now() + 20_000;

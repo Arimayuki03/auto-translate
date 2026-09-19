@@ -126,7 +126,7 @@ function isRetryable(err: unknown): boolean {
 
 /** API 级硬失败（鉴权失败 / 模型不存在 / 参数错误）：与请求粒度无关，
  *  整批、小批量、逐段用的是同一个 Key 与同一份请求体，重发必然同样失败。
- *  这类错误必须短路，否则会把 1 次 401 放大成 1+N 次（见 translateBatch 降级链）。 */
+ *  这类错误必须短路，否则会把 1 次 401 放大成 1+N 次（见 translateInner 降级链）。 */
 function isHardApiFailure(err: unknown): boolean {
   return err instanceof ApiError && !err.retryable;
 }
@@ -282,6 +282,9 @@ export class TranslateService {
 
     // 记录批量/逐段遇到的首个可诊断错误：全部失败时向上抛出，让内容与工具条拿到具体错误类型
     let firstError: unknown;
+    /** 请求过且失败的段下标（失败段写 ""）：A2——allFailed 按 toFetch 全集判定，
+     *  部分成功时保留已写入 results 的成功译文，只让失败段走失败路径。 */
+    const failedSegments = new Set<number>();
     /** 待请求段落（{结果下标, 原文}）：整批 → 小批量 → 逐段 三级降级，逐级收窄 */
     let pending: Array<{ idx: number; text: string }> = toFetch.map((idx) => ({
       idx,
@@ -340,10 +343,18 @@ export class TranslateService {
       } catch (err) {
         // API 失败：错误先记下，若降级后仍全失败则上抛
         if (!firstError) firstError = err;
-        // 硬失败短路：鉴权/404/参数错误下，逐段降级只会把 1 次 401 变成 1+N 次，
-        // 每次还要过一遍请求启动限速（默认 500ms），既烧风控又拖死页面。
-        // 可重试类（429/5xx/网络/超时）保留降级——小批量确实可能挤过限流。
-        if (isHardApiFailure(err)) throw err;
+        // 硬失败（鉴权/404/参数错误）同一 Key/同一请求体重发必然同样失败；
+        // callApi 内部已按「下一个候选」切过免费互切与备用通道，仍失败说明所有候选
+        // 都是硬失败——小批量/逐段重发只会把 1 次失败放大成 1+N 次。不再重发：
+        // 把剩余段标记为失败后走统一收尾（中止归一化 + allFailed 判定，D3 不再裸逃逸）。
+        if (isHardApiFailure(err)) {
+          for (const p of pending) {
+            results[p.idx] = "";
+            failedSegments.add(p.idx);
+          }
+          pending = [];
+        }
+        // 可重试类（429/5xx/网络/超时）继续降级——小批量确实可能挤过限流。
       }
 
       // 仅「响应正常但解析失败」才值得拆小批量；API 报错（鉴权/网络/限流）拆了也没用
@@ -363,9 +374,18 @@ export class TranslateService {
               }
               return group;
             } catch (err) {
+              // 中止原样上抛（中止不归入「失败段」，避免污染部分成功判定）
+              if (err instanceof TranslationCancelledError) throw err;
               if (!firstError) firstError = err;
-              // 同上：硬失败不再往逐段降级带（借 Promise.all 直接中断整批）
-              if (isHardApiFailure(err)) throw err;
+              // 子批硬失败同样短路：callApi 已切完所有候选，重发必然同样失败。
+              // 该组标记失败（A2：其他组成功段保留），不借 Promise.all 逃逸出收尾。
+              if (isHardApiFailure(err)) {
+                for (const p of group) {
+                  results[p.idx] = "";
+                  failedSegments.add(p.idx);
+                }
+                return [] as Array<{ idx: number; text: string }>;
+              }
               return group;
             }
           })
@@ -389,14 +409,17 @@ export class TranslateService {
           })
           .catch((err) => {
             results[idx] = "";
+            failedSegments.add(idx);
             if (!firstError) firstError = err;
           })
       )
     );
     // 会话被中止 → 抛中止错误（不触发重试/备用/失败上报）
     if (signal?.aborted) throw new TranslationCancelledError();
-    // 需要请求的段落全部失败 → 抛出带错误类型/诊断的错误，而不是静默返回空串
-    const allFailed = pending.length > 0 && pending.every(({ idx }) => results[idx] === "");
+    // A2：allFailed 按 toFetch 全集判定（而非降级后剩余的 pending）——
+    // 只有请求过的段一个都没成功（成功段数 === 0）才整批上抛；
+    // 部分成功时保留已写入 results 的译文，失败段维持 ""（内容侧按既有失败口径渲染）
+    const allFailed = toFetch.length > 0 && failedSegments.size === toFetch.length;
     if (allFailed && firstError && !(firstError instanceof TranslationCancelledError)) {
       throw firstError;
     }
@@ -480,15 +503,16 @@ export class TranslateService {
         throw new TranslationCancelledError();
       }
       // 与 callApi 同一套降级顺序：免费通道互切 → 备用 API；
-      // 两者都仅在「尚未产出增量」时值得切（已出增量的失败只能上抛，重试会重复文本）
-      if (isRetryable(err) && !emitted) {
+      // 两者都仅在「尚未产出增量」时值得切（已出增量的失败只能上抛，重试会重复文本）。
+      // B1：切换门 =「通道还有下一个候选」——主通道硬失败同样要试下一个候选。
+      if (!emitted) {
         const sibling = freeSiblingApi(settings);
         if (sibling) {
           try {
             return await this.finishStream(targetLang, text, await attempt(sibling));
           } catch (siblingErr) {
             if (signal?.aborted) throw new TranslationCancelledError();
-            if (settings.backupApi && isRetryable(siblingErr) && !emitted) {
+            if (settings.backupApi && !emitted) {
               try {
                 return await this.finishStream(targetLang, text, await attempt(settings.backupApi));
               } catch (backupErr) {
@@ -779,15 +803,19 @@ export class TranslateService {
     try {
       return await attempt(settings.api);
     } catch (err) {
-      // 免费通道自动互切：主通道是 googlefree/microsoft 之一且未配置备用 API 时，
-      // 可重试失败（限流/网络/服务端）自动切到另一个免费通道再试一次
+      // 会话中止（fetch 层的 "cancelled"）不是 API 失败：不触发通道切换，原样上抛
+      // 由上层归一化为 TranslationCancelledError（与流式路径同一约定）
+      const cancelled = err instanceof Error && err.message === "cancelled";
+      // B1：通道切换门 =「通道还有下一个候选」——主通道硬失败（401/404/bad_response 等，
+      // 备用通道可能是另一个服务商/另一份 Key）同样要试备用，而不是整条降级链失效；
+      // isRetryable 只用于同一通道内（withRetry）的重试/短路决策，不拦跨通道切换。
       const sibling = freeSiblingApi(settings);
-      if (sibling && isRetryable(err)) {
+      if (sibling && !cancelled) {
         try {
           return await attempt(sibling);
         } catch (siblingErr) {
           // 互切也失败：有备用 API 则继续走备用，否则上抛并标注来源
-          if (settings.backupApi && isRetryable(siblingErr)) {
+          if (settings.backupApi) {
             try {
               return await attempt(settings.backupApi);
             } catch (backupErr) {
@@ -797,7 +825,7 @@ export class TranslateService {
           throw withErrorSource(siblingErr, "main");
         }
       }
-      if (settings.backupApi && isRetryable(err)) {
+      if (settings.backupApi && !cancelled) {
         try {
           return await attempt(settings.backupApi);
         } catch (backupErr) {
@@ -805,7 +833,7 @@ export class TranslateService {
           throw withErrorSource(backupErr, "backup");
         }
       }
-      // 仅主 API 失败（不可重试或未配置备用）：标注「主 API」，避免误报为备用/免费通道错误
+      // 仅主 API 失败（未配置任何备用候选）：标注「主 API」，避免误报为备用/免费通道错误
       throw withErrorSource(err, "main");
     }
   }
@@ -844,11 +872,18 @@ export class TranslateService {
     return ch;
   }
 
-  /** 设置刷新（请求间隔/并发变化）时同步到全部已建通道；新通道按新值创建 */
+  /** 设置刷新（请求间隔/并发变化）时同步到全部已建通道；新通道按新值创建。
+   *  C8：处于 429 暂停期（pausedUntil > now）的通道保持容量 1 不被覆盖——
+   *  否则下一次翻译入口的 configureChannels 会把「容量降到 1」的后探针惩罚抹掉，
+   *  暂停一到期就恢复满容量 burst；暂停到期后的下一次 configure 自然恢复容量。 */
   private configureChannels(rate: number, capacity: number): void {
     this.channelRate = rate;
     this.channelCapacity = capacity;
-    for (const ch of this.channels.values()) ch.bucket.configure(rate, capacity);
+    const now = Date.now();
+    for (const ch of this.channels.values()) {
+      if (ch.pausedUntil > now) continue;
+      ch.bucket.configure(rate, capacity);
+    }
   }
 
   /** 429 队列级冷却（仅限触发限流的通道）：暂停窗口内不放行该通道新请求，

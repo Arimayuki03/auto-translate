@@ -300,11 +300,20 @@ function buildImportPatch(raw: unknown): SettingsPatch {
       ttlDays: numOf(...SETTING_RANGES.cacheTtlDays),
     }) as unknown as Partial<Settings["cache"]>,
   };
-  // 备用 API 显式给出对象时才存在（沿用主备字段继承语义：缺的字段拿主 API 补）
-  if (r.backupApi && typeof r.backupApi === "object") {
+  // 备用 API 显式给出对象时才存在（沿用主备字段继承语义：缺的字段拿主 API 补）。
+  // C6：数组不是合法配置；完全空对象会被合并成「主 API 完整克隆」，下游
+  // translate.ts 的 freeSiblingApi 据 settings.backupApi 存在性判短路，
+  // 免费互切就此被静默禁用——两者都视为「未配置」，不产出 backupApi 补丁。
+  const backupRaw = r.backupApi;
+  if (
+    backupRaw &&
+    typeof backupRaw === "object" &&
+    !Array.isArray(backupRaw) &&
+    Object.keys(backupRaw).length > 0
+  ) {
     patch.backupApi = {
       ...patch.api,
-      ...pick(r.backupApi, apiSpec),
+      ...pick(backupRaw, apiSpec),
     } as unknown as Partial<ApiConfig>;
   }
   return patch;

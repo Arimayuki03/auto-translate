@@ -3,7 +3,20 @@ import { crx } from "@crxjs/vite-plugin";
 import manifest from "./manifest.json";
 
 export default defineConfig({
-  plugins: [crx({ manifest })],
+  plugins: [
+    crx({
+      manifest,
+      // B4：把内容脚本入口打成自包含 IIFE。默认路径下 @crxjs 会为普通 module 型
+      // 内容脚本生成 loader，经 chrome.runtime.getURL() 动态 import 内容 chunk，
+      // 从而把这些 chunk（含 storage-* 的 Key 混淆实现）硬编码进
+      // web_accessible_resources（matches http/https 全开、use_dynamic_url: false），
+      // 任意网页都能 fetch 客户端逻辑做指纹化。standaloneFiles 让整个模块图内联进
+      // 单文件 IIFE，内容脚本不再需要 loader 导入，WAR 段随之整段消失。
+      contentScripts: {
+        standaloneFiles: ["src/content/index.ts"],
+      },
+    }),
+  ],
   build: {
     outDir: "dist",
     // 彻底不出 sourcemap。此前是 true：@crxjs 会把产物里的每个 .map 自动写进

@@ -117,13 +117,14 @@ export class Renderer {
     this.applyToContainer(unit.container);
   }
 
-  /** 译文就绪：填充（复用占位，无占位或占位失效时新建插入） */
-  fill(unit: TranslationUnit, chunkResults: string[]): void {
-    if (!unit.container.isConnected) return; // 回填校验：容器被页面改动/移除则丢弃
+  /** 译文就绪：填充（复用占位，无占位或占位失效时新建插入）。
+   *  返回是否真正写入（B7）：容器已脱离文档 / 控件空译文保留原文时返回 false，
+   *  引擎据此不把该文本记为「已译」——否则同文本此后被去重口径永久跳过。 */
+  fill(unit: TranslationUnit, chunkResults: string[]): boolean {
+    if (!unit.container.isConnected) return false; // 回填校验：容器被页面改动/移除则丢弃
     // 控件（按钮/下拉选项）：仅文本原位替换，不插入元素、不改结构，交互不受影响
     if (unit.textOnly) {
-      this.fillTextOnly(unit, chunkResults);
-      return;
+      return this.fillTextOnly(unit, chunkResults);
     }
     let el = this.byContainer.get(unit.container);
     if (!el || !el.isConnected) {
@@ -158,6 +159,7 @@ export class Renderer {
     this.textTranslations.set(unit.text, (el.textContent ?? "").trim());
     this.applyToContainer(unit.container);
     this.retryPendingSplits(); // 链接译文迟到：重试等待它的父块拆段嵌入
+    return true;
   }
 
   /** 任何回填后重试挂起的父块拆段（链接单元被去重跳过/批次乱序时靠这里收敛） */
@@ -208,14 +210,15 @@ export class Renderer {
 
   /** 控件（按钮/下拉选项）填充：仅替换文本节点，不插元素不改结构（保住图标与点击交互）。
    *  三种显示模式下都展示译文（结构上无法同时容纳双语）；原文存 data-it-ctl-orig，
-   *  译文存 data-it-ctl-trans，供模式切换与还原使用。 */
-  private fillTextOnly(unit: TranslationUnit, chunkResults: string[]): void {
+   *  译文存 data-it-ctl-trans，供模式切换与还原使用。
+   *  返回是否真正写入：空译文保留原文时不写，调用方不计成功（B7）。 */
+  private fillTextOnly(unit: TranslationUnit, chunkResults: string[]): boolean {
     const c = unit.container;
     const trans = chunkResults
       .map((s) => s.trim())
       .filter(Boolean)
       .join(" ");
-    if (!trans) return; // 空译文保留原文
+    if (!trans) return false; // 空译文保留原文
     if (!c.hasAttribute("data-it-ctl-orig")) {
       c.setAttribute("data-it-ctl-orig", JSON.stringify(captureTextNodes(c)));
     }
@@ -226,6 +229,7 @@ export class Renderer {
     // 控件译文可能正被某个挂起的父块拆段借用（同文本链接被去重跳过的场景）
     this.textTranslations.set(unit.text, trans);
     this.retryPendingSplits();
+    return true;
   }
 
   /** 译文元素字体对齐原文：包裹层里译文与原文是兄弟，CSS 继承只到包裹层父级，
@@ -993,13 +997,18 @@ function captureTextNodes(el: HTMLElement): string[] {
 
 /** 用译文替换目标元素内的文本节点：第一个非空节点承载全部译文，其余清空。
  *  元素子节点本身不动；保护子树（链接/图标/控件）内的文字原样保留。
- *  nodes：调用方已收集的节点（与快照同一次收集，保证捕获/替换一一对应） */
+ *  nodes：调用方已收集的节点（与快照同一次收集，保证捕获/替换一一对应）。
+ *  译文与捕获快照的完整原文一致时逐节点原样保留（等价 no-op，B9）：
+ *  免译哨兵回显（后台对不需翻译的段返回原文）走这里会清空其余节点，
+ *  表现为段落被可见地截断——原文没换，内容却丢了。 */
 function applyTextNodes(target: HTMLElement, translation: string, nodes?: Text[]): void {
   const list = nodes ?? collectTextNodes(target);
   if (list.length === 0) {
     target.insertBefore(document.createTextNode(translation), target.firstChild);
     return;
   }
+  const original = list.map((n) => n.textContent ?? "").join("");
+  if (original === translation || original.trim() === translation.trim()) return;
   const hostIdx = list.findIndex((n) => (n.textContent ?? "").trim() !== "");
   const host = hostIdx >= 0 ? hostIdx : 0;
   list.forEach((n, i) => {

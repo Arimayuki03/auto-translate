@@ -6,9 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 同一分支/PR 的新推送取消仍在跑的旧 run，避免排队与浪费
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -22,14 +31,19 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit tests
-        run: npm test
-
       - name: Lint
         run: npm run lint
 
+      # e2e（tests/e2eSmoke.test.ts）加载 dist/ 扩展：build 必须先于 test，
+      # 且 CI 需要 chromium；dist 被 gitignore，不 build 则 e2e 只会 skip
       - name: Build
         run: npm run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Test
+        run: npm test
 
       - name: Package zip
         run: node scripts/zip.mjs
@@ -39,3 +53,5 @@ jobs:
         with:
           name: auto-translate-extension
           path: release/*.zip
+          retention-days: 14
+          if-no-files-found: error

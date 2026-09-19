@@ -266,13 +266,149 @@ describe("HTTP 错误归类", () => {
   });
 });
 
+describe("响应体读取（A1/B2 回归：读体必须在超时/中止作用域内，失败不得吞成空串）", () => {
+  /** 构造一个响应头已到、但读体按给定原因失败的 Response（模拟悬挂/中断的 body） */
+  function brokenBodyResponse(rejectReason: unknown, rejectAfterMs = 5): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => controller.error(rejectReason), rejectAfterMs);
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+
+  it("postJson：读体 reject（连接中断）→ 可重试的 network 错误，文案说明读取响应体失败", async () => {
+    stubFetch(() => brokenBodyResponse(new TypeError("network error during body read")));
+    try {
+      await postJson("https://example.test/v1/chat/completions", {}, {}, 60000, "openai");
+      expect.unreachable("应抛出 ApiError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApiError);
+      const e = err as ApiError;
+      expect(e.code).toBe("network");
+      expect(e.retryable).toBe(true); // 可重试、可切备用
+      expect(e.message).toContain("读取响应体失败");
+      expect(e.message).not.toContain("BaseURL"); // 不得误导为配置错误
+    }
+  });
+
+  it("postJson：读体被超时中止（AbortError 且非会话中止）→ timeout 错误且 promise 会 settle", async () => {
+    stubFetch(() => brokenBodyResponse(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })));
+    await expect(
+      postJson("https://example.test/v1/chat/completions", {}, {}, 60000, "openai")
+    ).rejects.toMatchObject({ name: "ApiError", code: "timeout" });
+  });
+
+  it("postJson：会话中止打断读体 → 普通 Error('cancelled')，非 ApiError", async () => {
+    const ac = new AbortController();
+    stubFetch(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              // body 悬挂：只有外部 abort 才能让它失败
+              setTimeout(() => controller.error(Object.assign(new Error("The user aborted a request."), { name: "AbortError" })), 50);
+            },
+          }),
+          { status: 200 }
+        )
+    );
+    const pending = postJson("https://example.test/v1/chat/completions", {}, {}, 5000, "openai", ac.signal);
+    setTimeout(() => ac.abort(), 10);
+    await expect(pending).rejects.toThrow("cancelled");
+    try {
+      await pending;
+    } catch (err) {
+      expect(err).not.toBeInstanceOf(ApiError);
+    }
+  });
+
+  it("googlefree：读体 reject → 可重试 network 错误（且并发槽已释放，见下条）", async () => {
+    const { googleFreeProvider } = await import("../src/background/providers/googlefree");
+    stubFetch(() => brokenBodyResponse(new TypeError("network error during body read")));
+    try {
+      await googleFreeProvider.chat(
+        [
+          { role: "system", content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+          { role: "user", content: "hello" },
+        ],
+        { baseUrl: "", apiKey: "", model: "", temperature: 0, timeoutMs: 60000 }
+      );
+      expect.unreachable("应抛出 ApiError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApiError);
+      const e = err as ApiError;
+      expect(e.code).toBe("network");
+      expect(e.retryable).toBe(true);
+      expect(e.message).toContain("读取响应体失败");
+    }
+  });
+
+  it("googlefree：读体失败后并发槽不泄漏——连续 3 次失败后第 4 次请求仍能完成", async () => {
+    const { googleFreeProvider } = await import("../src/background/providers/googlefree");
+    let fail = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const q = new URL(String(input)).searchParams.get("q") ?? "";
+        if (fail) return brokenBodyResponse(new TypeError("network error during body read"));
+        return jsonResponse([[["译" + q, q, null, null, ""]]]);
+      })
+    );
+    const opts = { baseUrl: "", apiKey: "", model: "", temperature: 0, timeoutMs: 60000 };
+    // GOOGLE_CONCURRENCY=3：若读体失败后 releaseSlot 未随 finally 执行，槽位逐次泄漏，
+    // 第 4 次请求会永久挂在 acquireSlot 上（表现为本用例超时红）
+    for (let i = 0; i < 3; i++) {
+      await expect(
+        googleFreeProvider.chat(
+          [
+            { role: "system", content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+            { role: "user", content: `seg${i}` },
+          ],
+          opts
+        )
+      ).rejects.toBeInstanceOf(ApiError);
+    }
+    fail = false;
+    const result = await googleFreeProvider.chat(
+      [
+        { role: "system", content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+        { role: "user", content: "hello" },
+      ],
+      opts
+    );
+    expect(result.text).toBe("译hello");
+  });
+
+  it("microsoft：读体 reject → 可重试 network 错误", async () => {
+    const { microsoftProvider } = await import("../src/background/providers/microsoft");
+    stubFetch(() => brokenBodyResponse(new TypeError("network error during body read")));
+    try {
+      await microsoftProvider.chat(
+        [
+          { role: "system", content: "你是专业翻译引擎。将用户输入翻译为zh-CN，只输出译文。" },
+          { role: "user", content: "hello" },
+        ],
+        { baseUrl: "", apiKey: "", model: "", temperature: 0, timeoutMs: 60000 }
+      );
+      expect.unreachable("应抛出 ApiError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApiError);
+      const e = err as ApiError;
+      expect(e.code).toBe("network");
+      expect(e.retryable).toBe(true);
+      expect(e.message).toContain("读取响应体失败");
+    }
+  });
+});
+
 describe("TranslateService：主 API 鉴权与备用切换", () => {
-  it("主 API 401 → 抛出带「主 API」来源的 auth 错误，不重试、不切备用 API", async () => {
+  it("主 API 401 → 主通道不重试，切备用 API；备用也 401 则抛带「备用 API」来源的 auth 错误（B1：硬失败仍走备用通道）", async () => {
     mockStorage(openAiSettings({ backupApi: { ...BASE_API, baseUrl: "https://backup.test/v1" } }));
     const { calls } = stubFetch(() => jsonResponse({ error: "unauthorized" }, 401));
     const { TranslateService } = await import("../src/background/translate");
     const svc = new TranslateService();
-    // 全部段落失败时上抛错误（带错误类型），而不是静默返回空串
+    // 全部通道失败时上抛错误（带错误类型与来源标注），而不是静默返回空串
     try {
       await svc.translate(["hello"], "zh-CN");
       expect.unreachable("401 应抛出 ApiError");
@@ -281,10 +417,11 @@ describe("TranslateService：主 API 鉴权与备用切换", () => {
       const e = err as ApiError;
       expect(e.code).toBe("auth");
       expect(e.retryable).toBe(false);
-      expect(e.message).toContain("主 API"); // 标注来源，避免误报为备用/免费通道错误
+      expect(e.message).toContain("备用 API"); // 最后失败的通道（B1 前为主 API）
       expect(e.message).toContain("401");
     }
-    expect(calls).toHaveLength(1); // 401 不可重试，也不切备用
+    // 通道内级联短路保持：主通道硬失败不重试；备用通道也只试一次（B1 前为 1 次、不切备用）
+    expect(calls).toHaveLength(2);
     expect(calls[0].url).toBe("https://example.test/v1/chat/completions");
   });
 

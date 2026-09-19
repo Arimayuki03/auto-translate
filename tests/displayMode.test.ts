@@ -342,3 +342,89 @@ describe("仅译文模式：链接可点击（回归：包裹路径 CSS 藏原�
     expect(visibleText(document.body)).toContain("Your browser");
   });
 });
+
+describe("渲染/记账一致性回归（B8/B9）", () => {
+  // B8 回归：混合批次里空译文段不得渲染成「空白但成功」——走失败角标路径
+  it("混合批次空译文段：失败角标（it-error）而非空白成功块，不计入已译", async () => {
+    document.body.innerHTML = `<p id="ok">Good paragraph for translation.</p><p id="bad">Empty result paragraph here.</p>`;
+    // 后台对失败段静默返回 ""（A2 修复后的常态）：bad 段空、ok 段正常——同一批混合
+    sendMessage.mockImplementation(async (msg: { type: string; texts?: string[]; id?: string }) => {
+      if (msg?.type === "translate") {
+        return {
+          id: msg.id,
+          ok: true,
+          results: (msg.texts ?? []).map((t) => (t === "Empty result paragraph here." ? "" : TRANS)),
+        };
+      }
+      if (msg?.type === "check-cache") return { cachedCount: 0 };
+      return undefined;
+    });
+
+    const engine = makeEngine();
+    const lastStats: { done: number; error: number } = { done: 0, error: 0 };
+    engine.onStateChange = (_state, stats) => {
+      lastStats.done = stats.done;
+      lastStats.error = stats.error;
+    };
+    await engine.translateAll();
+    await waitForRendered();
+
+    // 空译文段：失败角标，无空白 it-done 占位
+    const bad = document.getElementById("bad")!;
+    const badWrap = bad.closest(".it-wrap");
+    expect(badWrap).not.toBeNull();
+    expect(badWrap!.querySelector(".it-translated.it-error")).not.toBeNull();
+    expect(badWrap!.querySelector(".it-translated.it-done")).toBeNull();
+
+    // 同批正常段照常成功
+    const ok = document.getElementById("ok")!;
+    expect(ok.closest(".it-wrap")!.querySelector(".it-translated.it-done")).not.toBeNull();
+
+    // 记账：空段不算成功、不进 doneTexts（重试/再扫描不被去重口径压住）
+    expect(lastStats.error).toBe(1);
+    expect(lastStats.done).toBe(1);
+    expect(engine.isSkipped("Empty result paragraph here.")).toBe(false);
+    expect(engine.isSkipped("Good paragraph for translation.")).toBe(true);
+  });
+
+  // B9 回归：译文等于完整原文时不得清空其余文本节点（免译哨兵回显的段落截断）
+  it("多文本节点元素 + 译文等于原文：渲染与还原后各节点文本与原快照一致（不被清空）", async () => {
+    // 多文本节点结构：div 内 3 个文本节点（Alpha part / span 内 mid part / tail part）
+    document.body.innerHTML = `<div id="t">Alpha part <span>mid part</span> tail part</div>`;
+    const div = document.querySelector<HTMLElement>("#t")!;
+    const before = {
+      head: div.firstChild?.textContent ?? "",
+      mid: div.querySelector("span")!.firstChild?.textContent ?? "",
+      tail: div.lastChild?.textContent ?? "",
+    };
+    const original = "Alpha part mid part tail part";
+    expect(`${before.head}${before.mid}${before.tail}`).toBe(original);
+
+    // 译文=完整原文（免译哨兵回显：mapNoTranslationNeeded 返回原文）
+    sendMessage.mockImplementation(async (msg: { type: string; texts?: string[]; id?: string }) => {
+      if (msg?.type === "translate") {
+        return { id: msg.id, ok: true, results: (msg.texts ?? []).map(() => original) };
+      }
+      if (msg?.type === "check-cache") return { cachedCount: 0 };
+      return undefined;
+    });
+
+    const engine = makeEngine();
+    await engine.translateAll();
+    await waitForRendered();
+
+    engine.renderer.setMode("translated");
+    // 各文本节点原样保留：宿主节点没换字，其余节点也不被清空（旧实现 tail 被清空 → 段落截断）
+    expect(div.firstChild?.textContent).toBe(before.head);
+    expect(div.querySelector("span")!.firstChild?.textContent).toBe(before.mid);
+    expect(div.lastChild?.textContent).toBe(before.tail);
+    expect(div.textContent).toBe(original);
+
+    // 还原路径同样一致（快照未被错误改写）
+    engine.restore();
+    expect(div.firstChild?.textContent).toBe(before.head);
+    expect(div.querySelector("span")!.firstChild?.textContent).toBe(before.mid);
+    expect(div.lastChild?.textContent).toBe(before.tail);
+    expect(div.textContent).toBe(original);
+  });
+});

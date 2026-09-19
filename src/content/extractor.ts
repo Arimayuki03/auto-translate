@@ -258,10 +258,11 @@ function* walkTextNodes(
 }
 
 /** 收集 root 下所有需要独立遍历的 open shadow root（含嵌套 shadow，按文档序）。
- *  仅做 shadowRoot 属性检查的轻量元素趟；shadow 树无环，每域恰好入栈一次。 */
-function collectShadowRoots(root: HTMLElement): ShadowRoot[] {
+ *  仅做 shadowRoot 属性检查的轻量元素趟；shadow 树无环，每域恰好入栈一次。
+ *  导出供引擎复用：processing 标记清理（clearProcessingMarks / restoreElement）与
+ *  提取遍历必须同口径穿 shadow，否则 shadow 内的标记 querySelectorAll 够不着（B6）。 */
+export function collectShadowRoots(root: HTMLElement): ShadowRoot[] {
   const roots: ShadowRoot[] = [];
-  if (root.shadowRoot) roots.push(root.shadowRoot); // root 自身可能是宿主（观察器会以宿主为根补扫）
   const visit = (scope: Node): void => {
     const walker = document.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT);
     let n: Node | null;
@@ -273,6 +274,12 @@ function collectShadowRoots(root: HTMLElement): ShadowRoot[] {
       }
     }
   };
+  if (root.shadowRoot) {
+    // root 自身可能是宿主（观察器/restoreElement 会以宿主为根）：除收集该域外还要
+    // 递归 visit——否则 shadow 内再挂的嵌套 shadow 收集不到
+    roots.push(root.shadowRoot);
+    visit(root.shadowRoot);
+  }
   visit(root);
   return roots;
 }

@@ -94,81 +94,101 @@ async function gTranslate(
     else signal.addEventListener("abort", onSessionAbort);
   }
   let res: Response;
+  // 响应体读取必须留在超时/中止作用域内：只计时到响应头到达的话，卡死的 body
+  // 依然会让 promise 永不 settle；releaseSlot 保持在 finally（所有 await 之后）。
   try {
-    res = await fetch(url, { signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      if (signal?.aborted) throw new Error("cancelled");
+    try {
+      res = await fetch(url, { signal: controller.signal });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        if (signal?.aborted) throw new Error("cancelled");
+        throw new ApiError(
+          "timeout",
+          `Google 免费翻译请求超时（${Math.round(timeoutMs / 1000)}s）`,
+          makeDiagnostic("googlefree", url, { code: "timeout" })
+        );
+      }
       throw new ApiError(
-        "timeout",
-        `Google 免费翻译请求超时（${Math.round(timeoutMs / 1000)}s）`,
-        makeDiagnostic("googlefree", url, { code: "timeout" })
+        "network",
+        `Google 免费翻译网络不可达：${err instanceof Error ? err.message : String(err)}`,
+        makeDiagnostic("googlefree", url, { code: "network" })
       );
     }
-    throw new ApiError(
-      "network",
-      `Google 免费翻译网络不可达：${err instanceof Error ? err.message : String(err)}`,
-      makeDiagnostic("googlefree", url, { code: "network" })
-    );
+    // 读体本身失败（连接中断/超时中止打断悬挂 body）不得吞成空串：
+    // AbortError 按超时/中止分类，其余按可重试 network 错误抛出
+    const raw = await res.text().catch((err: unknown) => {
+      if (err instanceof Error && err.name === "AbortError") {
+        if (signal?.aborted) throw new Error("cancelled");
+        throw new ApiError(
+          "timeout",
+          `Google 免费翻译请求超时（${Math.round(timeoutMs / 1000)}s）`,
+          makeDiagnostic("googlefree", url, { code: "timeout" })
+        );
+      }
+      throw new ApiError(
+        "network",
+        `Google 免费翻译读取响应体失败：${err instanceof Error ? err.message : String(err)}`,
+        makeDiagnostic("googlefree", url, { code: "network" })
+      );
+    });
+    if (!res.ok) {
+      const code =
+        res.status === 429
+          ? "rate_limit"
+          : res.status >= 500
+            ? "server"
+            : res.status === 404
+              ? "not_found"
+              : "bad_request";
+      const label = code === "rate_limit" ? "频率限制" : code === "server" ? "服务端错误" : "请求失败";
+      throw new ApiError(code, `Google 免费翻译${label}（${res.status}）`, {
+        ...makeDiagnostic("googlefree", url, {
+          status: res.status,
+          responsePreview: raw.slice(0, 300),
+        }),
+        code,
+      });
+    }
+    let data: GoogleResponse;
+    try {
+      data = JSON.parse(raw) as GoogleResponse;
+    } catch {
+      throw new ApiError("bad_response", "Google 免费翻译响应不是有效 JSON", {
+        ...makeDiagnostic("googlefree", url, {
+          status: res.status,
+          responsePreview: raw.slice(0, 300),
+        }),
+        code: "bad_response",
+      });
+    }
+  if (!Array.isArray(data) || !Array.isArray(data[0])) {
+      throw new ApiError("bad_response", "Google 免费翻译响应格式异常", {
+        ...makeDiagnostic("googlefree", url, { status: res.status }),
+        code: "bad_response",
+      });
+    }
+    const translated = (data[0] as unknown[])
+      .filter(
+        (item): item is [string, string, ...unknown[]] =>
+          Array.isArray(item) && typeof item[0] === "string"
+      )
+      .map((item) => item[0])
+      .join("");
+    if (!translated) {
+      throw new ApiError("bad_response", "Google 免费翻译返回空结果", {
+        ...makeDiagnostic("googlefree", url, { status: res.status }),
+        code: "bad_response",
+      });
+    }
+    return {
+      text: translated,
+      diagnostic: makeDiagnostic("googlefree", url, { status: res.status }),
+    };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onSessionAbort);
     releaseSlot();
   }
-  const raw = await res.text().catch(() => "");
-  if (!res.ok) {
-    const code =
-      res.status === 429
-        ? "rate_limit"
-        : res.status >= 500
-          ? "server"
-          : res.status === 404
-            ? "not_found"
-            : "bad_request";
-    const label = code === "rate_limit" ? "频率限制" : code === "server" ? "服务端错误" : "请求失败";
-    throw new ApiError(code, `Google 免费翻译${label}（${res.status}）`, {
-      ...makeDiagnostic("googlefree", url, {
-        status: res.status,
-        responsePreview: raw.slice(0, 300),
-      }),
-      code,
-    });
-  }
-  let data: GoogleResponse;
-  try {
-    data = JSON.parse(raw) as GoogleResponse;
-  } catch {
-    throw new ApiError("bad_response", "Google 免费翻译响应不是有效 JSON", {
-      ...makeDiagnostic("googlefree", url, {
-        status: res.status,
-        responsePreview: raw.slice(0, 300),
-      }),
-      code: "bad_response",
-    });
-  }
-  if (!Array.isArray(data) || !Array.isArray(data[0])) {
-    throw new ApiError("bad_response", "Google 免费翻译响应格式异常", {
-      ...makeDiagnostic("googlefree", url, { status: res.status }),
-      code: "bad_response",
-    });
-  }
-  const translated = (data[0] as unknown[])
-    .filter(
-      (item): item is [string, string, ...unknown[]] =>
-        Array.isArray(item) && typeof item[0] === "string"
-    )
-    .map((item) => item[0])
-    .join("");
-  if (!translated) {
-    throw new ApiError("bad_response", "Google 免费翻译返回空结果", {
-      ...makeDiagnostic("googlefree", url, { status: res.status }),
-      code: "bad_response",
-    });
-  }
-  return {
-    text: translated,
-    diagnostic: makeDiagnostic("googlefree", url, { status: res.status }),
-  };
 }
 
 async function translateWithFallback(

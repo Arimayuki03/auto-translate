@@ -13,6 +13,7 @@ import {
   extractUnits,
   extractUnitsChunked,
   isTargetLanguage,
+  collectShadowRoots,
   EXCLUDED_TAGS,
   LETTER_RE,
 } from "./extractor";
@@ -414,11 +415,18 @@ export class PageEngine {
   }
 
   /** 清理在途批次残留在容器上的处理标记：还原/换页时在途批次的 renderBatch 永远不会执行，
-   *  若不清理，这些容器会被 translateAll / 观察器的去重口径永久跳过（F-2）。 */
+   *  若不清理，这些容器会被 translateAll / 观察器的去重口径永久跳过（F-2）。
+   *  querySelectorAll 不穿 shadow 边界，open shadow 域需按 collectShadowRoots 逐域补扫
+   *  ——提取进得去的地方，标记清理也必须进得去（B6）。 */
   private clearProcessingMarks(): void {
     document.querySelectorAll("[data-it-processing]").forEach((el) => {
       el.removeAttribute("data-it-processing");
     });
+    for (const scope of collectShadowRoots(document.body)) {
+      scope.querySelectorAll("[data-it-processing]").forEach((el) => {
+        el.removeAttribute("data-it-processing");
+      });
+    }
   }
 
   /**
@@ -530,11 +538,18 @@ export class PageEngine {
       }
     }
     // 兜底摘除残留处理标记：占位阶段（reserve 让出窗口内）的容器尚未登记进 allUnits，
-    // 上面按索引的撤销够不着它们；再悬停同段时这里保证容器回到「未译」态
+    // 上面按索引的撤销够不着它们；再悬停同段时这里保证容器回到「未译」态。
+    // light DOM 之外再补各 open shadow 域（以该元素为根）：shadow 内段的标记
+    // light 查询够不着，不摘则连「悬停单元素还原」都救不回（B6）
     if (el.hasAttribute("data-it-processing")) el.removeAttribute("data-it-processing");
     el.querySelectorAll<HTMLElement>("[data-it-processing]").forEach((c) =>
       c.removeAttribute("data-it-processing")
     );
+    for (const scope of collectShadowRoots(el)) {
+      scope.querySelectorAll<HTMLElement>("[data-it-processing]").forEach((c) =>
+        c.removeAttribute("data-it-processing")
+      );
+    }
     // 文本级去重同步移除对应原文（本元素独有的文本；共享文本仅在无兄弟单元时清）
     const texts = new Set(extractUnits(el, this.opts).map((u) => u.text));
     let doneRevoked = 0;
@@ -808,11 +823,17 @@ export class PageEngine {
     for (const t of batchTexts) {
       this.pendingTexts.delete(t);
       // 该文本的全部单元在请求期间被单元素还原撤销（容器 processing 标记已摘或换了新令牌）
-      // → 文本不再记入 doneTexts：否则再悬停「译」时被 isSkipped 压住，刷新页面前出不了角标
+      // → 文本不再记入 doneTexts：否则再悬停「译」时被 isSkipped 压住，刷新页面前出不了角标。
+      // 追加结构性撤销判定（B7）：容器已被页面整体移除（detached）时 getAttribute 仍返回
+      // 旧令牌，令牌比对判不出——断连即视为撤销，结果无锚点可渲染，不写 doneTexts。
       const units = batch.find(([text]) => text === t)?.[1] ?? [];
       const allRevoked =
         units.length > 0 &&
-        units.every((u) => u.container.getAttribute("data-it-processing") !== u.batchToken);
+        units.every(
+          (u) =>
+            !u.container.isConnected ||
+            u.container.getAttribute("data-it-processing") !== u.batchToken
+        );
       if (!allRevoked && this.doneTexts.size < MAX_DONE_TEXTS) this.doneTexts.add(t);
     }
 
@@ -839,14 +860,26 @@ export class PageEngine {
     let failed = 0;
     for (const [text, us] of batch) {
       const chunks = textToChunks.get(text);
+      // B8：该文本的全部 chunk 均为空白（后台对部分失败段静默返回 ""）→ 按单元走失败路径，
+      // 不渲染「空白但成功」，并撤销 fetchBatch 阶段已写入的 doneTexts（否则同文本被永久跳过）
+      const allChunksBlank =
+        !!chunks && chunks.length > 0 && chunks.every((c) => !c?.trim());
+      if (allChunksBlank) this.doneTexts.delete(text);
       for (const u of us) {
         // 渲染守卫（按单元）：令牌失配 = 该单元已被还原/重试撤销，丢弃旧批次结果，
         // 不回填译文、不误计统计；标记由撤销方（restoreElement/retryState）负责清理
         if (u.container.getAttribute("data-it-processing") !== u.batchToken) continue;
         u.container.removeAttribute("data-it-processing");
-        if (chunks && chunks.length > 0) {
-          this.renderer.fill(u, chunks);
-          filled++;
+        if (chunks && chunks.length > 0 && !allChunksBlank) {
+          if (this.renderer.fill(u, chunks)) {
+            filled++;
+          } else {
+            // B7：fill 未真正写入（容器已在渲染前被页面移除——detached 节点的令牌比对
+            // 仍会通过）→ 该单元按失败计，并撤销 doneTexts，同文本不被去重口径永久跳过
+            failed++;
+            this.renderer.fail(u); // 容器已 detached 时 fail 自身安全返回，不碰 DOM
+            this.doneTexts.delete(text);
+          }
         } else {
           this.renderer.fail(u);
           failed++;

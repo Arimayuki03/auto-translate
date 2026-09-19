@@ -131,3 +131,68 @@ describe("keepAlive 无扩展环境", () => {
     endKeepAlive();
   });
 });
+
+describe("keepAlive 硬上限（纵深防御：endKeepAlive 因缺陷永不执行时强制停表）", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("超过 30 分钟硬上限后自动停止心跳，warn 一次", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { beginKeepAlive } = await loadModule();
+    beginKeepAlive();
+
+    // 29 分 59 秒（临界前）：warn 尚未触发
+    vi.advanceTimersByTime(29 * 60_000 + 59_000);
+    expect(warnSpy).not.toHaveBeenCalled();
+    const pokesBeforeLimit = getPlatformInfo.mock.calls.length;
+
+    // 再推 1 秒到 30 分钟整：warn 恰好一次，之后再推进时间不再 poke
+    vi.advanceTimersByTime(1_000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(getPlatformInfo.mock.calls.length).toBeGreaterThan(pokesBeforeLimit); // 最后一拍心跳已发生
+    const pokesAtExpiry = getPlatformInfo.mock.calls.length;
+    vi.advanceTimersByTime(120_000);
+    expect(getPlatformInfo.mock.calls.length).toBe(pokesAtExpiry);
+    warnSpy.mockRestore();
+  });
+
+  it("硬上限之后 endKeepAlive / beginKeepAlive 仍安全（计数已归零，可重新 begin）", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { beginKeepAlive, endKeepAlive } = await loadModule();
+    beginKeepAlive();
+    vi.advanceTimersByTime(30 * 60_000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    // 悬挂请求"最终"结束（模拟缺陷被修复后的残余事件）：
+    expect(() => {
+      endKeepAlive();
+      endKeepAlive();
+    }).not.toThrow();
+    const pokesIdle = getPlatformInfo.mock.calls.length;
+    vi.advanceTimersByTime(60_000);
+    expect(getPlatformInfo.mock.calls.length).toBe(pokesIdle);
+
+    // 下一轮 begin 正常重启心跳并重新起算硬上限
+    beginKeepAlive();
+    expect(warnSpy).toHaveBeenCalledTimes(1); // 不重复 warn
+    expect(getPlatformInfo.mock.calls.length).toBe(pokesIdle + 1);
+    vi.advanceTimersByTime(20_000);
+    expect(getPlatformInfo.mock.calls.length).toBe(pokesIdle + 2);
+    endKeepAlive();
+    warnSpy.mockRestore();
+  });
+
+  it("正常路径不受硬上限影响：结束早于 30 分钟则永不触发 warn", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { beginKeepAlive, endKeepAlive } = await loadModule();
+    beginKeepAlive();
+    endKeepAlive();
+    vi.advanceTimersByTime(31 * 60_000);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(getPlatformInfo.mock.calls.length).toBe(1); // 只 begin 时立即 poke 一次
+    warnSpy.mockRestore();
+  });
+});

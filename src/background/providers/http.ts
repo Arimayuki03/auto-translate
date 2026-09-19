@@ -99,65 +99,88 @@ export async function postJson<T = Record<string, unknown>>(
     if (signal.aborted) controller.abort();
     else signal.addEventListener("abort", onSessionAbort);
   }
-  let res: Response;
+  // 响应体读取（含 !res.ok 错误体与主路径正文）必须留在超时/中止作用域内：
+  // 只计时到响应头到达的话，卡死的 body 依然会让 promise 永不 settle（A1）。
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      // 区分超时与会话中止：中止是用户主动行为，抛普通 Error（非 ApiError），
-      // 不触发重试/备用切换，由上层归一化为 TranslationCancelledError
-      if (signal?.aborted) throw new Error("cancelled");
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        // 区分超时与会话中止：中止是用户主动行为，抛普通 Error（非 ApiError），
+        // 不触发重试/备用切换，由上层归一化为 TranslationCancelledError
+        if (signal?.aborted) throw new Error("cancelled");
+        throw new ApiError(
+          "timeout",
+          `请求超时（${Math.round(timeoutMs / 1000)}s）`,
+          makeDiagnostic(provider, url, { code: "timeout" })
+        );
+      }
       throw new ApiError(
-        "timeout",
-        `请求超时（${Math.round(timeoutMs / 1000)}s）`,
-        makeDiagnostic(provider, url, { code: "timeout" })
+        "network",
+        `网络错误：${err instanceof Error ? err.message : String(err)}`,
+        makeDiagnostic(provider, url, { code: "network" })
       );
     }
-    throw new ApiError(
-      "network",
-      `网络错误：${err instanceof Error ? err.message : String(err)}`,
-      makeDiagnostic(provider, url, { code: "network" })
-    );
+    // 读体 AbortError（超时/中止打断悬挂 body）：与 fetch 阶段同一套分类
+    const readBodyOrAbort = (p: Promise<string>): Promise<string> =>
+      p.catch((err: unknown) => {
+        if (err instanceof Error && err.name === "AbortError") {
+          if (signal?.aborted) throw new Error("cancelled");
+          throw new ApiError(
+            "timeout",
+            `请求超时（${Math.round(timeoutMs / 1000)}s）`,
+            makeDiagnostic(provider, url, { code: "timeout" })
+          );
+        }
+        // 读体本身失败（连接中断等）是可重试的网络错误，不得吞成空串（B2）
+        throw new ApiError(
+          "network",
+          `读取响应体失败：${err instanceof Error ? err.message : String(err)}`,
+          makeDiagnostic(provider, url, { code: "network" })
+        );
+      });
+
+    if (!res.ok) {
+      // 错误体只用于诊断展示，读不到（含中止/超时打断）就空串按状态码归类
+      const text = await res.text().catch(() => "");
+      const safeText = redactSecrets(text, url, headers).slice(0, 300);
+      const error = classifyError(provider, url, res.status, safeText, res.headers.get("Retry-After") ?? undefined);
+      console.warn("[auto-translate] API 请求失败", error.diagnostic, error.message);
+      throw error;
+    }
+    const raw = await readBodyOrAbort(res.text());
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      // 中转站返回 HTML/空体等非 JSON 内容：包成 bad_response 走统一错误分级与脱敏诊断
+      // （此前裸抛 SyntaxError，无诊断、不归类，用户只看到 "Unexpected token ..."）
+      throw new ApiError(
+        "bad_response",
+        "响应不是有效 JSON（请检查 BaseURL 是否指向正确的 API 端点）",
+        {
+          ...makeDiagnostic(provider, url, {
+            status: res.status,
+            responsePreview: redactSecrets(raw, url, headers).slice(0, 300),
+          }),
+          code: "bad_response",
+        }
+      );
+    }
+    return {
+      data: data as T,
+      diagnostic: makeDiagnostic(provider, url, { status: res.status }),
+    };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onSessionAbort);
   }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    const safeText = redactSecrets(text, url, headers).slice(0, 300);
-    const error = classifyError(provider, url, res.status, safeText, res.headers.get("Retry-After") ?? undefined);
-    console.warn("[auto-translate] API 请求失败", error.diagnostic, error.message);
-    throw error;
-  }
-  const raw = await res.text().catch(() => "");
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    // 中转站返回 HTML/空体等非 JSON 内容：包成 bad_response 走统一错误分级与脱敏诊断
-    // （此前裸抛 SyntaxError，无诊断、不归类，用户只看到 "Unexpected token ..."）
-    throw new ApiError(
-      "bad_response",
-      "响应不是有效 JSON（请检查 BaseURL 是否指向正确的 API 端点）",
-      {
-        ...makeDiagnostic(provider, url, {
-          status: res.status,
-          responsePreview: redactSecrets(raw, url, headers).slice(0, 300),
-        }),
-        code: "bad_response",
-      }
-    );
-  }
-  return {
-    data: data as T,
-    diagnostic: makeDiagnostic(provider, url, { status: res.status }),
-  };
 }
 
 /**

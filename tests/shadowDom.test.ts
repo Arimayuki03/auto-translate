@@ -280,4 +280,41 @@ describe("engine：shadow 内单元进入完整翻译管线", () => {
     expect(done!.textContent).toContain("【译】Engine reaches into shadow content.");
     expect(p.hasAttribute("data-it-processing")).toBe(false);
   });
+
+  // B6 回归：processing 标记清理必须穿 open shadow（querySelectorAll 不跨 shadow 边界）
+  it("clearProcessingMarks 清理 shadow 内残留的处理标记（整页还原路径）", async () => {
+    const { shadowRoot } = attachOpenShadow();
+    const p = document.createElement("p");
+    p.textContent = "Marked inside shadow stays clearable.";
+    shadowRoot.appendChild(p);
+
+    // 手动模拟在途批次残留的标记（绕过管线直写属性，专测清理遍历）
+    p.setAttribute("data-it-processing", "it-batch-999");
+
+    const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
+    engine.restore(); // restore 内部调用 clearProcessingMarks
+    expect(p.hasAttribute("data-it-processing")).toBe(false);
+
+    // 全文档口径：light + shadow 均无残留
+    expect(document.querySelectorAll("[data-it-processing]").length).toBe(0);
+    expect(shadowRoot.querySelectorAll("[data-it-processing]").length).toBe(0);
+  });
+
+  it("restoreElement 以该元素为根清理其 open shadow 内的处理标记", async () => {
+    const { shadowRoot } = attachOpenShadow();
+    // 悬停单元素还原的根宿主（自定义元素可以是提取容器）
+    const host = document.querySelector("my-widget")!;
+    const innerHost = document.createElement("inner-host");
+    innerHost.attachShadow({ mode: "open" });
+    const marked = document.createElement("p");
+    marked.textContent = "Inner marked paragraph pending render.";
+    innerHost.shadowRoot!.appendChild(marked);
+    shadowRoot.appendChild(innerHost);
+    marked.setAttribute("data-it-processing", "it-batch-7");
+
+    const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
+    engine.restoreElement(host);
+    expect(marked.hasAttribute("data-it-processing")).toBe(false);
+    expect(document.querySelectorAll("[data-it-processing]").length).toBe(0);
+  });
 });

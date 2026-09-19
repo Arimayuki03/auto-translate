@@ -325,3 +325,253 @@ describe("Gemini 鉴权位置", () => {
     expect(headers["x-goog-api-key"]).toBe("g-secret-key");
   });
 });
+
+// ===== 6. 2026-09-20 第五轮审查修复：A2 部分成功 / B1 硬失败通道切换 / C8 429 惩罚保持 =====
+
+/** 五轮修复用例共用的设置桩：openai 格式、可选备用 API（默认未配置） */
+function fifthRoundSettings(backup?: Settings["api"]): Settings {
+  return {
+    version: DEFAULT_SETTINGS.version,
+    enabled: true,
+    api: {
+      format: "openai",
+      baseUrl: "https://example.test/v1",
+      apiKey: "sk-test",
+      model: "m",
+      temperature: 0.3,
+      timeoutMs: 60000,
+      maxConcurrency: 4,
+      minRequestIntervalMs: 50,
+      batchMode: "lines",
+      customSystemPrompt: "",
+      freeEndpoint: "",
+      freeBackupEndpoint: "",
+    },
+    ...(backup ? { backupApi: backup } : {}),
+    translate: { ...DEFAULT_SETTINGS.translate, blockMaxChars: 1200 },
+    sites: { ...DEFAULT_SETTINGS.sites },
+    tts: { ...DEFAULT_SETTINGS.tts },
+    security: { ...DEFAULT_SETTINGS.security },
+    cache: { enabled: false, maxEntries: 100, ttlDays: 7 },
+  };
+}
+
+function mockSettingsStorage(settings: Settings): void {
+  (globalThis as { chrome?: unknown }).chrome = {
+    storage: {
+      local: {
+        get: vi.fn(async () => ({ settings })),
+        set: vi.fn(async () => undefined),
+        remove: vi.fn(async () => undefined),
+      },
+    },
+  } as unknown as typeof chrome;
+}
+
+function ok(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+/** A2 变异自检（验收要求）：批量 3 段中 2 段成功 1 段失败 →
+ *  results 保留 2 段译文、不整批 throw（旧实现 allFailed 判 pending.every(=="") 恒真，
+ *  会把已成功的段落一并作废、整批上抛——本用例钉住该回归）。 */
+describe("A2 部分成功不整批丢弃", () => {
+  beforeEach(() => mockSettingsStorage(fifthRoundSettings()));
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it('批量 3 段：2 段批量成功 1 段逐段失败 → 返回 [译, 译, ""] 而非 reject', async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string) as { messages: { content: string }[] };
+        const user = body.messages[1].content as string;
+        if (user.includes("\n")) {
+          // 整批批量请求：正常回 3 行（批量成功）
+          return ok({ choices: [{ message: { content: "译一\n译二\n译三" } }] });
+        }
+        // 单段请求：一段翻译用户故意 500（重试耗尽后写 ""）
+        return new Response("boom", { status: 500 });
+      })
+    );
+    // 前置缓存为空：3 段都进入批量
+    const svc = new TranslateService();
+    const results = await svc.translate(["一", "二", "三"], "zh-CN");
+    expect(results).toEqual(["译一", "译二", "译三"]);
+  });
+
+  it("逐段兜底 3 段中 2 段成功 1 段失败：保留 2 段译文，不整批 throw", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string) as { messages: { content: string }[] };
+        const user = body.messages[1].content as string;
+        // 整批批量请求：只回 1 行 → splitBatch null（批量解析失败），且段数 <8 不拆小批量，直接逐段
+        if (user.includes("\n")) return ok({ choices: [{ message: { content: "乱掉了" } }] });
+        // 逐段：第二段一直 500，其余成功
+        if (user === "二") return new Response("boom", { status: 500 });
+        return ok({ choices: [{ message: { content: `译${user}` } }] });
+      })
+    );
+    const svc = new TranslateService();
+    const results = await svc.translate(["一", "二", "三"], "zh-CN");
+    // 部分成功：成功段保留译文；失败段写 ""；绝不整批 throw
+    expect(results).toEqual(["译一", "", "译三"]);
+  });
+
+  it("全部段失败仍整批抛错（allFailed 语义不回退）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("server down", { status: 500 }))
+    );
+    const svc = new TranslateService();
+    // 2 段批量失败（withRetry: 1+3 次）→ 逐段兜底各再 4 次，全程约 16 次退避（≤60s 封顶）
+    await expect(svc.translate(["一", "二"], "zh-CN")).rejects.toThrow(/500|服务端/);
+  }, 30_000);
+});
+
+/** B1：主通道硬失败（401 等）时备用通道仍要被启用——
+ *  旧实现降级链被 isRetryable 拦死，硬失败下备用/免费互切永不尝试。 */
+describe("B1 主通道硬失败仍走备用通道", () => {
+  const backup = { ...fifthRoundSettings().api, baseUrl: "https://backup.test/v1" };
+
+  beforeEach(() => mockSettingsStorage(fifthRoundSettings(backup)));
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("单段：主 API 401 → 切备用 API 成功返回（旧实现 1 次请求即抛）", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.startsWith("https://backup.test")) {
+          return ok({ choices: [{ message: { content: "备用译文" } }] });
+        }
+        return new Response("unauthorized", { status: 401 });
+      })
+    );
+    const svc = new TranslateService();
+    const results = await svc.translate(["hello"], "zh-CN");
+    expect(results).toEqual(["备用译文"]);
+    expect(calls[0]).toContain("example.test");
+    expect(calls[calls.length - 1]).toContain("backup.test");
+  });
+
+  it("通道内级联短路保持：主 API 401 不做同通道重试（主失败 1 次 + 备用 N 段）", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.startsWith("https://backup.test")) {
+          return ok({ choices: [{ message: { content: "备一\n备二" } }] });
+        }
+        return new Response("unauthorized", { status: 401 });
+      })
+    );
+    const svc = new TranslateService();
+    const results = await svc.translate(["一", "二"], "zh-CN");
+    expect(results).toEqual(["备一", "备二"]);
+    const mainCalls = calls.filter((u) => u.startsWith("https://example.test")).length;
+    const backupCalls = calls.filter((u) => u.startsWith("https://backup.test")).length;
+    // 主通道硬失败不重试：批量 1 次即切；备用通道 1 次批量成功
+    expect(mainCalls).toBe(1);
+    expect(backupCalls).toBe(1);
+  });
+
+  it("全候选都硬失败：抛最后（备用）通道的 401，不放大请求数", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return new Response("unauthorized", { status: 401 });
+      })
+    );
+    const svc = new TranslateService();
+    const texts = Array.from({ length: 6 }, (_, i) => `段${i}`);
+    await expect(svc.translate(texts, "zh-CN")).rejects.toThrow("401");
+    // 整批主 1 次 + 备用 1 次（均硬失败短路，不逐段放大）
+    expect(calls).toHaveLength(2);
+  });
+});
+
+/** C8：429「容量降到 1」的后探针惩罚在一次暂停期内不被后续 configureChannels 抹掉。
+ *  旧实现：翻译入口每次都调 configureChannels 重设 min(maxConcurrency,16)，
+ *  暂停期的 capacity=1 被覆盖，暂停一到期立即恢复满容量 burst。 */
+describe("C8 暂停期通道容量不被 configureChannels 抹掉", () => {
+  beforeEach(() => mockSettingsStorage(fifthRoundSettings()));
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("translate 之间触发 configureChannels，暂停中的通道容量仍钳在 1", async () => {
+    vi.useFakeTimers();
+    // 暴露内部限速器：借双层断言拿 channels 私有字段做状态断言
+    const svc = new TranslateService();
+    const internals = svc as unknown as {
+      channels: Map<
+        string,
+        {
+          bucket: { tryAcquire(): number; configure(rate: number, capacity: number): void };
+          pausedUntil: number;
+        }
+      >;
+    };
+    const key = "openai|https://example.test/v1";
+    const run = (async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ok({ choices: [{ message: { content: "译" } }] }))
+      );
+      // 第 1 次翻译：建通道并触发 configureChannels
+      await svc.translate(["a"], "zh-CN");
+    })();
+    await vi.runAllTimersAsync();
+    await run;
+    expect(internals.channels.get(key)).toBeDefined();
+
+    // 模拟 429 惩罚：容量降到 1、暂停 30s（与 pauseRateLimit 相同的写法）
+    const ch = internals.channels.get(key)!;
+    ch.pausedUntil = Date.now() + 30_000;
+    // 手工把桶容量压到 1（configure(rate,1) 的效果）
+    (svc as unknown as { channelRate: number }).channelRate = 2;
+    ch.bucket.configure(2, 1);
+
+    // 第 2 次翻译（触发 configureChannels 重设容量）：暂停期内容量不得被恢复
+    const run2 = (async () => {
+      await svc.translate(["b"], "zh-CN");
+    })();
+    await vi.runAllTimersAsync();
+    await run2;
+
+    // 暂停已过 30s、时间仍在暂停窗口内：桶一次只能放行 1 个请求
+    vi.advanceTimersByTime(10_000);
+    expect(ch.bucket.tryAcquire()).toBe(0);
+    expect(ch.bucket.tryAcquire()).toBeGreaterThan(0);
+
+    // 暂停到期后的下一次翻译：configureChannels 正常恢复容量
+    vi.advanceTimersByTime(25_000); // 越过 pausedUntil
+    const run3 = (async () => {
+      await svc.translate(["c"], "zh-CN");
+    })();
+    await vi.runAllTimersAsync();
+    await run3;
+    // configure 只钳制不补满（既有语义）：空闲 60s 让令牌按新容量补满
+    vi.advanceTimersByTime(60_000);
+    // 容量恢复（maxConcurrency=4 → capacity 4）：连续 4 个请求立即放行
+    expect(ch.bucket.tryAcquire()).toBe(0);
+    expect(ch.bucket.tryAcquire()).toBe(0);
+    expect(ch.bucket.tryAcquire()).toBe(0);
+    expect(ch.bucket.tryAcquire()).toBe(0);
+  });
+});

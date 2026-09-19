@@ -74,11 +74,21 @@ function applyEnabledUi(on: boolean): void {
  *  无需 background 中继、无需刷新页面。 */
 enabledToggle.addEventListener("change", () => {
   void (async () => {
-    const s = await getSettings();
-    s.enabled = enabledToggle.checked;
-    await saveSettings(s);
-    applyEnabledUi(s.enabled);
-    setStatus(s.enabled ? t("popupPluginOn") : t("popupPluginOff"), s.enabled ? "ok" : "");
+    try {
+      const s = await getSettings();
+      s.enabled = enabledToggle.checked;
+      await saveSettings(s);
+      applyEnabledUi(s.enabled);
+      setStatus(s.enabled ? t("popupPluginOn") : t("popupPluginOff"), s.enabled ? "ok" : "");
+    } catch (err) {
+      // 存储失败时回滚开关 UI 到存储实际状态，避免停留在「已切换」的假象；回滚自身失败则放弃
+      try {
+        await loadForm();
+      } catch {
+        /* 忽略回滚失败 */
+      }
+      setStatus(err instanceof Error ? err.message : String(err), "err");
+    }
   })();
 });
 
@@ -114,9 +124,13 @@ $("p-test").addEventListener("click", async () => {
 });
 
 $("p-save").addEventListener("click", async () => {
-  const current = await getSettings();
-  await saveSettings({ ...current, api: await readApi() });
-  setStatus(t("popupSaved"), "ok");
+  try {
+    const current = await getSettings();
+    await saveSettings({ ...current, api: await readApi() });
+    setStatus(t("popupSaved"), "ok");
+  } catch (err) {
+    setStatus(err instanceof Error ? err.message : String(err), "err");
+  }
 });
 
 $("p-full-settings").addEventListener("click", (e) => {
@@ -147,18 +161,22 @@ async function addSite(list: "whitelist" | "blacklist"): Promise<void> {
     setStatus(t("popupNoSite"), "err");
     return;
   }
-  const s = await getSettings();
-  const arr = s.sites[list];
-  if (!arr.includes(currentHost)) arr.push(currentHost);
-  // 从对立名单移除，避免同时在两个名单里产生冲突（黑名单优先会让白名单条目失效且迷惑用户）
-  const other = list === "whitelist" ? "blacklist" : "whitelist";
-  const otherIdx = s.sites[other].indexOf(currentHost);
-  if (otherIdx >= 0) s.sites[other].splice(otherIdx, 1);
-  await saveSettings(s);
-  setStatus(
-    list === "whitelist" ? t("popupWhitelisted", currentHost) : t("popupBlacklisted", currentHost),
-    "ok"
-  );
+  try {
+    const s = await getSettings();
+    const arr = s.sites[list];
+    if (!arr.includes(currentHost)) arr.push(currentHost);
+    // 从对立名单移除，避免同时在两个名单里产生冲突（黑名单优先会让白名单条目失效且迷惑用户）
+    const other = list === "whitelist" ? "blacklist" : "whitelist";
+    const otherIdx = s.sites[other].indexOf(currentHost);
+    if (otherIdx >= 0) s.sites[other].splice(otherIdx, 1);
+    await saveSettings(s);
+    setStatus(
+      list === "whitelist" ? t("popupWhitelisted", currentHost) : t("popupBlacklisted", currentHost),
+      "ok"
+    );
+  } catch (err) {
+    setStatus(err instanceof Error ? err.message : String(err), "err");
+  }
 }
 
 $("btn-whitelist").addEventListener("click", () => void addSite("whitelist"));

@@ -18,8 +18,9 @@ export class PageObserver {
   private mo: MutationObserver | null = null;
   private timer: number | undefined;
   private lastBody: HTMLElement;
-  /** 最近一批突变里被判定为"我们注入"的节点缓存，避免同一节点被多条 record 重复爬祖先 */
-  private ownNodeCache = new WeakSet<Node>();
+  /** 判定为位于我们 UI 子树内的节点缓存：只有攀爬找到 data-it-ui 根的节点才进这里，
+   *  这些节点必是 UI 树（完全由我们创建）的一员，缓存为真无误判外部节点的风险 */
+  private ownUiCache = new WeakSet<Element>();
   /** 防抖窗口内累积的新增节点根（onMutations 收集，run 消费）。
    *  不能用 takeRecords()——onMutations 回调已消费了 records，takeRecords 只剩空。 */
   private addedRoots: Node[] = [];
@@ -66,11 +67,15 @@ export class PageObserver {
 
   /** 变化过滤：若本批突变全部由我们自己的翻译/渲染产生（插入占位、包裹原文、
    *  回填译文、控件原位替换等），就不触发整页重扫——否则翻译过程会反复自激扫描，
-   *  在大页面上叠加成严重卡顿。只要混入任何一处"非我们"的变化就照常调度。 */
+   *  在大页面上叠加成严重卡顿。只要混入任何一处"非我们"的变化就照常调度。
+   *  收集须遍历全部记录：同批多条外部记录各自携带 addedNodes，逐条收集完再统一
+   *  调度一次（此前遇首条外部记录即 return，同批后续记录的新增根被整体丢弃）。 */
   private onMutations(records: MutationRecord[]): void {
+    let sawExternal = false;
     for (const r of records) {
       if (!this.isOwnRecord(r)) {
-        // 外部变化：收集新增节点供 run 增量扫描
+        sawExternal = true;
+        // 外部变化：收集新增节点供 run 增量扫描（继续遍历，不提前退出）
         for (const n of r.addedNodes) {
           if (!this.addedRootsSeen.has(n)) {
             this.addedRootsSeen.add(n);
@@ -78,10 +83,9 @@ export class PageObserver {
             this.addedRoots.push(n);
           }
         }
-        this.schedule();
-        return;
       }
     }
+    if (sawExternal) this.schedule(); // 存在任何外部记录（含仅有 removedNodes 的）即调度
     // 全是自身渲染引起的变化 → 忽略
   }
 
@@ -93,20 +97,64 @@ export class PageObserver {
     return true;
   }
 
-  /** 节点自身或任一祖先带我们的标记（data-it-* / it-* 类）→ 是我们注入/翻译的产物。
-   *  用 WeakSet 缓存本批判定结果，避免同一节点被多条 record 重复爬祖先。 */
+  /** 节点本身是否我们的产物（或我们的渲染动作写入的节点）。只做直接判定与
+   *  有界补判定，不再 closest 爬整条祖先链：站点把我们的产物包进它自己的新容器、
+   *  或往产物内部插入新内容时，新容器/新内容节点自身不带标记，closest 会把它们
+   *  连同整条记录误判为自身产物而漏扫。
+   *  补判定清单（均来自 renderer/input 写入点核对，见 tests/observerScan.test.ts）：
+   *  - 元素级借用标记 data-it-src / data-it-processing / data-it-inside：包裹搬运、
+   *    解包、批次套壳期间被增删的站点容器（标记先于搬运写入，判定时必已在）；
+   *  - 文本级快照标记 data-it-orig-text / data-it-ctl-*：我们原位替换/还原文字时
+   *    插入的文本节点，其父元素必带快照标记；
+   *  - it-chunk / it-err-text / it-input-btn：自身不带 data-it-* 的自产元素；
+   *  - data-it-ui 子树内部节点（工具条/气泡/角标的按钮、面板、文字）：向上只认
+   *    data-it-ui 根——UI 树完全由我们创建、不经过站点节点，攀爬结论为真时节点
+   *    必是我们的，缓存无误判外部节点的风险。 */
   private isOwnNode(node: Node): boolean {
-    if (this.ownNodeCache.has(node)) return true;
-    // 用 closest 一次匹配所有标记，比手写遍历 attributes + classList 更快
-    let el: Element | null =
+    const isTextNode = node.nodeType === Node.TEXT_NODE;
+    const el =
       node.nodeType === Node.ELEMENT_NODE
         ? (node as Element)
-        : node.nodeType === Node.TEXT_NODE
+        : isTextNode
           ? node.parentElement
           : null;
-    if (el && el.closest("[data-it-unit],[data-it-ui],.it-translated,.it-wrap,.it-orig")) {
-      this.ownNodeCache.add(node);
+    if (!el) return false;
+    // 直接判定：我们创建并直接标记的节点（译文/占位/包裹层/UI 根/拆段与错误子元素）
+    if (el.hasAttribute("data-it-unit") || el.hasAttribute("data-it-ui")) return true;
+    if (
+      el.classList.contains("it-translated") ||
+      el.classList.contains("it-wrap") ||
+      el.classList.contains("it-orig") ||
+      el.classList.contains("it-chunk") ||
+      el.classList.contains("it-err-text") ||
+      el.classList.contains("it-input-btn")
+    ) {
       return true;
+    }
+    if (isTextNode) {
+      // 我们写入的文字：父元素带文字快照标记（原位替换/控件替换/还原时的增删）
+      if (
+        el.hasAttribute("data-it-orig-text") ||
+        el.hasAttribute("data-it-ctl-orig") ||
+        el.hasAttribute("data-it-ctl-trans")
+      ) {
+        return true;
+      }
+    } else if (
+      el.hasAttribute("data-it-src") || // 翻译容器：包裹搬运/解包时被增删
+      el.hasAttribute("data-it-processing") || // 批次套壳期间被移除的在途容器
+      el.hasAttribute("data-it-inside") // 内插译文容器被搬运时
+    ) {
+      return true;
+    }
+    // UI 子树内部节点：向上只找 data-it-ui 根（UI 根挂在 body/documentElement 下，
+    // 站点外部节点向上爬只会到 body/html，不会误入 UI 根）
+    if (this.ownUiCache.has(el)) return true;
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.hasAttribute("data-it-ui")) {
+        this.ownUiCache.add(el);
+        return true;
+      }
     }
     return false;
   }

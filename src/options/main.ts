@@ -435,60 +435,86 @@ function init(): void {
     }
   });
   $("btn-test").addEventListener("click", async () => {
-    const s = await readForm();
-    await runTestConnection(s.api, "btn-test", "主 API");
+    try {
+      const s = await readForm();
+      await runTestConnection(s.api, "btn-test", "主 API");
+    } catch (err) {
+      // readForm 抛错（如站点规则 JSON 解析失败）发生在 runTestConnection 之前，需在此兜底
+      setStatus(`测试失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    } finally {
+      // readForm 抛错时按钮尚未进入 runTestConnection 的禁用流程；置 false 幂等，重复无妨
+      ($("btn-test") as HTMLButtonElement).disabled = false;
+    }
   });
   $("btn-test-backup").addEventListener("click", async () => {
-    const s = await readForm();
-    if (!s.backupApi) {
-      setStatus(
-        "未配置备用 API（填写备用 BaseURL 和模型，或选择 Google / Microsoft 免费通道）",
-        "err"
-      );
-      return;
+    try {
+      const s = await readForm();
+      if (!s.backupApi) {
+        setStatus(
+          "未配置备用 API（填写备用 BaseURL 和模型，或选择 Google / Microsoft 免费通道）",
+          "err"
+        );
+        return;
+      }
+      await runTestConnection(s.backupApi, "btn-test-backup", "备用 API");
+    } catch (err) {
+      setStatus(`测试失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    } finally {
+      ($("btn-test-backup") as HTMLButtonElement).disabled = false;
     }
-    await runTestConnection(s.backupApi, "btn-test-backup", "备用 API");
   });
   $("btn-clear-cache").addEventListener("click", async () => {
-    const res = (await chrome.runtime.sendMessage({
-      type: "clear-cache",
-    } as ClearCacheMessage)) as {
-      ok?: boolean;
-      error?: string;
-    };
-    setStatus(
-      res?.ok ? "缓存已清空 ✔" : `清空失败：${res?.error ?? "未知错误"}`,
-      res?.ok ? "ok" : "err"
-    );
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: "clear-cache",
+      } as ClearCacheMessage)) as {
+        ok?: boolean;
+        error?: string;
+      };
+      setStatus(
+        res?.ok ? "缓存已清空 ✔" : `清空失败：${res?.error ?? "未知错误"}`,
+        res?.ok ? "ok" : "err"
+      );
+    } catch (err) {
+      setStatus(`清空失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    }
     void refreshCacheStats();
   });
 
   $("btn-cleanup-cache").addEventListener("click", async () => {
-    const res = (await chrome.runtime.sendMessage({
-      type: "cleanup-cache",
-    })) as CleanupCacheResponseMessage;
-    setStatus(
-      res?.ok
-        ? `清理完成 ✔ 移除 ${res.removed ?? 0} 条过期/超额条目`
-        : `清理失败：${res?.error ?? "未知错误"}`,
-      res?.ok ? "ok" : "err"
-    );
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: "cleanup-cache",
+      })) as CleanupCacheResponseMessage;
+      setStatus(
+        res?.ok
+          ? `清理完成 ✔ 移除 ${res.removed ?? 0} 条过期/超额条目`
+          : `清理失败：${res?.error ?? "未知错误"}`,
+        res?.ok ? "ok" : "err"
+      );
+    } catch (err) {
+      setStatus(`清理失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    }
     void refreshCacheStats();
   });
 
   $("btn-export").addEventListener("click", async () => {
-    // 走统一的导出入口：API Key 保持加密态落盘，避免明文泄进导出文件
-    const stored = await exportSettings();
-    const blob = new Blob([JSON.stringify(stored, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `auto-translate-settings-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus("设置已导出 ✔", "ok");
+    try {
+      // 走统一的导出入口：API Key 保持加密态落盘，避免明文泄进导出文件
+      const stored = await exportSettings();
+      const blob = new Blob([JSON.stringify(stored, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `auto-translate-settings-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus("设置已导出 ✔", "ok");
+    } catch (err) {
+      setStatus(`导出失败：${err instanceof Error ? err.message : String(err)}`, "err");
+    }
   });
 
   $("btn-import").addEventListener("click", () => ($("import-file") as HTMLInputElement).click());

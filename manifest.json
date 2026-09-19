@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "109",
   "name": "AI 沉浸式网页翻译",
   "version": "0.1.0",
   "description": "基于自建 AI API 的沉浸式网页翻译插件：双语对照、划词翻译、输入框翻译、划词朗读",
