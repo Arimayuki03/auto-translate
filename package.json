@@ -1,6 +1,6 @@
 {
   "name": "auto-translate",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "AI 沉浸式网页翻译浏览器插件（Edge/Chrome，Manifest V3）",
   "private": true,
   "type": "module",
