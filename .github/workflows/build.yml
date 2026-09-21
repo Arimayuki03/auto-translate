@@ -21,9 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # node 24 自带 npm 11，与本地开发环境一致：lockfile 由 npm 11 生成，
+      # npm 10（node 20 自带）校验会重算出缺失的可选 peer 边（esbuild@0.28.x）
+      # 而判 lockfile 不同步——见 5c39931 与 2026-09-21 红灯，勿降回 node 20
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - run: npm ci
