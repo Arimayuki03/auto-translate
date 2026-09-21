@@ -1,6 +1,6 @@
-# AI 沉浸式网页翻译
-
 <div align="center">
+
+# AI 沉浸式网页翻译
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/Arimayuki03/auto-translate/releases)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-4285F4?logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/concepts/mv3-overview)
