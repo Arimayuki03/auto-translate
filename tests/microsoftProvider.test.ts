@@ -8,6 +8,7 @@
  * - 超时按字符数缩放（封顶 120s）。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { microsoftProvider } from "../src/background/providers/microsoft";
 import { freeSiblingApi, scaleTimeoutMs, TranslateService } from "../src/background/translate";
 import type { ChatMessage, ChatOptions } from "../src/background/providers/types";
@@ -81,6 +82,7 @@ function microsoftOk(texts: string[]): Response {
 
 describe("microsoftProvider 请求形状", () => {
   afterEach(() => {
+    uninstallChromeMock();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -174,6 +176,8 @@ describe("microsoftProvider 请求形状", () => {
 });
 
 describe("免费通道互切与超时缩放", () => {
+  afterEach(() => uninstallChromeMock());
+
   it("freeSiblingApi：googlefree ↔ microsoft 互为备份；有备用 API 或非免费主通道时为 null", () => {
     expect(freeSiblingApi(freeSettings("googlefree"))?.format).toBe("microsoft");
     expect(freeSiblingApi(freeSettings("microsoft"))?.format).toBe("googlefree");

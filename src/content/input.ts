@@ -8,11 +8,20 @@ export function initInput(
   engine: PageEngine,
   enabled: boolean,
   isSensitive?: () => boolean
-): void {
-  if (!enabled) return;
+): () => void {
+  if (!enabled) return () => {};
   let btn: HTMLElement | null = null;
   let field: HTMLElement | null = null;
   let hideTimer: number | undefined;
+  /** 在途翻译的中止入口：总开关关闭时调用，丢弃未完成的回填结果 */
+  let inFlightAbort: (() => void) | null = null;
+
+  /** 总开关关闭等场景的清理：移除按钮、中止在途翻译。幂等（重复调用为 no-op）。 */
+  function destroy(): void {
+    inFlightAbort?.();
+    inFlightAbort = null;
+    hide();
+  }
 
   function hide(): void {
     btn?.remove();
@@ -38,6 +47,9 @@ export function initInput(
     field = f;
     const b = document.createElement("button");
     b.className = "it-input-btn";
+    // 标记为本扩展 UI（与 bubble.ts / hover.ts 一致）：extractor 的 isSelfExcluded
+    // 只认 data-it-ui/data-it-unit，缺标记会被当页面控件翻译，title 也被属性翻译
+    b.setAttribute("data-it-ui", "");
     b.textContent = f.hasAttribute("data-it-input-translated") ? t("restore") : t("translate");
     b.title = t("inputTranslateTitle");
     b.addEventListener("mousedown", (e) => e.preventDefault()); // 保持输入框焦点
@@ -61,8 +73,19 @@ export function initInput(
     if (!text) return;
     b.disabled = true;
     b.textContent = "…";
+    let aborted = false;
+    let cancelled = false;
+    // 注册中止入口：总开关关闭时由 destroy 调用，丢弃未完成的回填结果
+    inFlightAbort = () => {
+      cancelled = true;
+    };
     try {
       const result = await engine.translateText(text);
+      // await 期间总开关可能已关闭（isSensitive 回调即 isBlocked）：开关关闭后放弃回填
+      if (cancelled || isSensitive?.()) {
+        aborted = true;
+        return;
+      }
       if (!f.hasAttribute("data-it-input-orig")) {
         f.setAttribute("data-it-input-orig", getFieldText(f));
       }
@@ -70,10 +93,15 @@ export function initInput(
       f.setAttribute("data-it-input-translated", "");
       b.textContent = t("restore"); // 按钮保留，可再点还原
     } catch {
+      if (cancelled || isSensitive?.()) {
+        aborted = true;
+        return;
+      }
       b.textContent = t("inputFailed");
       setTimeout(() => (b.textContent = t("translate")), 1200);
     } finally {
       b.disabled = false;
+      if (inFlightAbort && !aborted) inFlightAbort = null;
     }
   }
 
@@ -113,6 +141,9 @@ export function initInput(
     clearTimeout(hideTimer);
     hideTimer = window.setTimeout(hide, 150);
   });
+
+  // 清理入口：总开关关闭时由 index.ts 调用（关闭按钮 + 中止在途翻译）
+  return destroy;
 }
 
 function isTranslatableField(el: HTMLElement): boolean {
@@ -128,9 +159,19 @@ function getFieldText(el: HTMLElement): string {
 
 function setFieldText(el: HTMLElement, text: string): void {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    el.value = text;
+    // 绕过 React 注入到实例上的 value tracker（inputValueTracking）：直接写 el.value 走
+    // 实例 setter，tracker 的 lastValue 同步为新值，随后派发的 input 事件被 React 的
+    // ChangeEventPlugin 判定「值未变化」而吞掉，onChange 不触发、受控组件 state 不更新。
+    // 改走原型上的原生 setter，tracker 记录不到赋值，事件即可正常派发。
+    const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    descriptor?.set?.call(el, text);
     el.dispatchEvent(new Event("input", { bubbles: true }));
   } else if (el.isContentEditable) {
     el.textContent = text;
+    // contenteditable 框（Draft.js / ProseMirror / 普通监听者）：赋值不派发任何事件，
+    // 框架感知不到变化。补一个 input 事件让监听者同步（React 对 contenteditable 走
+    // beforeinput/textChange 管线，标准 input 事件至少覆盖原生与多数轻量实现）
+    el.dispatchEvent(new InputEvent("input", { bubbles: true }));
   }
 }

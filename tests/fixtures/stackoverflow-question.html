@@ -1,6 +1,7 @@
 <!--
   Stack Overflow 问题页简化片段：投票栏/签名/相关链接不译,问题与回答正文应保留。
-  另含一个 .s-prose.js-post-body 后紧跟的 div（站点规则排除区）。
+  回答正文 .s-prose.js-post-body 后紧跟一个「相关问题」提示条 div（站点规则的
+  兄弟选择器 div.s-prose.js-post-body + div 的排除目标）。
 -->
 <div id="question">
   <div class="votecell"><div class="js-voting-container"><span class="vote-count-post">42</span></div></div>
@@ -18,8 +19,8 @@
     <div class="s-prose js-post-body">
       <p>Promise.all preserves the order of the input array regardless of completion order, so map is the right approach.</p>
     </div>
+    <div class="s-sidebarwidget s-noticemod mt24">Related: How do I return the response from an asynchronous call?</div>
     <div class="js-post-signature"><span class="community-wiki">edited by community wiki</span></div>
-    <div class="s-prose js-post-body + div"></div>
   </div>
 </div>
 <div id="left-sidebar"><a href="/">Home</a><a href="/questions">Questions</a></div>

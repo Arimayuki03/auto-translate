@@ -5,6 +5,7 @@ import {
   makeDiagnostic,
   postJson,
   postSSE,
+  redactSecrets,
   withStreamFallback,
 } from "./http";
 import type { ChatMessage, ChatOptions, ChatResult, Provider } from "./types";
@@ -123,9 +124,12 @@ async function chatStream(
           onDelta(delta);
         }
       } else if (evt.type === "error") {
+        // 流内 error.message 可能回显密钥（x-api-key 头名已被 redactSecrets 的
+        // /authorization|api-key/i 正则覆盖），拼接前必须脱敏
+        const message = redactSecrets(evt.error?.message ?? "unknown", url, headers);
         throw new ApiError(
           "server",
-          `流式响应返回错误：${evt.error?.message ?? "unknown"}`,
+          `流式响应返回错误：${message}`,
           makeDiagnostic("anthropic", url, { code: "server" })
         );
       }

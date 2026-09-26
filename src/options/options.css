@@ -704,8 +704,16 @@ body {
     margin-left: auto;
   }
 
+  /* 窄屏不隐藏状态栏：保存失败、导入校验、测试连接、缓存清理结果都要可见。
+     顶条内单行截断，避免多行错误把侧栏顶条撑高 */
   .status {
-    display: none;
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .content {

@@ -20,16 +20,17 @@ import {
 import { importSettings } from "../src/shared/storage";
 import type { Settings } from "../src/shared/types";
 
-function makeToken(t: string): string {
-  const payload = btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 600 }))
+/** 构造端点 JWT：t 为签名后缀标记，ttlSec 控制 exp（默认 600s = 正常令牌寿命） */
+function makeToken(t: string, ttlSec = 600): string {
+  const payload = btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + ttlSec }))
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
   return `header.${payload}.sig-${t}`;
 }
 
-function tokenResponse(t: string): Response {
-  return new Response(JSON.stringify({ t: makeToken(t), r: "eastus" }), { status: 200 });
+function tokenResponse(t: string, ttlSec = 600): Response {
+  return new Response(JSON.stringify({ t: makeToken(t, ttlSec), r: "eastus" }), { status: 200 });
 }
 
 function audioResponse(): Response {
@@ -195,29 +196,41 @@ describe("synthesizeSpeech 合成请求", () => {
   it("令牌失效重发拥有独立计时窗口：重发前等待数秒也不吃掉重发自身的 30s", async () => {
     // 旧实现把首次请求与重发放在同一个 withRequestTimeout 作用域：
     // 首次请求若耗掉大半窗口后返回 401，重发只剩零头时间，可恢复的令牌失效被误报成超时。
-    // 现在 401 后清缓存重取令牌 + 重发各自计时；这里用真实计时器验证重发全程畅通。
-    let synthCalls = 0;
-    let tokenCount = 0;
-    const fetchMock = routeFetch(async (url) => {
-      if (url.includes("dev.microsofttranslator.com")) {
-        tokenCount++;
-        return tokenResponse(`t${tokenCount}`);
-      }
-      synthCalls++;
-      // 首次合成请求挂 3 秒才返回 401（老实现若共用窗口，剩余 27s 仍够——
-      // 所以再把首次返回后的令牌获取也拖 3 秒，压缩共用窗口下的余量并确保语义成立）
-      if (synthCalls === 1) {
-        await new Promise((r) => setTimeout(r, 3000));
-        return new Response("", { status: 401 });
-      }
-      return audioResponse();
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    // 现在 401 后清缓存重取令牌 + 重发各自计时。fake timers 推进 3s 延迟（原真实 sleep 6s）。
+    vi.useFakeTimers();
+    try {
+      let synthCalls = 0;
+      let tokenCount = 0;
+      const fetchMock = routeFetch(async (url) => {
+        if (url.includes("dev.microsofttranslator.com")) {
+          tokenCount++;
+          return tokenResponse(`t${tokenCount}`);
+        }
+        synthCalls++;
+        // 首次合成请求挂 3 秒才返回 401（老实现若共用窗口，剩余 27s 仍够——
+        // 所以再把首次返回后的令牌获取也拖 3 秒，压缩共用窗口下的余量并确保语义成立）
+        if (synthCalls === 1) {
+          await new Promise((r) => setTimeout(r, 3000));
+          return new Response("", { status: 401 });
+        }
+        return audioResponse();
+      });
+      vi.stubGlobal("fetch", fetchMock);
 
-    const res = await synthesizeSpeech("重试", "zh-CN");
-    expect(res.audioBase64.length).toBeGreaterThan(0);
-    expect(synthCalls).toBe(2);
-    expect(tokenCount).toBe(2);
+      const assertion = expect(synthesizeSpeech("重试", "zh-CN")).resolves.toMatchObject({
+        audioBase64: expect.any(String),
+      });
+      // 分段推进：crypto.subtle 签名链是真实异步，3s 计时器在链路走完前尚未注册，
+      // 一次推 6s 会错过中途注册点。每次推 1s 逐步覆盖「注册点 + 3s 窗口」。
+      for (let i = 0; i < 7; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      await assertion;
+      expect(synthCalls).toBe(2);
+      expect(tokenCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("合成请求挂起超过 30s 被硬超时打断（计时覆盖到响应体）", async () => {
@@ -245,6 +258,41 @@ describe("synthesizeSpeech 合成请求", () => {
       vi.useRealTimers();
     }
   });
+
+  it("令牌临近过期（< 3 分钟窗口）时下次合成重新取令牌", async () => {
+    // getEndpointToken 只在 now < expiredAt - 3min 时复用缓存：
+    // exp = now + 60s 的令牌一落缓存就已进入刷新窗口，第二次合成必须重新请求令牌端点。
+    // 旧实现若把窗口判断写成 expiredAt - now < 0（只在真过期后刷新），本用例抓到回归。
+    let tokenCount = 0;
+    const fetchMock = routeFetch((url) => {
+      if (url.includes("dev.microsofttranslator.com")) {
+        tokenCount++;
+        return tokenResponse(`t-short-${tokenCount}`, 60);
+      }
+      return audioResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await synthesizeSpeech("第一条", "zh-CN");
+    const firstAuth = (
+      (fetchMock.mock.calls[1]?.[1] as RequestInit).headers as Record<string, string>
+    )["Authorization"];
+    expect(firstAuth).toContain(".sig-t-short-1");
+
+    // 第二次合成：短寿命令牌在刷新窗口内 → 令牌端点被再次请求，Authorization 换新
+    await synthesizeSpeech("第二条", "zh-CN");
+    const tokenCalls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("dev.microsofttranslator")
+    );
+    expect(tokenCalls.length).toBe(2);
+    const synthCalls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("cognitiveservices")
+    );
+    expect(synthCalls.length).toBe(2);
+    const secondAuth = (synthCalls[1]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(secondAuth["Authorization"]).toContain(".sig-t-short-2");
+    expect(secondAuth["Authorization"]).not.toBe(firstAuth);
+  });
 });
 
 describe("TTS 熔断", () => {
@@ -271,9 +319,42 @@ describe("TTS 熔断", () => {
     await synthesizeSpeech("成功", "zh-CN");
     expect(isEdgeTTSCircuitOpen()).toBe(false);
   });
+
+  it("熔断 15 分钟到期后自动恢复，恢复后能重新发起请求", async () => {
+    // isEdgeTTSCircuitOpen(now) 按 circuitOpenUntil > now 判定：
+    // 开路瞬间 + 15min 整点边界上熔断恰好关闭（实现若把比较写成 >= 则到期仍熔断，此处抓住）。
+    // 所有端点都 500：5 次失败都发生在令牌端点（无可用缓存令牌），错误为「令牌获取失败」。
+    vi.useFakeTimers();
+    try {
+      const fetchMock = routeFetch(() => new Response("server error", { status: 500 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      for (let i = 0; i < 5; i++) {
+        await expect(synthesizeSpeech("失败", "zh-CN")).rejects.toThrow(/令牌获取失败（HTTP 500）/);
+      }
+      expect(isEdgeTTSCircuitOpen()).toBe(true);
+      const callsAtOpen = fetchMock.mock.calls.length;
+
+      // 推进到恰好 15 分钟：熔断应关闭（边界语义）。边界前 1ms 仍应开路。
+      await vi.advanceTimersByTimeAsync(CIRCUIT_OPEN_MS - 1);
+      expect(isEdgeTTSCircuitOpen()).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(isEdgeTTSCircuitOpen()).toBe(false);
+
+      // 恢复后真实发请求：熔断解除后 synthesizeSpeech 不再直接抛「熔断」，
+      // 而是重新请求端点（此处仍 500，错误回到 HTTP 500 而非熔断文案）
+      await expect(synthesizeSpeech("恢复后重试", "zh-CN")).rejects.toThrow(/令牌获取失败（HTTP 500）/);
+      expect(fetchMock.mock.calls.length).toBe(callsAtOpen + 1); // 恢复后令牌端点 1 次
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ===== 设置导入：tts 段逐字段校验 =====
+
+/** 与 src/background/edgeTts.ts 的 CIRCUIT_OPEN_MS 保持一致（模块未导出） */
+const CIRCUIT_OPEN_MS = 15 * 60 * 1000;
 
 function mockStorage(): void {
   // 内存持久化：importSettings 现在先读当前设置为底再合并（P0-4），需要真实的读回

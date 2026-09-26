@@ -6,6 +6,7 @@
  * 3. 禁用自动翻译按「子网页（host+pathname）」粒度，不波及其他子页。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import {
@@ -72,6 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallChromeMock();
   __resetDisabledCache();
   vi.restoreAllMocks();
 });

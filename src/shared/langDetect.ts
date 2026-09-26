@@ -73,18 +73,29 @@ export function guessFromText(text: string): SourceLang {
     ["ar", /[\u0600-\u06ff]/],
     ["th", /[\u0e00-\u0e7f]/],
   ];
+  const countOf = (re: RegExp): number => (text.match(new RegExp(re.source, "g")) ?? []).length;
   for (const [lang, re] of samples) {
-    const chars = text.match(new RegExp(re.source, "g"));
-    // 特征字符达到一定密度才判定（假名/韩文几乎排他，可以直接判；汉字需先排除日文）
-    const count = chars ? chars.length : 0;
+    const count = countOf(re);
     if (count === 0) continue;
-    if (lang === "zh") {
-      // 同时含假名 → 更可能是日文
-      if (/[\u3040-\u30ff]/.test(text)) continue;
-      if (count >= Math.max(5, text.length * 0.15)) return "zh";
-      continue;
+    if (lang === "zh" || lang === "ja" || lang === "ko") {
+      // 密度门槛（zh/ja/ko 同式 count >= max(5, len*0.15)）：假名/谚文/汉字并非完全
+      // 排他（中文页会夹带「フィギュア」等假名外来词），特征字符绝对数量太少时
+      // 不够下结论，continue 落到后续判定（zh 或返回 ""）
+      if (count < Math.max(5, text.length * 0.15)) continue;
+      if (lang === "ja") {
+        // 假名/汉字占比：真日文页假名/汉字比通常 >10%（助词及送假名密集），
+        // 中文页夹带的假名几乎总远低于此 → 占比过低视为中文夹带外来词，落 zh 分支
+        const kanji = countOf(/[\u4e00-\u9fff]/);
+        if (kanji > 0 && count < kanji * 0.1) continue;
+        return "ja";
+      }
+      if (lang === "ko") return "ko"; // 谚文与汉字/假名近乎互斥，过密度门槛即可判
+      // zh：假名相对密度 >= 15%（同 ja 密度式，不含绝对下限——那是「确信日文」
+      // 的条件，这里只排除「假名多到不像纯中文」的短混排文本，宁缺毋滥返回 ""）。
+      // 能落到这里的假名，都是未过 ja 严格门槛的夹带外来词，不再整体回滚中文判定
+      if (countOf(/[\u3040-\u309f\u30a0-\u30ff]/) >= text.length * 0.15) continue;
+      return "zh";
     }
-    if (lang === "ja" || lang === "ko") return lang;
     if (count >= Math.max(5, text.length * 0.3)) return lang;
   }
   // 拉丁字母：区分常见西文需要词典级信息，字符集做不到，一律不猜

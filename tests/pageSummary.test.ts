@@ -6,6 +6,7 @@
  * （content 引擎集成见 pageSummaryEngine.test.ts，jsdom 环境）
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { SummaryCache, fnv1aHex } from "../src/background/cache";
 import { TranslateService } from "../src/background/translate";
 import { DEFAULT_SETTINGS } from "../src/shared/storage";
@@ -100,6 +101,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallChromeMock();
   vi.unstubAllGlobals();
 });
 

@@ -10,6 +10,7 @@
  * 内容由下次全量/点击扫描覆盖。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { extractUnits } from "../src/content/extractor";
 import type { ExtractOptions, TranslationUnit } from "../src/content/extractor";
 import { PageEngine } from "../src/content/engine";
@@ -256,13 +257,13 @@ describe("engine：shadow 内单元进入完整翻译管线", () => {
       if (msg?.type === "check-cache") return { cachedCount: 0 };
       return undefined;
     });
-    (globalThis as { chrome?: unknown }).chrome = {
-      runtime: { sendMessage },
-      storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-    } as unknown as typeof chrome;
+    installChromeMock({ extra: { runtime: { sendMessage } } });
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    uninstallChromeMock();
+    vi.restoreAllMocks();
+  });
 
   it("translateAll 覆盖 shadow 内容，译文落在 shadow root 内", async () => {
     const { shadowRoot } = attachOpenShadow();

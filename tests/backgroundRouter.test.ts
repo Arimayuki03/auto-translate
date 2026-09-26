@@ -33,6 +33,7 @@ const h = vi.hoisted(() => ({
   synthesizeSpeech: vi.fn(),
   ttsPlay: vi.fn(),
   ttsStop: vi.fn(),
+  handleTtsLivenessDisconnect: vi.fn(),
   getSettings: vi.fn(),
   createProvider: vi.fn(),
 }));
@@ -65,7 +66,11 @@ vi.mock("../src/background/sessionRegistry", () => ({
   abortSession: h.abortSession,
 }));
 vi.mock("../src/background/edgeTts", () => ({ synthesizeSpeech: h.synthesizeSpeech }));
-vi.mock("../src/background/ttsPlayback", () => ({ ttsPlay: h.ttsPlay, ttsStop: h.ttsStop }));
+vi.mock("../src/background/ttsPlayback", () => ({
+  ttsPlay: h.ttsPlay,
+  ttsStop: h.ttsStop,
+  handleTtsLivenessDisconnect: h.handleTtsLivenessDisconnect,
+}));
 vi.mock("../src/shared/storage", () => ({ getSettings: h.getSettings }));
 vi.mock("../src/background/providers", () => ({ createProvider: h.createProvider }));
 
@@ -73,6 +78,13 @@ vi.mock("../src/background/providers", () => ({ createProvider: h.createProvider
 
 const onMessageAdd: Mock = vi.fn();
 const onConnectAdd: Mock = vi.fn();
+// 生命周期段监听器（onInstalled/onAlarm/onCommand）：同样捕获，供用例取出后直接驱动
+const onInstalledAdd: Mock = vi.fn();
+const onAlarmAdd: Mock = vi.fn();
+const onCommandAdd: Mock = vi.fn();
+const alarmsCreate: Mock = vi.fn();
+const tabsQuery: Mock = vi.fn();
+const tabsSendMessage: Mock = vi.fn();
 
 type SendResponseFn = (response?: unknown) => void;
 type OnMessageListener = (
@@ -85,22 +97,29 @@ const SENDER = { tab: { id: 7 }, frameId: 2 } as chrome.runtime.MessageSender;
 
 let messageListener: OnMessageListener;
 let connectListener: (port: unknown) => void;
+let installedListener: (details: { reason: string }) => void;
+let alarmListener: (alarm: { name: string }) => void;
+let commandListener: (command: string) => void;
 
 beforeAll(async () => {
   (globalThis as { chrome?: unknown }).chrome = {
     runtime: {
-      onInstalled: { addListener: vi.fn() },
+      onInstalled: { addListener: onInstalledAdd },
       onStartup: { addListener: vi.fn() },
       onMessage: { addListener: onMessageAdd },
       onConnect: { addListener: onConnectAdd },
     },
-    alarms: { onAlarm: { addListener: vi.fn() }, create: vi.fn() },
-    commands: { onCommand: { addListener: vi.fn() } },
+    alarms: { onAlarm: { addListener: onAlarmAdd }, create: alarmsCreate },
+    commands: { onCommand: { addListener: onCommandAdd } },
+    tabs: { query: tabsQuery, sendMessage: tabsSendMessage },
   } as unknown as typeof chrome;
   // 动态 import 触发 addListener 注册（模块只在本文件加载，隔离于其他测试文件）
   await import("../src/background/index");
   messageListener = onMessageAdd.mock.calls[0][0] as OnMessageListener;
   connectListener = onConnectAdd.mock.calls[0][0] as (port: unknown) => void;
+  installedListener = onInstalledAdd.mock.calls[0][0] as (details: { reason: string }) => void;
+  alarmListener = onAlarmAdd.mock.calls[0][0] as (alarm: { name: string }) => void;
+  commandListener = onCommandAdd.mock.calls[0][0] as (command: string) => void;
 });
 
 beforeEach(() => {
@@ -257,7 +276,7 @@ describe("onMessage 路由：其余消息类型", () => {
     expect(h.endKeepAlive).toHaveBeenCalledTimes(1);
   });
 
-  it("test-connection → createProvider(...).chat，回包 { id, ok, message }（文案 trim）", async () => {
+  it("test-connection → createProvider(...).chat，回包 { id, ok, message }（文案 trim），keepAlive 成对", async () => {
     const chat = vi.fn(async () => ({ text: "  连接成功  " }));
     h.createProvider.mockReturnValue({ chat });
     const api = {
@@ -274,6 +293,9 @@ describe("onMessage 路由：其余消息类型", () => {
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledTimes(1));
     expect(h.createProvider).toHaveBeenCalledWith(api);
     expect(sendResponse).toHaveBeenCalledWith({ id: "c-1", ok: true, message: "连接成功" });
+    // 慢端点测试期间 SW 不得被回收：与翻译路径同构，请求前后保活成对
+    expect(h.beginKeepAlive).toHaveBeenCalledTimes(1);
+    expect(h.endKeepAlive).toHaveBeenCalledTimes(1);
   });
 
   it("test-connection 失败（ApiError）→ 回包 { id, ok: false, error, errorCode }", async () => {
@@ -428,5 +450,62 @@ describe("划词流式 Port 网关", () => {
     const { port } = makePort("other-port");
     connectListener(port);
     expect(port.onMessage.addListener).not.toHaveBeenCalled();
+  });
+});
+
+// ===== 划词朗读存活信号 Port =====
+
+describe("划词朗读存活信号 Port（tts-play:<requestId>）", () => {
+  it("tts-play 前缀 Port → 不进流式网关；断开时以 requestId 调 handleTtsLivenessDisconnect", () => {
+    const { port, onDisconnect } = makePort("tts-play:req-9");
+    connectListener(port);
+    // 存活信号 Port 不收消息、不断开自己：只挂 onDisconnect
+    expect(port.onMessage.addListener).not.toHaveBeenCalled();
+    expect(port.disconnect).not.toHaveBeenCalled();
+    expect(port.onDisconnect.addListener).toHaveBeenCalledTimes(1);
+    onDisconnect();
+    expect(h.handleTtsLivenessDisconnect).toHaveBeenCalledWith("req-9");
+  });
+
+  it("非 tts-play 非流式 Port 名 → handleTtsLivenessDisconnect 不被调用", () => {
+    const { port, onDisconnect } = makePort("unrelated");
+    connectListener(port);
+    onDisconnect();
+    expect(h.handleTtsLivenessDisconnect).not.toHaveBeenCalled();
+  });
+});
+
+// ===== 生命周期：onInstalled / onAlarm / onCommand =====
+
+describe("生命周期：安装 alarm 与命令中继", () => {
+  it("onInstalled → 创建每日清理 alarm，名字 it-cache-cleanup，周期 24h、延迟 1min", () => {
+    installedListener({ reason: "install" });
+    expect(alarmsCreate).toHaveBeenCalledTimes(1);
+    expect(alarmsCreate).toHaveBeenCalledWith("it-cache-cleanup", {
+      periodInMinutes: 24 * 60,
+      delayInMinutes: 1,
+    });
+  });
+
+  it("onAlarm 收到 it-cache-cleanup → 调用 cleanupCache（结果仅记日志，静默收尾）", async () => {
+    h.cleanupCache.mockResolvedValue(3);
+    alarmListener({ name: "it-cache-cleanup" });
+    await vi.waitFor(() => expect(h.cleanupCache).toHaveBeenCalledTimes(1));
+    expect(h.cleanupCache).toHaveBeenCalledWith();
+  });
+
+  it("onAlarm 收到未知名字 → 忽略，不调用 cleanupCache", async () => {
+    alarmListener({ name: "other-alarm" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.cleanupCache).not.toHaveBeenCalled();
+  });
+
+  it("onCommand → 查询当前活动标签页并中继 { type: \"it-command\", command } 到该页", async () => {
+    tabsQuery.mockResolvedValue([{ id: 42 }]);
+    tabsSendMessage.mockResolvedValue(undefined);
+    commandListener("toggle-translate");
+    await vi.waitFor(() => expect(tabsSendMessage).toHaveBeenCalledTimes(1));
+    expect(tabsQuery).toHaveBeenCalledWith({ active: true, currentWindow: true });
+    expect(tabsSendMessage).toHaveBeenCalledWith(42, { type: "it-command", command: "toggle-translate" });
   });
 });

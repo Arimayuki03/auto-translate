@@ -4,6 +4,7 @@
  * 验证多次切换子页后译文仍保持（不还原成原文）。回归测试：切换几个子网页后自动还原 bug。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { PageObserver } from "../src/content/observer";
 import { Renderer } from "../src/content/renderer";
@@ -121,25 +122,21 @@ beforeEach(() => {
   document.elementFromPoint = () => null;
 
   // Mock chrome.*
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: {
-      sendMessage: vi.fn(async (msg: { type: string; texts?: string[]; id?: string }) => {
-        if (msg?.type === "translate") {
-          return { id: msg.id, ok: true, results: (msg.texts ?? []).map((t) => `【译】${t}`) };
-        }
-        if (msg?.type === "check-cache") {
-          return { cachedCount: 0 };
-        }
-        return undefined;
-      }),
-    },
-    storage: {
-      local: {
-        get: vi.fn(async () => ({})),
-        set: vi.fn(async () => undefined),
+  installChromeMock({
+    extra: {
+      runtime: {
+        sendMessage: vi.fn(async (msg: { type: string; texts?: string[]; id?: string }) => {
+          if (msg?.type === "translate") {
+            return { id: msg.id, ok: true, results: (msg.texts ?? []).map((t) => `【译】${t}`) };
+          }
+          if (msg?.type === "check-cache") {
+            return { cachedCount: 0 };
+          }
+          return undefined;
+        }),
       },
     },
-  } as unknown as typeof chrome;
+  });
 
   origPushState = history.pushState;
   origReplaceState = history.replaceState;
@@ -151,6 +148,7 @@ afterEach(() => {
   if (origPushState) history.pushState = origPushState;
   if (origReplaceState) history.replaceState = origReplaceState;
   vi.useRealTimers();
+  uninstallChromeMock();
   vi.restoreAllMocks();
 });
 

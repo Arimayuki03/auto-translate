@@ -354,8 +354,10 @@ export async function postNDJSONLines(
 }
 
 /**
- * 流式 → 非流式回退包装：onDelta 缺省直接走非流式；流式失败（端点不支持 stream、
- * 中转兼容性等）且尚未产出任何增量时回退非流式重试一次。
+ * 流式 → 非流式回退包装：onDelta 缺省直接走非流式；流式失败且尚未产出任何增量时，
+ * 仅「疑似不支持流式」（不支持流式的端点/中转兼容性，或网络层失败）才回退非流式重试一次。
+ * rate_limit / auth 属于明确的服务端拒绝：回退只会多打一发请求——429 在退避生效前
+ * 冲击已限流端点，401 把硬失败的请求量翻倍——故直接上抛交上层重试/切换逻辑处理。
  * 已产出增量再回退会让调用方收到「前半段 + 重新开始的整段」重复文本，只能上抛交上层展示错误；
  * 会话已中止同样不回退（回退请求会立刻被打断）。
  */
@@ -374,6 +376,16 @@ export async function withStreamFallback(
     });
   } catch (err) {
     if (emitted || options.signal?.aborted) throw err;
+    // 疑似不支持流式（not_found/bad_request/bad_response）或网络层失败才回退；
+    // rate_limit/auth 是明确拒绝，回退无意义（直接上抛）
+    const fallbackable =
+      !(err instanceof ApiError) ||
+      err.code === "not_found" ||
+      err.code === "bad_request" ||
+      err.code === "bad_response" ||
+      err.code === "network" ||
+      err.code === "timeout";
+    if (!fallbackable) throw err;
     return runNonStream();
   }
 }
@@ -426,7 +438,9 @@ function parseRetryAfter(header: string | undefined): number | undefined {
   return undefined;
 }
 
-function redactSecrets(text: string, url: string, headers: Record<string, string>): string {
+/** 将 text 中出现的密钥（鉴权头值 / Bearer / URL key 参数）替换为 [REDACTED]：
+ *  流内错误消息、诊断预览等任何可能到达 UI 的文本都必须先过这里。 */
+export function redactSecrets(text: string, url: string, headers: Record<string, string>): string {
   const secrets = new Set<string>();
   for (const [name, value] of Object.entries(headers)) {
     if (/authorization|api-key/i.test(name)) {

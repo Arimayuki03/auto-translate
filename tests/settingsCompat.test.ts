@@ -6,6 +6,7 @@
  * - 导入校验：provider 格式非法时拒绝。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import {
   DEFAULT_SETTINGS,
   decryptApiKey,
@@ -93,7 +94,10 @@ function mockStorage(initial: Record<string, unknown> = {}): Map<string, unknown
 }
 
 beforeEach(() => vi.restoreAllMocks());
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 describe("默认 API 不被强制改为 Google 免费通道", () => {
   it("未保存设置时默认 format 为 openai（保持历史默认）", async () => {
@@ -181,9 +185,14 @@ describe("导出 / 导入往返", () => {
     if (raw.backupApi) raw.backupApi.apiKey = encryptApiKey("sk-backup-key");
 
     const exported = await exportSettings();
-    // 导出的是磁盘原始数据：Key 为密文，不泄露明文
-    const expRaw = (exported as { settings?: Settings }).settings ?? exported;
-    expect(expRaw).toBeDefined();
+    // 导出的是磁盘原始数据（settings 本体，无包装）：Key 字段是密文，
+    // 且可被 decryptApiKey 解回原文——密文形态损坏会让导入路径解出乱码
+    const expApi = (exported as { api?: { apiKey?: string } }).api;
+    expect(typeof expApi?.apiKey).toBe("string");
+    expect(expApi?.apiKey).not.toBe("sk-original-key");
+    expect(decryptApiKey(expApi?.apiKey ?? "")).toBe("sk-original-key");
+    const expBackup = (exported as { backupApi?: { apiKey?: string } }).backupApi;
+    expect(decryptApiKey(expBackup?.apiKey ?? "")).toBe("sk-backup-key");
     expect(JSON.stringify(exported)).not.toContain("sk-original-key");
     expect(JSON.stringify(exported)).not.toContain("sk-backup-key");
 

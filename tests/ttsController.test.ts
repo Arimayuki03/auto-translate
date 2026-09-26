@@ -4,7 +4,9 @@
  * - 播放中点击 = 停止：发 tts-stop、状态复位，晚到的播放响应不覆盖状态；
  * - 合成期间被停止：晚到的合成结果被丢弃（不发 tts-play）；
  * - 合成中重复点击忽略；合成/播放失败 → error 态并自动复位；
- * - 关闭气泡（stop）后一切在途请求作废。
+ * - 关闭气泡（stop）后一切在途请求作废；
+ * - 存活信号 Port：播放期间建立（名字带 requestId），收尾/停止/异常路径均断开，
+ *   页面销毁时随帧断开由 background 停播（content 侧只负责生命周期）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TtsController, type TtsState } from "../src/content/tts";
@@ -15,6 +17,24 @@ function mockRuntime(send: SendFn): ReturnType<typeof vi.fn> {
   const fn = vi.fn(send);
   (globalThis as { chrome?: unknown }).chrome = { runtime: { sendMessage: fn } };
   return fn;
+}
+
+/** 带 Port 桩的 runtime mock：捕获 connect({ name }) 建立的 Port，供断言存活信号生命周期 */
+function mockRuntimeWithPort(send: SendFn): {
+  send: ReturnType<typeof vi.fn>;
+  connect: ReturnType<typeof vi.fn>;
+  /** 按建立顺序返回已连接的 Port 桩（含 disconnect spy） */
+  ports: () => { name: string; disconnect: ReturnType<typeof vi.fn> }[];
+} {
+  const fn = vi.fn(send);
+  const connected: { name: string; disconnect: ReturnType<typeof vi.fn> }[] = [];
+  const connect = vi.fn((opts: { name: string }) => {
+    const port = { name: opts.name, disconnect: vi.fn() };
+    connected.push(port);
+    return port;
+  });
+  (globalThis as { chrome?: unknown }).chrome = { runtime: { sendMessage: fn, connect } };
+  return { send: fn, connect, ports: () => connected };
 }
 
 beforeEach(() => {
@@ -135,5 +155,67 @@ describe("TtsController 状态机", () => {
     const { ctl } = makeController();
     ctl.stop();
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("存活信号 Port 生命周期", () => {
+  it("播放期间建立 Port（名字带 requestId），播放收尾断开", async () => {
+    let resolvePlay: (v: unknown) => void = () => undefined;
+    const { send, ports } = mockRuntimeWithPort(async (msg) => {
+      if (msg.type === "tts-synthesize") {
+        return { ok: true, audioBase64: "QUJD", contentType: "audio/mpeg" };
+      }
+      if (msg.type === "tts-play") {
+        return new Promise((resolve) => (resolvePlay = resolve));
+      }
+      return { ok: true };
+    });
+    const { ctl } = makeController();
+    const p = ctl.toggle("你好", "zh-CN");
+    await vi.waitFor(() => expect(ctl.getState()).toBe("playing"));
+    // 播放中：恰好一条存活 Port，名字与 tts-play 消息的 requestId 一致
+    expect(ports()).toHaveLength(1);
+    const playMsg = send.mock.calls.find((c) => (c[0] as { type: string }).type === "tts-play")?.[0] as {
+      requestId: string;
+    };
+    expect(ports()[0]?.name).toBe(`tts-play:${playMsg.requestId}`);
+    expect(ports()[0]?.disconnect).not.toHaveBeenCalled();
+    resolvePlay({ ok: true, finished: true });
+    await p;
+    expect(ctl.getState()).toBe("idle");
+    expect(ports()[0]?.disconnect).toHaveBeenCalledTimes(1); // 收尾撤销存活信号
+  });
+
+  it("播放中点停止：Port 立即断开（先于 tts-stop 消息）", async () => {
+    let resolvePlay: (v: unknown) => void = () => undefined;
+    const { send, ports } = mockRuntimeWithPort(async (msg) => {
+      if (msg.type === "tts-synthesize") {
+        return { ok: true, audioBase64: "QUJD", contentType: "audio/mpeg" };
+      }
+      if (msg.type === "tts-play") {
+        return new Promise((resolve) => (resolvePlay = resolve));
+      }
+      return { ok: true };
+    });
+    const { ctl } = makeController();
+    const p = ctl.toggle("你好", "zh-CN");
+    await vi.waitFor(() => expect(ctl.getState()).toBe("playing"));
+    ctl.stop();
+    expect(ports()[0]?.disconnect).toHaveBeenCalledTimes(1);
+    resolvePlay({ ok: true, finished: false });
+    await p;
+    expect(send.mock.calls.some((c) => (c[0] as { type: string }).type === "tts-stop")).toBe(true);
+  });
+
+  it("播放失败路径：Port 同样被断开（不悬挂）", async () => {
+    const { ports } = mockRuntimeWithPort(async (msg) =>
+      msg.type === "tts-synthesize"
+        ? { ok: true, audioBase64: "QUJD" }
+        : { ok: false, error: "播放失败" }
+    );
+    const { ctl } = makeController();
+    await ctl.toggle("你好", "zh-CN");
+    expect(ctl.getState()).toBe("error");
+    expect(ports()[0]?.disconnect).toHaveBeenCalledTimes(1);
   });
 });

@@ -93,6 +93,15 @@ async function startTranslation(settings: Settings): Promise<void> {
   const engine = new PageEngine(renderer, settings, resolveSiteRule());
 
   let toolbar: Toolbar | null = null;
+  // 清理入口：总开关关闭时关掉划词气泡与输入框按钮、中止在途翻译请求
+  // （气泡/输入框的关闭逻辑封闭在各自闭包内，initXxx 返回统一清理函数；
+  //  子 frame 不装配这两者，保持 no-op）
+  const closeBubble = isTop
+    ? initBubble(engine, settings.translate.translateOnSelect, isBlocked, settings.tts)
+    : () => {};
+  const closeInput = isTop
+    ? initInput(engine, settings.translate.translateInput, isBlocked)
+    : () => {};
   if (isTop) {
     toolbar = new Toolbar(engine);
     toolbar.setSensitive(isBlocked()); // 敏感页 / 开关关闭时隐藏工具条
@@ -105,8 +114,6 @@ async function startTranslation(settings: Settings): Promise<void> {
       viewportLazy: settings.translate.viewportLazy,
     });
 
-    initBubble(engine, settings.translate.translateOnSelect, isBlocked, settings.tts);
-    initInput(engine, settings.translate.translateInput, isBlocked);
     // 悬停翻译：仅顶层 frame 且设置开启时装配；整页未翻译时悬停块级容器出「译」角标，点击只译该段
     if (settings.translate.translateHover) {
       initHoverTranslate({ engine, isSensitive: isBlocked });
@@ -150,12 +157,15 @@ async function startTranslation(settings: Settings): Promise<void> {
     if (msg?.type !== "it-command") return;
     if (msg.command === "toggle-translate") {
       if (isBlocked()) return; // 敏感页 / 总开关关闭时禁止翻译
-      if (engine.hasTranslated()) {
-        engine.restore();
-        void setPageDisabled(currentPageKey(), true); // 还原该子页 → 该子页禁用自动翻译
-      } else {
+      // 判定口径与工具条 onToggle 一致：按整页状态机 state 而非 hasTranslated。
+      // 悬停单译后 state 仍为 "off"，此时 Alt+T 应与工具条「译」一样翻译整页，
+      // 而不是按 hasTranslated 误判为「已翻译」只还原那一段并禁用该页自动翻译。
+      if (engine.state === "off") {
         void engine.translateAll(true); // 快捷键显式译回：属用户意图（P0-2）
         void setPageDisabled(currentPageKey(), false); // 翻译该子页 → 该子页恢复自动翻译
+      } else {
+        engine.restore();
+        void setPageDisabled(currentPageKey(), true); // 还原该子页 → 该子页禁用自动翻译
       }
     } else if (msg.command === "cycle-mode" && toolbar) {
       if (isBlocked()) return; // 敏感页 / 总开关关闭：工具条本就隐藏，快捷键同样不应改显示模式
@@ -175,6 +185,8 @@ async function startTranslation(settings: Settings): Promise<void> {
     onOff: () => {
       engine.restoreForSwitchOff();
       toolbar?.setSensitive(true); // 借用敏感页的隐藏机制收起悬浮工具条
+      closeBubble(); // 关闭划词气泡 + 中止在途流式请求
+      closeInput(); // 关闭输入框「译」按钮 + 丢弃在途单条翻译的回填
     },
     onOn: () => {
       toolbar?.setSensitive(isSensitive()); // 按当前 URL 恢复工具条显示状态

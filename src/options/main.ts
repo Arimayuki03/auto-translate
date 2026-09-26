@@ -59,6 +59,15 @@ function setStatus(text: string, kind: "ok" | "err" | "" = ""): void {
   el.className = `status ${kind}`.trim();
 }
 
+/** loadForm 时刻站点面板各文本域的初始值：供 readForm 判定「用户本会话是否编辑过」。
+ *  保存是全表单提交——若 textarea 仍停留在页面打开时的快照，popup 期间对站点名单的
+ *  增删（如「加入白名单」）会被陈旧表单整体落盘回滚；此处段级合并挡住该竞态。 */
+const initialSiteInputs: {
+  whitelist: string | null;
+  blacklist: string | null;
+  siteRules: string | null;
+} = { whitelist: null, blacklist: null, siteRules: null };
+
 function updateFormatHint(): void {
   const fmt = select("api-format").value as ApiFormat;
   const info = FORMAT_INFO[fmt];
@@ -134,9 +143,19 @@ async function loadForm(): Promise<void> {
   ($("site-rules") as HTMLTextAreaElement).value = (s.sites.rules ?? [])
     .map((r) => JSON.stringify(r))
     .join("\n");
+  // 记录初始快照：readForm 据此区分「未编辑（沿用存储现值）」与「已编辑（解析表单值）」
+  snapshotSiteInputs();
   input("cache-ttl-days").value = String(s.cache.ttlDays ?? 7);
   updateFormatHint();
   void refreshCacheStats();
+}
+
+/** 刷新站点文本域快照：loadForm 与保存成功后调用。
+ *  保存后刷新使连续两次保存之间 popup 的名单写入不会被上一轮编辑态误判覆盖。 */
+function snapshotSiteInputs(): void {
+  initialSiteInputs.whitelist = ($("whitelist") as HTMLTextAreaElement).value;
+  initialSiteInputs.blacklist = ($("blacklist") as HTMLTextAreaElement).value;
+  initialSiteInputs.siteRules = ($("site-rules") as HTMLTextAreaElement).value;
 }
 
 /** 内置站点规则勾选列表：勾选 = 启用，取消 = 禁用（落 disabledRuleIds） */
@@ -208,12 +227,12 @@ function rangedInt(input: HTMLInputElement, fallback: number, range: readonly [n
   return Math.min(range[1], Math.max(range[0], parsed));
 }
 
-async function readForm(): Promise<Settings> {
-  const current = await getSettings();
+/** 从表单构建主 API 配置段：readForm（保存）与测试连接路径共用，避免两处漂移 */
+function buildApiForm(current: Settings): ApiConfig {
   // temperature 允许为 0（parseFloat 结果 NaN 才回退默认值，0 是合法值不能被 || 吞掉）
   const tempParsed = parseFloat(($("temperature") as HTMLInputElement).value);
   const tempRange = SETTING_RANGES.temperature;
-  const api: ApiConfig = {
+  return {
     format: select("api-format").value as ApiFormat,
     baseUrl: ($("base-url") as HTMLInputElement).value.trim(),
     apiKey: ($("api-key") as HTMLInputElement).value.trim(),
@@ -245,27 +264,47 @@ async function readForm(): Promise<Settings> {
         ? ($("free-backup-endpoint") as HTMLInputElement).value.trim()
         : current.api.freeBackupEndpoint,
   };
+}
+
+/** 从表单构建备用 API 配置段：readForm（保存）与测试连接路径共用 */
+function buildBackupApiForm(current: Settings, api: ApiConfig): ApiConfig | undefined {
   const backupBaseUrl = ($("backup-base-url") as HTMLInputElement).value.trim();
   const backupModel = ($("backup-model") as HTMLInputElement).value.trim();
   const backupFormat = select("backup-format").value as ApiFormat;
   // 两种免费通道（googlefree / microsoft）都无需 BaseURL/Key/模型。只认 googlefree
   // 会把选微软免费通道的备用配置判成「未配置」（空 baseUrl+空 model 过不了存在性检查）
   const backupFree = backupFormat === "googlefree" || backupFormat === "microsoft";
-  const backupApi: ApiConfig | undefined =
-    backupFree || (backupBaseUrl && backupModel)
-      ? {
-          format: backupFormat,
-          baseUrl: backupFree ? "" : backupBaseUrl,
-          apiKey: backupFree ? "" : ($("backup-api-key") as HTMLInputElement).value.trim(),
-          model: backupFree ? "" : backupModel,
-          temperature: api.temperature,
-          timeoutMs: api.timeoutMs,
-          maxConcurrency: api.maxConcurrency,
-          batchMode: api.batchMode,
-          freeEndpoint: current.backupApi?.freeEndpoint ?? api.freeEndpoint,
-          freeBackupEndpoint: current.backupApi?.freeBackupEndpoint ?? api.freeBackupEndpoint,
-        }
-      : undefined;
+  return backupFree || (backupBaseUrl && backupModel)
+    ? {
+        format: backupFormat,
+        // 免费通道不主动清空连接字段：与主通道「禁用但保留」语义一致（updateFormatHint /
+        // popup syncFreeFields 同款），临时切免费再切回第三方 API 时原配置仍在。
+        // googlefree/microsoft provider 本就忽略 baseUrl/apiKey/model，落盘无害
+        baseUrl: backupBaseUrl,
+        apiKey: ($("backup-api-key") as HTMLInputElement).value.trim(),
+        model: backupModel,
+        temperature: api.temperature,
+        timeoutMs: api.timeoutMs,
+        maxConcurrency: api.maxConcurrency,
+        batchMode: api.batchMode,
+        freeEndpoint: current.backupApi?.freeEndpoint ?? api.freeEndpoint,
+        freeBackupEndpoint: current.backupApi?.freeBackupEndpoint ?? api.freeBackupEndpoint,
+      }
+    : undefined;
+}
+
+/** 测试连接专用：只读 API 表单段（主/备用），不解析站点规则等无关段。
+ *  用户测的是连通性——站点面板的 JSON 笔误不应阻断测试，更不该被报成「测试失败」。 */
+async function readApiForm(): Promise<{ api: ApiConfig; backupApi: ApiConfig | undefined }> {
+  const current = await getSettings();
+  const api = buildApiForm(current);
+  return { api, backupApi: buildBackupApiForm(current, api) };
+}
+
+async function readForm(): Promise<Settings> {
+  const current = await getSettings();
+  const api = buildApiForm(current);
+  const backupApi = buildBackupApiForm(current, api);
   return {
     ...current,
     api,
@@ -296,10 +335,23 @@ async function readForm(): Promise<Settings> {
       translateAttributes: ($("translate-attributes") as HTMLInputElement).checked,
       forceSourceLang: select("force-source-lang").value,
     },
+    // ===== sites 段级合并：只在用户本会话真正编辑过对应文本域时才用表单值落盘 =====
+    // 未编辑的字段沿用 getSettings() 现值，避免陈旧快照覆盖 popup 期间的名单增删
+    //（如页面开着时 popup「加入白名单」被旧 textarea 回滚）。导入等外部变更后的
+    // loadForm 会刷新快照，编辑判定始终对准本次快照。
     sites: {
-      whitelist: parseDomainList($("whitelist") as HTMLTextAreaElement),
-      blacklist: parseDomainList($("blacklist") as HTMLTextAreaElement),
-      rules: parseSiteRulesTextarea(($("site-rules") as HTMLTextAreaElement).value),
+      whitelist:
+        ($("whitelist") as HTMLTextAreaElement).value === initialSiteInputs.whitelist
+          ? current.sites.whitelist
+          : parseDomainList($("whitelist") as HTMLTextAreaElement),
+      blacklist:
+        ($("blacklist") as HTMLTextAreaElement).value === initialSiteInputs.blacklist
+          ? current.sites.blacklist
+          : parseDomainList($("blacklist") as HTMLTextAreaElement),
+      rules:
+        ($("site-rules") as HTMLTextAreaElement).value === initialSiteInputs.siteRules
+          ? current.sites.rules ?? []
+          : parseSiteRulesTextarea(($("site-rules") as HTMLTextAreaElement).value),
       disabledRuleIds: Array.from(
         document.querySelectorAll<HTMLInputElement>("#builtin-rules input[type='checkbox']")
       )
@@ -429,39 +481,51 @@ function init(): void {
     try {
       const s = await readForm();
       await saveSettings(s);
+      // 落盘值已成为新的「初始态」：刷新快照，让下一轮编辑判定对准刚保存的值
+      snapshotSiteInputs();
       setStatus("已保存 ✔", "ok");
     } catch (err) {
       setStatus(`保存失败：${err instanceof Error ? err.message : String(err)}`, "err");
     }
   });
-  $("btn-test").addEventListener("click", async () => {
-    try {
-      const s = await readForm();
-      await runTestConnection(s.api, "btn-test", "主 API");
-    } catch (err) {
-      // readForm 抛错（如站点规则 JSON 解析失败）发生在 runTestConnection 之前，需在此兜底
-      setStatus(`测试失败：${err instanceof Error ? err.message : String(err)}`, "err");
-    } finally {
-      // readForm 抛错时按钮尚未进入 runTestConnection 的禁用流程；置 false 幂等，重复无妨
-      ($("btn-test") as HTMLButtonElement).disabled = false;
-    }
-  });
-  $("btn-test-backup").addEventListener("click", async () => {
-    try {
-      const s = await readForm();
-      if (!s.backupApi) {
-        setStatus(
-          "未配置备用 API（填写备用 BaseURL 和模型，或选择 Google / Microsoft 免费通道）",
-          "err"
-        );
-        return;
+  $("btn-test").addEventListener("click", () => {
+    const btn = $("btn-test") as HTMLButtonElement;
+    // 同步先禁用再进入任何 await：readForm 有 storage 往返，晚禁用会留双击双发窗口
+    btn.disabled = true;
+    void (async () => {
+      try {
+        // 只读 API 段（readApiForm）：不解析站点规则——用户测的是连通性，
+        // 站点面板的 JSON 笔误不应被报成「测试失败」、更不应阻断测试
+        const { api } = await readApiForm();
+        await runTestConnection(api, "btn-test", "主 API");
+      } catch (err) {
+        setStatus(`测试失败：${err instanceof Error ? err.message : String(err)}`, "err");
+      } finally {
+        btn.disabled = false;
       }
-      await runTestConnection(s.backupApi, "btn-test-backup", "备用 API");
-    } catch (err) {
-      setStatus(`测试失败：${err instanceof Error ? err.message : String(err)}`, "err");
-    } finally {
-      ($("btn-test-backup") as HTMLButtonElement).disabled = false;
-    }
+    })();
+  });
+  $("btn-test-backup").addEventListener("click", () => {
+    const btn = $("btn-test-backup") as HTMLButtonElement;
+    // 同步禁用：同 btn-test，防 readApiForm 往返窗口内的双击双发
+    btn.disabled = true;
+    void (async () => {
+      try {
+        const { backupApi } = await readApiForm();
+        if (!backupApi) {
+          setStatus(
+            "未配置备用 API（填写备用 BaseURL 和模型，或选择 Google / Microsoft 免费通道）",
+            "err"
+          );
+          return;
+        }
+        await runTestConnection(backupApi, "btn-test-backup", "备用 API");
+      } catch (err) {
+        setStatus(`测试失败：${err instanceof Error ? err.message : String(err)}`, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    })();
   });
   $("btn-clear-cache").addEventListener("click", async () => {
     try {

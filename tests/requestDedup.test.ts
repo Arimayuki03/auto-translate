@@ -5,6 +5,7 @@
  * - 共享请求被「其他会话」中止时，仍在翻译的等待者自行重发，不把中止扩散给无辜方。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { TranslateService } from "../src/background/translate";
 import type { Settings } from "../src/shared/types";
 
@@ -55,6 +56,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallChromeMock();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

@@ -109,6 +109,7 @@ export function setupSpaNavigation(opts: SpaNavigationOptions): void {
         document.visibilityState === "visible" &&
         (opts.autoTranslate || opts.engine.state !== "off") &&
         !opts.isSensitive() &&
+        !opts.isPageDisabled() && // 用户明确禁用的子页：bfcache 回跳也不译回（同 SPA 延迟重译路径）
         !opts.engine.restoredByUser // 用户还原过的页面：bfcache 回跳也不自动译回（P0-2）
       ) {
         void opts.engine.translateAll();

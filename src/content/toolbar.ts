@@ -317,9 +317,11 @@ export class Toolbar {
     const st = res[STORAGE_KEY] as ToolbarState | undefined;
     if (!st) return;
     if (typeof st.x === "number" && typeof st.y === "number") {
-      this.el.style.left = `${st.x}px`;
-      this.el.style.top = `${st.y}px`;
-      this.el.style.right = "auto";
+      // 记忆的是目标视口坐标，须与初始定位/拖拽落点同样经 placeFixedInViewport
+      // 两点采样反解写入：html 带 transform/zoom 的页面按失真坐标系直写 left/top
+      // 会让恢复位置渲染偏移
+      this.el.style.right = "auto"; // 与拖拽/吸附一致，以 left/top 为定位基准
+      placeFixedInViewport(this.el, st.x, st.y);
     }
     this.clampToViewport(); // 保存的位置可能超出当前窗口，吸附回来
   }

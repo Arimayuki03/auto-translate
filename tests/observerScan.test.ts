@@ -6,6 +6,7 @@
  *    外部节点不得因祖先带标记（closest 爬链）被误判为自身产物而漏扫。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { PageObserver } from "../src/content/observer";
 import { Renderer } from "../src/content/renderer";
@@ -52,10 +53,7 @@ function mockChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 beforeEach(() => {
@@ -63,7 +61,10 @@ beforeEach(() => {
   mockChrome();
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 function makeEngine(): PageEngine {
   const renderer = new Renderer("bilingual");

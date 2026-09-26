@@ -67,6 +67,19 @@ describe("URL 模式匹配", () => {
     expect(normalizeUrlPattern("  ")).toBeNull();
     expect(matches("https://example.com/x", "example.com:8080")).toBe(false);
   });
+
+  it("中文 IDN 域名转 punycode 后可命中（与浏览器 hostname 归一口径一致）", () => {
+    // 浏览器 new URL("https://豆瓣.com").hostname → xn--klyv21c.com，模式须同口径归一
+    expect(normalizeUrlPattern("豆瓣.com")).toBe("xn--klyv21c.com");
+    expect(normalizeUrlPattern("https://豆瓣.com/")).toBe("xn--klyv21c.com");
+    // 通配符 + IDN 组合同样支持；非法 IDN（URL 解析失败）仍返回 null
+    expect(normalizeUrlPattern("*.豆瓣.com")).toBe("*.xn--klyv21c.com");
+    expect(normalizeUrlPattern("豆瓣.com:8080")).toBeNull(); // IDN 与端口组合：端口先拒绝
+    expect(normalizeUrlPattern("bad host！.com")).toBeNull();
+    // 端到端：punycode 页面 URL 命中中文写法的规则
+    expect(matches("https://xn--klyv21c.com/", "豆瓣.com")).toBe(true);
+    expect(matches("https://movie.douban.com/", "豆瓣.com")).toBe(false);
+  });
 });
 
 describe("resolveSiteRules 合并解析", () => {

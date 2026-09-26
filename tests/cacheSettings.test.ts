@@ -2,7 +2,8 @@
  * 回归测试：缓存设置（cache.enabled）必须真正生效。
  * 此前 TranslateService 硬编码使用缓存，设置里的开关被完全忽略。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { TranslationCache } from "../src/background/cache";
 import { TranslateService } from "../src/background/translate";
 
@@ -48,6 +49,8 @@ function mockChrome(cacheEnabled: boolean, cachedValue?: string): void {
 beforeEach(() => {
   vi.restoreAllMocks();
 });
+
+afterEach(() => uninstallChromeMock());
 
 describe("cache.enabled 设置生效", () => {
   it("缓存关闭时 checkCache 直接返回 0（不读磁盘缓存）", async () => {

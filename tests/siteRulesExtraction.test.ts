@@ -6,6 +6,7 @@
  * - forceBlockTags：自定义元素强制按块级容器处理（不再与兄弟合并成一个单元）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import { extractUnits } from "../src/content/extractor";
@@ -53,10 +54,7 @@ function mockChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 /** 构造命中 localhost 的规则解析结果（jsdom 默认 URL 是 https://github.com，这里显式传 href） */
@@ -65,7 +63,10 @@ function resolvedFor(href: string, userRules: Parameters<typeof resolveSiteRules
 }
 
 beforeEach(() => mockChrome());
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 describe("站点规则 × 文本提取", () => {
   it("excludeSelectors：排除区子树不提取，区外正常提取", () => {

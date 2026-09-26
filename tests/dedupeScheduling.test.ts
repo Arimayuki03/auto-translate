@@ -4,6 +4,7 @@
  * 点击扫描的重复触发而被反复调度（total 持续增加 / 重复请求）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { PageObserver } from "../src/content/observer";
 import { Renderer } from "../src/content/renderer";
@@ -59,10 +60,7 @@ function mockChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 beforeEach(() => {
@@ -73,7 +71,10 @@ beforeEach(() => {
   mockChrome();
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
@@ -90,9 +91,25 @@ async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
   }
 }
 
-async function waitObserver(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 550));
-  await flush();
+/** 负向断言专用（"之后不应再有新请求"）：轮询不了"不出现"的终态，只能先真实跨过
+ *  观察器防抖窗口（observer.ts DEBOUNCE_MS=300ms + 余量）让 run() 有机会执行，再轮询到
+ *  sendMessage 调用数连续 quietMs 无变化（在途异步全部落账），"没有新请求"的结论才有效。
+ *  必须等真实时间：防抖是真实 setTimeout，这里验证的正是"时间流逝后仍无变化"。
+ *  相比固定睡 550ms：落账轮询让时长自适应负载，不会在慢 CI 上提前下结论。 */
+async function awaitQuietPeriod(quietMs = 150): Promise<void> {
+  await new Promise((r) => setTimeout(r, 350)); // 防抖窗口 + 余量（定时器按序触发，防抖必先到期）
+  let last = sendMessage.mock.calls.length;
+  let stableSince = Date.now();
+  const start = stableSince;
+  while (Date.now() - stableSince < quietMs) {
+    if (Date.now() - start > 5000) throw new Error("等待静默期超时");
+    await new Promise((r) => setTimeout(r, 10));
+    const now = sendMessage.mock.calls.length;
+    if (now !== last) {
+      last = now;
+      stableSince = Date.now();
+    }
+  }
 }
 
 function makeEngine(): PageEngine {
@@ -141,11 +158,12 @@ describe("MutationObserver / 点击扫描去重", () => {
     await flush();
     const reqAfter1 = allRequestedTexts().length;
 
-    // 触发多次 childList 突变（无新可译文本）+ 点击扫描
+    // 触发多次 childList 突变（无新可译文本）+ 点击扫描：
+    // 负向断言（之后不应再有新请求），等待"无新请求落账"的静默期
     for (let i = 0; i < 3; i++) {
       document.body.appendChild(document.createElement("div"));
       document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await waitObserver();
+      await awaitQuietPeriod();
     }
     expect(allRequestedTexts().length).toBe(reqAfter1);
     observer.disconnect();
@@ -164,7 +182,8 @@ describe("MutationObserver / 点击扫描去重", () => {
     const p2 = document.createElement("p");
     p2.textContent = "Brand new paragraph";
     document.body.append(p1, p2);
-    await waitObserver();
+    // 等终态：新文本的翻译请求确实已发出（防抖 + 增量调度完成）
+    await waitFor(() => allRequestedTexts().some((t) => t === "Brand new paragraph"));
 
     // 相同文本只应请求一次（同一批次内共享）
     const requested = allRequestedTexts();
@@ -199,11 +218,11 @@ describe("失败容器不重复调度", () => {
     expect(engine.renderer.isFailed(failedContainer)).toBe(true);
     const totalAfter1 = engine["stats"].total;
 
-    // 观察器多次触发扫描：失败的容器不应被重新调度
+    // 观察器多次触发扫描：失败的容器不应被重新调度（负向断言，等"无新请求落账"的静默期）
     for (let i = 0; i < 3; i++) {
       document.body.appendChild(document.createElement("span"));
       document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await waitObserver();
+      await awaitQuietPeriod();
     }
     expect(engine["stats"].total).toBe(totalAfter1);
     observer.disconnect();

@@ -1,4 +1,4 @@
-import { ApiError, buildApiUrl, makeDiagnostic, postJson, postSSE, withStreamFallback } from "./http";
+import { ApiError, buildApiUrl, makeDiagnostic, postJson, postSSE, redactSecrets, withStreamFallback } from "./http";
 import type { ChatMessage, ChatOptions, ChatResult, Provider } from "./types";
 
 interface OpenAIChatResponse {
@@ -66,9 +66,16 @@ async function chatStream(
         return; // 心跳/注释等非 JSON 负载：跳过，流结束后仍校验是否拿到文本
       }
       if (chunk.error) {
+        // 中转站可能在 200 流内回 {"error":{"message":"Incorrect API key sk-xxx"}}：
+        // message 会随错误文本到达 UI，拼接前必须脱敏
+        const message = redactSecrets(
+          chunk.error.message ?? "unknown",
+          url,
+          { Authorization: `Bearer ${options.apiKey}` }
+        );
         throw new ApiError(
           "server",
-          `流式响应返回错误：${chunk.error.message ?? "unknown"}`,
+          `流式响应返回错误：${message}`,
           makeDiagnostic("openai", url, { code: "server" })
         );
       }

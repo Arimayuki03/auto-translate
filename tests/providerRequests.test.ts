@@ -6,6 +6,7 @@
  * - 批量协议：默认逐行（旧版），仅显式配置哨兵才用哨兵；两种协议请求格式固定。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { encryptApiKey, getSettings } from "../src/shared/storage";
 import { ApiError, buildApiUrl, postJson } from "../src/background/providers/http";
 import { anthropicProvider } from "../src/background/providers/anthropic";
@@ -99,6 +100,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallChromeMock();
   vi.unstubAllGlobals();
 });
 

@@ -52,12 +52,36 @@ export async function getDisabledPages(): Promise<Set<string>> {
   return disabledCache;
 }
 
-/** 把某子页加入/移出「禁用自动翻译」集合（持久化 + 更新内存缓存） */
-export async function setPageDisabled(pageKey: string, disabled: boolean): Promise<void> {
-  const set = await getDisabledPages();
-  if (disabled) set.add(pageKey);
-  else set.delete(pageKey);
-  await chrome.storage.local.set({ [DISABLED_KEY]: [...set] });
+/** it-disabled-pages 键的写互斥队列：快捷键触发「还原/翻译」会广播到同页所有 frame，
+ *  顶 frame 与 iframe 并发执行「读集合 → 改 → 整体写回」时后写者会基于陈旧快照覆盖
+ *  先写者的条目。写操作链到队尾串行执行，保证每个 frame 的增删都不丢。 */
+let disabledQueue: Promise<unknown> = Promise.resolve();
+
+/** 把某子页加入/移出「禁用自动翻译」集合（持久化 + 更新内存缓存）。
+ *  持久化走互斥队列：以存储最新值为底（而非可能陈旧的内存缓存）读-改-写，
+ *  mutator 收到深拷贝数组，多个 frame 的写严格串行、互不覆盖。 */
+export function setPageDisabled(pageKey: string, disabled: boolean): Promise<void> {
+  const run = async (): Promise<void> => {
+    const res = await chrome.storage.local.get(DISABLED_KEY);
+    const arr = res[DISABLED_KEY] as string[] | undefined;
+    const list: string[] = Array.isArray(arr) ? structuredClone(arr) : [];
+    if (disabled) {
+      if (!list.includes(pageKey)) list.push(pageKey);
+    } else {
+      const idx = list.indexOf(pageKey);
+      if (idx >= 0) list.splice(idx, 1);
+    }
+    await chrome.storage.local.set({ [DISABLED_KEY]: list });
+    // 落盘成功后同步内存缓存（缓存保持引用稳定，供同步判断方实时读取）
+    disabledCache = new Set(list);
+  };
+  const queued = disabledQueue.then(run, run);
+  // 某次写失败不能让后续排队操作饿死；错误仍原样抛给当次调用方
+  disabledQueue = queued.then(
+    () => undefined,
+    () => undefined
+  );
+  return queued;
 }
 
 /** 供测试重置内存缓存 */

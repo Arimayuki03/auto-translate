@@ -79,7 +79,12 @@ export class PageObserver {
         for (const n of r.addedNodes) {
           if (!this.addedRootsSeen.has(n)) {
             this.addedRootsSeen.add(n);
-            if (this.addedRoots.length >= MAX_PENDING_ROOTS) this.addedRoots.shift();
+            if (this.addedRoots.length >= MAX_PENDING_ROOTS) {
+              // 溢出丢弃最老根时同步清 seen：否则该节点永占 seen 位，
+              // 日后被移出再插回 DOM 时不再入队
+              const dropped = this.addedRoots.shift();
+              if (dropped) this.addedRootsSeen.delete(dropped);
+            }
             this.addedRoots.push(n);
           }
         }
@@ -180,6 +185,12 @@ export class PageObserver {
     // 增量提取交给下一次 mutation，避免这里与回调重复调度。
     if (this.lastBody !== document.body) {
       this.lastBody = document.body;
+      // 丢弃防抖窗口内积累的旧页根：旧 body 被整体替换后这些节点已脱离 DOM，
+      // 留着会在下一次 run 被照常提取并 scheduleUnits（懒翻译模式下进 lazyUnits
+      // 永不触发造成泄漏；forceFull 模式下对死内容真实发翻译请求）。
+      // seen 无消费对应关系，直接整体重建（WeakSet 无 clear()，字段可重赋值）。
+      this.addedRoots.length = 0;
+      this.addedRootsSeen = new WeakSet();
       this.onRootReplaced?.();
       return;
     }
@@ -204,6 +215,7 @@ export class PageObserver {
         if (root.closest("[data-it-unit],[data-it-ui]")) continue; // 我们自己的注入不扫
         const found = extractUnits(root, this.engine.extractOptions).filter(
           (u) =>
+            u.container.isConnected && // 已脱离 DOM 的容器（旧页残留根）直接跳过
             !u.container.hasAttribute("data-it-src") &&
             !u.container.hasAttribute("data-it-processing") &&
             !this.engine.renderer.isFailed(u.container) &&

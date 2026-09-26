@@ -6,6 +6,7 @@
  * 把整句译文按链接译文拆段嵌入，不重复、不破碎、链接可点击。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer, splitAroundTranslation } from "../src/content/renderer";
 import { extractUnits } from "../src/content/extractor";
@@ -63,13 +64,13 @@ beforeEach(() => {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));

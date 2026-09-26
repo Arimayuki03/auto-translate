@@ -12,6 +12,7 @@
  * 7. 角标双模式：译后再悬停出「还原」，点击只还原该段（引擎/渲染器单元素还原 + 去重同步清理）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import { t } from "../src/shared/i18n";
@@ -71,14 +72,12 @@ beforeEach(() => {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  uninstallChromeMock();
   vi.restoreAllMocks();
   const doc = document as { caretRangeFromPoint?: unknown };
   delete doc.caretRangeFromPoint;

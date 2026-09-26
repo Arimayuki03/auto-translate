@@ -7,6 +7,7 @@
  * 3. 菜单选项（button）以文本原位替换方式翻译，不破坏结构。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { PageObserver } from "../src/content/observer";
 import { Renderer } from "../src/content/renderer";
@@ -54,15 +55,13 @@ beforeEach(() => {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 });
 
 afterEach(() => {
   observer?.disconnect();
   observer = null;
+  uninstallChromeMock();
   vi.restoreAllMocks();
 });
 
@@ -71,10 +70,16 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
-/** 等待观察器防抖（300ms）+ 翻译往返 */
-async function waitObserver(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 550));
-  await flush();
+/** 轮询等待条件成立（与 sessionCancel / dedupeScheduling.test.ts 同惯例）：
+ *  观察器防抖（300ms）+ 翻译往返是多层异步链，固定睡眠在慢 CI 上会提前返回造成
+ *  假失败，且只能证明"550ms 内完成了"；改为轮询"要断言的终态是否出现"。
+ *  轮询每 10ms 让出一次宏任务队列，防抖定时器与 sendMessage 往返都能推进。 */
+async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
 }
 
 describe("点击后出现的组件也要翻译", () => {
@@ -97,7 +102,8 @@ describe("点击后出现的组件也要翻译", () => {
     // 模拟点击展开：直接改 style 属性不产生 childList 突变，只能靠点击探测补扫
     (document.querySelector("#menu") as HTMLElement).style.display = "block";
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await waitObserver();
+    // 等终态：两个选项均被原位替换为译文（防抖 + 点击补扫 + 翻译往返全部完成）
+    await waitFor(() => btns[0].textContent === "【译】First option" && btns[1].textContent === "【译】Second option");
 
     expect(btns[0].textContent).toBe("【译】First option");
     expect(btns[1].textContent).toBe("【译】Second option");
@@ -115,9 +121,11 @@ describe("点击后出现的组件也要翻译", () => {
     menu.id = "popup";
     menu.innerHTML = `<li><button>Edit item</button></li><li><button>Delete item</button></li>`;
     document.body.appendChild(menu);
-    await waitObserver();
 
     const btns = Array.from(document.querySelectorAll<HTMLButtonElement>("#popup button"));
+    // 等终态：新插入的菜单选项被观察器增量翻译
+    await waitFor(() => btns[0].textContent === "【译】Edit item" && btns[1].textContent === "【译】Delete item");
+
     expect(btns[0].textContent).toBe("【译】Edit item");
     expect(btns[1].textContent).toBe("【译】Delete item");
   });
@@ -133,7 +141,12 @@ describe("点击后出现的组件也要翻译", () => {
 
     (document.querySelector("#menu") as HTMLElement).style.display = "block";
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await waitObserver();
+    // 负向断言（state=off 不翻译）：等待的是"不应出现的终态"，无法轮询。
+    // 必须真实跨过观察器防抖窗口（observer.ts DEBOUNCE_MS=300ms）+ 余量，让点击
+    // 补扫的 run() 有充分机会执行并因 state=off 早退，"没翻"这一结论才有效；
+    // 故保留受控真实短睡眠，替代原固定 550ms 魔法时长。
+    await new Promise((r) => setTimeout(r, 400));
+    await flush();
 
     expect(document.querySelector("#menu button")!.textContent).toBe("First option");
   });

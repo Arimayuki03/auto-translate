@@ -6,6 +6,7 @@
  * - 距离并列（jsdom rect 恒 0）时退化为 DOM 顺序，不改变既有行为。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import type { Settings } from "../src/shared/types";
@@ -60,10 +61,7 @@ function mockDeferredChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 function stubRect(el: HTMLElement, top: number): void {
@@ -116,7 +114,10 @@ async function flushAll(): Promise<void> {
 }
 
 beforeEach(mockDeferredChrome);
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 describe("视口优先调度", () => {
   it("整页直译：距视口最近的段落出现在首个请求的最前面", async () => {

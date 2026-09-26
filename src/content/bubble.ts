@@ -16,7 +16,7 @@ export function initBubble(
   translateOnSelect: boolean,
   isSensitive?: () => boolean,
   tts?: TtsSettings
-): void {
+): () => void {
   let bubble: HTMLElement | null = null;
   const recent = new Map<string, number>();
   /** 在途流式翻译的取消函数：气泡任何形式的关闭都断开 Port → background 中止在途请求 */
@@ -107,6 +107,11 @@ export function initBubble(
       close(); // 连续划词：取消上一条仍在途的流式请求，再开新气泡
       openBubble(rect, text, engine);
     } else {
+      // 先关闭旧气泡（含在途流式请求的取消）：旧气泡正在流式渲染时用户重新划词，
+      // 走到这里若不关闭，下方 bubble = btn 直接覆盖引用，旧气泡脱离一切关闭路径
+      // （mousedown/Escape/scroll 都按 bubble 变量判定）永久滞留。已在 mousedown
+      // 提前关闭的情况重复调用是幂等 no-op。
+      close();
       // 先显示一个小「译」按钮，点击才翻译
       const btn = document.createElement("button");
       btn.className = "it-translate-sel";
@@ -203,6 +208,9 @@ export function initBubble(
       if (activeCancel === cancel) onSettled();
     }
   }
+
+  // 清理入口：总开关关闭时由 index.ts 调用（关闭气泡 + 中止在途流式请求）。幂等。
+  return close;
 }
 
 /** 构建气泡骨架；onClose 供右上角 ✕ 走统一关闭（取消在途流式请求） */

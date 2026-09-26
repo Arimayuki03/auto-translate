@@ -11,7 +11,8 @@
  * 仅 mock chrome.storage 与全局 fetch（拦截 provider 请求层，与 providerRequests.test.ts
  * 同风格）。mock settings 必须带 mergeSettings 补齐的完整字段，与 getSettings 产出对齐。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { DEFAULT_SETTINGS } from "../src/shared/storage";
 import { TranslationCache, fnv1aHex } from "../src/background/cache";
 import { TranslateService } from "../src/background/translate";
@@ -29,10 +30,16 @@ function withCacheSettings(enabled: boolean): Settings {
   };
 }
 
-/** 与 translate.ts applyCacheSettings 同口径的缓存变体：format|model|customPrompt 哈希 */
+/** 与 translate.ts applyCacheSettings 同口径的缓存变体：format|model|customPrompt|forceSourceLang 哈希
+ *  （forceSourceLang 自 2026-09-26 起掺入变体：源语言是翻译输出的实际输入，切换后必须视为不同变体） */
 function cacheVariantOf(settings: Settings): string {
   return fnv1aHex(
-    [settings.api.format, settings.api.model, settings.api.customSystemPrompt ?? ""].join("|")
+    [
+      settings.api.format,
+      settings.api.model,
+      settings.api.customSystemPrompt ?? "",
+      settings.translate.forceSourceLang ?? "",
+    ].join("|")
   );
 }
 
@@ -95,6 +102,8 @@ function stubFetch(handler: (body: { user: string }) => string): {
 beforeEach(() => {
   vi.restoreAllMocks();
 });
+
+afterEach(() => uninstallChromeMock());
 
 describe("批量缓存命中路径（cache.enabled = true）", () => {
   it("开启缓存 + 全部命中 → 零 provider 请求，results 与输入段一一对应且等于缓存译文", async () => {

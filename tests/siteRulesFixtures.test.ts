@@ -142,4 +142,12 @@ describe("fixture: stackoverflow-question.html", () => {
     expect(texts).not.toContain("Ask Question");
     expect(texts).not.toContain("Add a comment");
   });
+
+  it("正文后的兄弟提示条被排除（div.s-prose.js-post-body + div），回答段落仍提取", () => {
+    // 回答 post-body 紧跟的「相关问题」提示条只能靠兄弟选择器排除：
+    // 规则被删/写坏时该文字混进译文队列（fixture 曾把选择器当 class 字面量写，永不命中）
+    const texts = textsOf(root, opts()).join("\n");
+    expect(texts).not.toContain("asynchronous call");
+    expect(texts).toContain("Promise.all preserves the order of the input array");
+  });
 });

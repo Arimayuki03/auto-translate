@@ -3,6 +3,8 @@
  * 拦截免费通道 API 返回固定译文，走一遍「翻译 → 译文出现 → 切模式 → 还原」核心链路。
  * 需要 `npm run build` 先产出 dist/ 与 playwright chromium；
  * 无浏览器/dist 或设置 SKIP_E2E=1 时用 it.skipIf 跳过（报告中显示为 skipped 而非 passed）。
+ * 设 CI_ASSERT_E2E=1（CI 断言模式）时守卫条件不满足直接失败而非 skip：
+ * 保证 e2e 在 CI 上要么真实运行、要么显式红灯，绝不静默跳过。
  */
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync } from "node:fs";
@@ -14,9 +16,31 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const distDir = join(here, "..", "dist");
-/** 守卫条件：浏览器可用且 dist 存在才真正跑；SKIP_E2E=1 时同样跳过。 */
-const canRunE2e = (): boolean =>
-  !process.env.SKIP_E2E && browserAvailable && existsSync(distDir);
+
+/** 逐条计算守卫条件（跳过原因便于排查）。 */
+const guardReasons = (): string[] => {
+  if (process.env.SKIP_E2E) return ["SKIP_E2E=1 已设置"];
+  const reasons: string[] = [];
+  if (!browserAvailable) reasons.push("playwright chromium 探测失败（未安装或 launch 异常，见上方 warn）");
+  if (!existsSync(distDir)) reasons.push("dist/ 不存在（需先 npm run build）");
+  return reasons;
+};
+
+/** 守卫条件：浏览器可用且 dist 存在才真正跑；SKIP_E2E=1 时同样跳过。
+ * CI_ASSERT_E2E=1（CI 断言模式）时条件不满足直接 throw，让 CI 显式红灯而非静默 skip。 */
+const canRunE2e = (): boolean => {
+  if (process.env.CI_ASSERT_E2E === "1") {
+    const reasons = guardReasons();
+    if (reasons.length > 0) {
+      throw new Error(
+        `[CI_ASSERT_E2E] e2e 守卫条件不满足，拒绝静默跳过：\n  - ${reasons.join("\n  - ")}\n` +
+          "CI 上 e2e 必须真实运行（Install Playwright Chromium + Build 均已执行），请排查上方步骤。"
+      );
+    }
+    return true;
+  }
+  return !process.env.SKIP_E2E && browserAvailable && existsSync(distDir);
+};
 
 const TEST_PAGE = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"></head>
@@ -255,8 +279,126 @@ describe("e2e 冒烟（加载 dist 扩展）", () => {
       undefined,
       { timeout: 10_000 }
     );
-    expect(true).toBe(true);
+    // 双语结构完整：原文块回到 .it-wrap 内的 .it-orig 位置，可见译文元素仍在身旁。
+    // 上面的 waitForFunction 只证明「无隐藏译文 + 原文开头是英文」——若切回双语时
+    // 译文元素被误删，两个条件照样满足；这里补上结构校验防止该回归。
+    const bilingual = await p.evaluate(() => {
+      const orig = document.querySelector("#para");
+      const wrap = orig?.closest(".it-wrap") ?? null;
+      const trans = wrap?.querySelector(":scope > .it-translated.it-done") ?? null;
+      return {
+        origInWrap: !!orig && !!wrap,
+        hasVisibleTrans: !!trans,
+        transText: (trans?.textContent ?? "").trim(),
+      };
+    });
+    expect(bilingual.origInWrap).toBe(true);
+    expect(bilingual.hasVisibleTrans).toBe(true);
+    expect(bilingual.transText).toContain("by the extension.」");
   }, 180_000);
+
+  it.skipIf(!canRunE2e())(
+    "OpenAI 兼容通道（SSE 流式）：划词气泡流式渲染，译文为各 delta 拼接",
+    async () => {
+      // Playwright route.fulfill 的 body 只接受 string|Buffer（无法分段推送），
+      // 改用本地 node 服务真实分段写 SSE：每个事件的 JSON 拆成两次 TCP write，
+      // 让 postSSE 的跨 chunk 缓冲重组在真实浏览器网络栈里被覆盖。
+      // OpenAI 兼容请求形状（src/background/providers/openai.ts）：
+      //   POST {baseUrl}/chat/completions，Authorization: Bearer <key>，body.stream=true；
+      //   SSE 响应 data: {"choices":[{"delta":{"content":"…"}}]}\n\n 多段 + data: [DONE]
+      const seen: { authorization?: string; body?: string } = {};
+      const sseServer = createServer((req, res) => {
+        let raw = "";
+        req.on("data", (c: Buffer) => (raw += c.toString("utf-8")));
+        req.on("end", () => {
+          seen.authorization = req.headers.authorization;
+          seen.body = raw;
+          let parsed: { stream?: boolean };
+          try {
+            parsed = JSON.parse(raw) as { stream?: boolean };
+          } catch {
+            parsed = {};
+          }
+          if (!parsed.stream) {
+            // 防御：扩展若走了非流式回退（期望 JSON 响应），让它显式失败而非误解析 SSE
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "e2e mock requires stream:true" } }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          const deltas = ["星河低语，", "晚风", "轻拂。"];
+          void (async () => {
+            for (const seg of deltas) {
+              const payload = JSON.stringify({ choices: [{ delta: { content: seg } }] });
+              // 单个事件从 JSON 中间切开分两次 write：data 行跨 chunk 边界，
+              // 浏览器 reader.read() 收到的是残缺事件，靠 postSSE 缓冲拼回
+              const half = Math.ceil(payload.length / 2);
+              res.write(`data: ${payload.slice(0, half)}`);
+              await new Promise((r) => setTimeout(r, 25));
+              res.write(`${payload.slice(half)}\n\n`);
+              await new Promise((r) => setTimeout(r, 25));
+            }
+            res.write("data: [DONE]\n\n");
+            res.end();
+          })().catch(() => res.end());
+        });
+      });
+      await new Promise<void>((resolve) => sseServer.listen(0, "127.0.0.1", resolve));
+      const ssePort = (sseServer.address() as { port: number }).port;
+      const sseBase = `http://127.0.0.1:${ssePort}/v1`;
+
+      try {
+        const p = await freshPage();
+        // 设置页等价路径：把 API 切到 openai 兼容通道（storage.onChanged 失效 SW 侧设置缓存）。
+        // apiKey 明文直写安全：decryptApiKey 对非 Base64 字符集（含 "-"）幂等原样返回
+        const sw = context!.serviceWorkers().find((w) => w.url().includes("service-worker-loader"));
+        if (!sw) throw new Error("SKIP");
+        await sw.evaluate(
+          async (cfg) => {
+            const stored = await chrome.storage.local.get("settings");
+            const s = (stored.settings ?? {}) as { api?: Record<string, unknown> };
+            s.api = { ...(s.api ?? {}), ...cfg };
+            await chrome.storage.local.set({ settings: s });
+          },
+          { format: "openai", baseUrl: sseBase, apiKey: "sk-e2e-mock-key", model: "mock-e2e-model" }
+        );
+        await p.waitForTimeout(200); // onChanged 失效 cachedSettings 先于翻译请求
+
+        // 真实用户路径：鼠标拖选段落 → translateOnSelect 默认开 → 划词气泡发起流式翻译
+        //（整页翻译路径不传 stream.onDelta 走非流式；SSE 消费方就是划词气泡 Port 通道）
+        const box = await p.locator("#para").boundingBox();
+        if (!box) throw new Error("#para not visible");
+        await p.mouse.move(box.x + 2, box.y + box.height / 2);
+        await p.mouse.down();
+        await p.mouse.move(box.x + box.width - 2, box.y + box.height / 2, { steps: 5 });
+        await p.mouse.up();
+
+        await p.waitForSelector(".it-bubble", { timeout: 10_000 });
+        // 流式完成：气泡主体渲染出各 delta 拼接的完整文本（loading 态是「翻译中…」占位；
+        // 若 SSE 解析错误，最终文本不会等于三段 delta 之和）
+        await p.waitForFunction(
+          () => (document.querySelector(".it-bubble-body")?.textContent ?? "") === "星河低语，晚风轻拂。",
+          undefined,
+          { timeout: 10_000 }
+        );
+
+        // 请求形状：Bearer 鉴权头 + stream:true + 模型名 + 选中文本作为 user 消息
+        expect(seen.authorization).toBe("Bearer sk-e2e-mock-key");
+        const reqBody = JSON.parse(seen.body ?? "{}") as {
+          stream?: boolean;
+          model?: string;
+          messages?: Array<{ role: string; content: string }>;
+        };
+        expect(reqBody.stream).toBe(true);
+        expect(reqBody.model).toBe("mock-e2e-model");
+        const user = reqBody.messages?.find((m) => m.role === "user")?.content ?? "";
+        expect(user).toContain("translated by the extension");
+      } finally {
+        await new Promise<void>((resolve) => sseServer.close(() => resolve()));
+      }
+    },
+    120_000
+  );
 
   it.skipIf(!canRunE2e())("service worker 已启动", async () => {
     if (!context) throw new Error("SKIP");

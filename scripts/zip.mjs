@@ -9,7 +9,9 @@
  *     分隔符变化（旧实现 win32 走 PowerShell Compress-Archive 会产生反斜杠条目）；
  *   - 版本号先经严格格式校验（形如 x.y.z 或 x.y.z- prerelease/+build），不匹配直接
  *     拒绝打包，且只作为纯 JS 字符串参与文件名拼接——旧实现把它内插进
- *     powershell -Command 的单引号段，版本含单引号即命令注入。 */
+ *     powershell -Command 的单引号段，版本含单引号即命令注入；
+ *   - 版本号还会与仓库根 package.json 的 version 交叉校验，两边不一致直接拒绝
+ *     打包，防止单边改版号时 zip 以错误版本命名发布。 */
 import { zipSync } from "fflate";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -58,6 +60,17 @@ if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
   console.error(
     `dist/manifest.json 的 version 字段格式非法: ${JSON.stringify(version)}，` +
       "应为 x.y.z 或 x.y.z-预发布/+构建号 形态，拒绝打包。"
+  );
+  process.exit(1);
+}
+
+// 与仓库根 package.json 的 version 交叉校验：单边改版号时 zip 会以错误版本命名发布
+const pkgVersion = String(JSON.parse(readFileSync("package.json", "utf-8")).version ?? "");
+if (pkgVersion !== version) {
+  console.error(
+    `版本号不一致：dist/manifest.json 的 version 为 ${JSON.stringify(version)}，` +
+      `package.json 的 version 为 ${JSON.stringify(pkgVersion)}，拒绝打包。\n` +
+      "请先同步两边版本号（通常同步修改 manifest.json 与 package.json）后再打包。"
   );
   process.exit(1);
 }

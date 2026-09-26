@@ -4,6 +4,7 @@
  * 让 background 中止该会话的在途请求（不浪费额度/算力），而不是任其跑完。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import type { Settings } from "../src/shared/types";
@@ -49,10 +50,7 @@ function mockChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 beforeEach(() => {
@@ -60,7 +58,10 @@ beforeEach(() => {
   mockChrome();
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));

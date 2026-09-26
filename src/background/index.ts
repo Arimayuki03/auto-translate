@@ -26,7 +26,7 @@ import {
   unregisterSessionController,
 } from "./sessionRegistry";
 import { synthesizeSpeech } from "./edgeTts";
-import { ttsPlay, ttsStop } from "./ttsPlayback";
+import { handleTtsLivenessDisconnect, ttsPlay, ttsStop } from "./ttsPlayback";
 
 console.log("[auto-translate] background service worker 已启动");
 
@@ -116,18 +116,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "test-connection") {
     const req = message as TestConnectionRequestMessage;
-    testConnection(req.api).then(
-      (reply) =>
-        sendResponse({ id: req.id, ok: true, message: reply } as TestConnectionResponseMessage),
-      (err) =>
-        sendResponse({
-          id: req.id,
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-          ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
-          ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
-        } as TestConnectionResponseMessage)
-    );
+    // 慢端点（首字延迟可超 30s）测试期间 SW 不能被发现空闲而回收：
+    // worker 回收会带走 sendResponse 通道，popup/options 侧误报「连接失败」
+    beginKeepAlive();
+    testConnection(req.api)
+      .then(
+        (reply) =>
+          sendResponse({ id: req.id, ok: true, message: reply } as TestConnectionResponseMessage),
+        (err) =>
+          sendResponse({
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            ...(err instanceof ApiError && err.code ? { errorCode: err.code } : {}),
+            ...(err instanceof ApiError && err.diagnostic ? { diagnostic: err.diagnostic } : {}),
+          } as TestConnectionResponseMessage)
+      )
+      .finally(() => endKeepAlive());
     return true;
   }
 
@@ -259,7 +264,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ===== 划词流式翻译（Port 长连接网关）=====
 // content 每次划词翻译建立一条 Port；background 执行流式翻译并把 provider 增量转发回 Port，
 // 结束回传完整文本或错误。Port 断开（气泡关闭）→ AbortController 中止在途请求。
+// ===== 划词朗读存活信号 Port =====
+// name === "tts-play:<requestId>"：content 在播放期间持有，页面跳转/关闭标签页/iframe
+// 销毁时随帧自动断开 → 停止朗读（offscreen 是浏览器级单例，不处理会播到自然结束）。
+const TTS_PLAY_PORT_PREFIX = "tts-play:";
+
 chrome.runtime.onConnect.addListener((port) => {
+  // 朗读存活信号：一次性 Port，不收消息，仅 onDisconnect 有意义
+  if (port.name?.startsWith(TTS_PLAY_PORT_PREFIX)) {
+    const requestId = port.name.slice(TTS_PLAY_PORT_PREFIX.length);
+    port.onDisconnect.addListener(() => handleTtsLivenessDisconnect(requestId));
+    return;
+  }
   if (port.name !== STREAM_PORT_NAME) return;
   const controller = new AbortController();
   let started = false;

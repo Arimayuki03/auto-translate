@@ -48,6 +48,15 @@ jobs:
       - name: Test
         run: npm test
 
+      # 防「静默 skip」回归：上面的 npm test 里若守卫条件意外不满足（如 chromium 装失败、
+      # dist 缺失），e2eSmoke 只会 skip 而报告照绿。此步在 CI_ASSERT_E2E=1 下重跑该文件，
+      # 守卫条件不满足时直接 throw（见 tests/e2eSmoke.test.ts canRunE2e），保证
+      # e2e 在 CI 上要么真实运行、要么本步 exit code 非零让整个 workflow 变红。
+      - name: Assert e2e actually ran
+        run: npx vitest run tests/e2eSmoke.test.ts
+        env:
+          CI_ASSERT_E2E: "1"
+
       - name: Package zip
         run: node scripts/zip.mjs
 

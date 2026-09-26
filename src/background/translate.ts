@@ -691,8 +691,17 @@ export class TranslateService {
     this.cacheEnabled = settings.cache.enabled;
     this.cache.maxEntries = Math.max(1, settings.cache.maxEntries || 5000);
     this.cache.ttlDays = Math.max(0, settings.cache.ttlDays ?? 7);
+    // 变体掺入 forceSourceLang：源语言是翻译输出的实际输入（免费通道 sl/from 参数、
+    // LLM 注入 system 上下文）。用户切换「强制源语言」后必须视为不同变体，
+    // 否则会命中按旧源语言翻译的缓存（改了设置却不生效）。
+    // 注：掺入的是用户显式设置的 forceSourceLang；页级自动检测结果不属于设置级变体。
     this.cacheVariant = fnv1aHex(
-      [settings.api.format, settings.api.model, settings.api.customSystemPrompt ?? ""].join("|")
+      [
+        settings.api.format,
+        settings.api.model,
+        settings.api.customSystemPrompt ?? "",
+        settings.translate.forceSourceLang ?? "",
+      ].join("|")
     );
     this.summaryCache.maxEntries = this.cache.maxEntries;
     this.summaryCache.ttlDays = this.cache.ttlDays;
@@ -939,9 +948,13 @@ export class TranslateService {
   if (batch.includes(BATCH_SEPARATOR)) {
     const parts = batch
       .split(BATCH_SEPARATOR)
-      .map((s) => stripIndex(s.trim()))
+      .map((s) => s.trim())
       .filter((s) => s !== "");
-    if (parts.length === expected) return parts;
+    if (parts.length === expected) {
+      // 仅当「全段都带编号且编号恰为 1..N 连续递增」（模型自加序号的唯一可信形态）才剥；
+      // 无条件剥离会误伤以时间/小数/价格开头的译文（"10:30 出发" → "30 出发"）。
+      return stripConsecutiveIndexes(parts, expected) ?? parts;
+    }
     // 哨兵段数不符：可能是模型在译文里误带哨兵，放弃哨兵路线继续走行匹配兜底
   }
 
@@ -950,22 +963,24 @@ export class TranslateService {
     .split(/\n+/)
     .map((s) => s.trim())
     .filter((s) => s !== "" && s !== BATCH_SEPARATOR);
-  const numbered = lines.map((l) => l.match(/^\d+[.、．:：]\s*(.+)$/)?.[1]?.trim());
-  // 若全部带编号，用剥离后的内容
-  if (numbered.every((n) => n !== undefined && n !== "")) {
-    if (numbered.length === expected) return numbered as string[];
-  }
   if (lines.length === expected) {
-    // 部分行带编号（模型只给部分行编号）：逐行剥离，避免 "1." 残留进译文
-    if (numbered.some((n) => n)) return lines.map((l, i) => numbered[i] || l);
-    return lines;
+    // 全部行带编号且 1..N 连续 → 剥掉模型自加的序号；否则原样保留。
+    // 不再「部分命中就剥」：部分命中时编号更可能是译文本身（时间/价格），剥了就是错译。
+    return stripConsecutiveIndexes(lines, expected) ?? lines;
   }
   return null;
 }
 
-/** 剥掉段首可能残留的编号（"1. 译文" → "译文"） */
-function stripIndex(s: string): string {
-  return s.replace(/^\d+[.、．:：]\s*/, "");
+/** 全部段以编号开头且编号恰为 1..expected 连续递增时，统一剥掉段首编号；否则返回 null（不剥）。
+ *  连续 1..N 是「模型给整批自加序号」的唯一可信信号：序号缺失/错乱/部分命中时保留原文，
+ *  避免 "10:30 出发"（时间）、"2.99 美元"（价格）这类以「数字+.．:：」开头的正常译文被误剥。 */
+function stripConsecutiveIndexes(parts: string[], expected: number): string[] | null {
+  if (parts.length !== expected) return null;
+  for (let i = 0; i < parts.length; i++) {
+    const m = parts[i].match(/^(\d+)[.、．:：]\s*(.+)$/);
+    if (!m || parseInt(m[1], 10) !== i + 1) return null;
+  }
+  return parts.map((s) => s.replace(/^\d+[.、．:：]\s*/, ""));
 }
 
 /** 免译哨兵映射：段输出「严格等于」{{NO_TRANSLATION_NEEDED}}（忽略首尾空白）→ 返回原文。

@@ -3,7 +3,7 @@ import type {
   TestConnectionRequestMessage,
   TestConnectionResponseMessage,
 } from "../shared/messages";
-import { getSettings, saveSettings } from "../shared/storage";
+import { getSettings, saveSettings, updateSettings } from "../shared/storage";
 import type { ApiConfig, ApiFormat } from "../shared/types";
 import { t } from "../shared/i18n";
 
@@ -68,16 +68,18 @@ function applyEnabledUi(on: boolean): void {
   document.querySelector(".popup-body")?.classList.toggle("disabled", !on);
 }
 
-/** 切换总开关：读最新设置改 enabled 后整体落盘。
+/** 切换总开关：走 updateSettings 互斥队列改 enabled 字段落盘。
+ *  此前「getSettings → 改 → saveSettings」有两个 await 的竞态窗口：快速连点三次开关时
+ *  后启动的读可能先落盘，最终存储态与最后一次点击相反；队列保证按调用顺序串行落盘。
  *  chrome.storage.onChanged 会广播到所有扩展上下文（含每个标签页全部 frame 的
  *  content script）：关闭 → 还原已译页面并停用所有功能入口；开启 → 按设置恢复。
  *  无需 background 中继、无需刷新页面。 */
 enabledToggle.addEventListener("change", () => {
   void (async () => {
     try {
-      const s = await getSettings();
-      s.enabled = enabledToggle.checked;
-      await saveSettings(s);
+      const s = await updateSettings((draft) => {
+        draft.enabled = enabledToggle.checked;
+      });
       applyEnabledUi(s.enabled);
       setStatus(s.enabled ? t("popupPluginOn") : t("popupPluginOff"), s.enabled ? "ok" : "");
     } catch (err) {
@@ -94,33 +96,36 @@ enabledToggle.addEventListener("change", () => {
 
 $("version").textContent = `v${chrome.runtime.getManifest().version}`;
 
-$("p-test").addEventListener("click", async () => {
-  const api = await readApi();
-  if (!FREE_FORMATS.has(api.format) && (!api.baseUrl || !api.model)) {
-    setStatus(t("popupNeedBaseUrl"), "err");
-    return;
-  }
+$("p-test").addEventListener("click", () => {
   const btn = $("p-test") as HTMLButtonElement;
+  // 同步先禁用再进入任何 await：readApi 有 storage 往返，晚禁用会留双击双发窗口
   btn.disabled = true;
-  setStatus(t("popupTestRunning"));
-  try {
-    const req: TestConnectionRequestMessage = {
-      type: "test-connection",
-      id: crypto.randomUUID(),
-      api,
-    };
-    const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
-    setStatus(
-      res.ok
-        ? t("popupTestOk", res.message ?? "")
-        : t("popupTestFail", res.error ?? t("popupUnknownError")),
-      res.ok ? "ok" : "err"
-    );
-  } catch (err) {
-    setStatus(t("popupTestFail", err instanceof Error ? err.message : String(err)), "err");
-  } finally {
-    btn.disabled = false;
-  }
+  void (async () => {
+    try {
+      const api = await readApi();
+      if (!FREE_FORMATS.has(api.format) && (!api.baseUrl || !api.model)) {
+        setStatus(t("popupNeedBaseUrl"), "err");
+        return;
+      }
+      setStatus(t("popupTestRunning"));
+      const req: TestConnectionRequestMessage = {
+        type: "test-connection",
+        id: crypto.randomUUID(),
+        api,
+      };
+      const res = (await chrome.runtime.sendMessage(req)) as TestConnectionResponseMessage;
+      setStatus(
+        res.ok
+          ? t("popupTestOk", res.message ?? "")
+          : t("popupTestFail", res.error ?? t("popupUnknownError")),
+        res.ok ? "ok" : "err"
+      );
+    } catch (err) {
+      setStatus(t("popupTestFail", err instanceof Error ? err.message : String(err)), "err");
+    } finally {
+      btn.disabled = false;
+    }
+  })();
 });
 
 $("p-save").addEventListener("click", async () => {
@@ -162,14 +167,16 @@ async function addSite(list: "whitelist" | "blacklist"): Promise<void> {
     return;
   }
   try {
-    const s = await getSettings();
-    const arr = s.sites[list];
-    if (!arr.includes(currentHost)) arr.push(currentHost);
-    // 从对立名单移除，避免同时在两个名单里产生冲突（黑名单优先会让白名单条目失效且迷惑用户）
-    const other = list === "whitelist" ? "blacklist" : "whitelist";
-    const otherIdx = s.sites[other].indexOf(currentHost);
-    if (otherIdx >= 0) s.sites[other].splice(otherIdx, 1);
-    await saveSettings(s);
+    // 走 updateSettings 互斥队列：加白/黑名单与设置页全表单保存、其他上下文的名单
+    // 写操作串行化，避免「读陈旧快照 → 整体落盘」把并发写入的其他修改回滚掉
+    await updateSettings((s) => {
+      const arr = s.sites[list];
+      if (!arr.includes(currentHost)) arr.push(currentHost);
+      // 从对立名单移除，避免同时在两个名单里产生冲突（黑名单优先会让白名单条目失效且迷惑用户）
+      const other = list === "whitelist" ? "blacklist" : "whitelist";
+      const otherIdx = s.sites[other].indexOf(currentHost);
+      if (otherIdx >= 0) s.sites[other].splice(otherIdx, 1);
+    });
     setStatus(
       list === "whitelist" ? t("popupWhitelisted", currentHost) : t("popupBlacklisted", currentHost),
       "ok"

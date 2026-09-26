@@ -56,6 +56,9 @@ export interface Settings {
     targetLang: string;
     displayMode: DisplayMode;
     autoTranslate: boolean;
+    /** 源语言自动检测开关（默认 true，设置页未暴露，导入可设 false）：false 时跳过检测，
+     *  上下文源语言置空（LLM 不注入源语言行、免费通道不带 sl/from）。已由 content/engine.ts
+     *  的 translateAll（PageEngine.autoDetectSource 字段）消费 */
     autoDetectSource: boolean;
     minTextLength: number;
     blockMaxChars: number;
@@ -95,6 +98,9 @@ export interface Settings {
   /** 划词朗读（TTS）：气泡「朗读」按钮的声音/语速 */
   tts: TtsSettings;
   security: {
+    /** API Key 落盘混淆开关（默认 true，设置页未暴露，导入可设 false）：false 时
+     *  saveSettings 跳过 encryptApiKey、明文落盘（读取侧 decryptApiKey 对明文幂等）。
+     *  已由 shared/storage.ts 的 saveSettings 消费 */
     encryptApiKey: boolean;
     sensitivePages: boolean;
   };

@@ -28,7 +28,9 @@ interface GoogleTranslationResult {
 }
 
 async function acquireSlot(): Promise<void> {
-  if (activeRequests >= GOOGLE_CONCURRENCY) {
+  // while 而非 if：被唤醒后必须复检——releaseSlot 唤醒 waiter 与新请求抢槽之间存在
+  // microtask 间隙，若不复检，同一槽位会被同时发给被唤醒者与新到来者（在途并发突破上限）
+  while (activeRequests >= GOOGLE_CONCURRENCY) {
     await new Promise<void>((resolve) => waiting.push(resolve));
   }
   activeRequests++;

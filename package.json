@@ -1,6 +1,6 @@
 {
   "name": "auto-translate",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI 沉浸式网页翻译浏览器插件（Edge/Chrome，Manifest V3）",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
-    "lint": "eslint src tests",
+    "lint": "eslint --max-warnings=0 src tests",
     "format": "prettier --write src tests",
     "format:check": "prettier --check src tests",
     "zip": "npm run build && node scripts/zip.mjs"
@@ -27,7 +27,7 @@
     "playwright": "^1.63.0",
     "prettier": "^3.9.6",
     "typescript": "^5.6.3",
-    "vite": "^5.4.19",
+    "vite": "^7.3.6",
     "vitest": "^4.1.10"
   }
 }

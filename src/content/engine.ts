@@ -65,6 +65,8 @@ export class PageEngine {
   private attributesEnabled: boolean;
   /** 强制源语言：空串 = 自动检测（html lang / 启发式） */
   private forceSourceLang: string;
+  /** 源语言自动检测开关：false 时跳过检测（源语言置空，走无 sl/无注入路径），默认 true */
+  private autoDetectSource: boolean;
   private pageContext: TranslationContext | undefined;
   /** 防止自动翻译/可见性/SPA 信号同时触发时重复扫描并重复计数 */
   private translateAllRunning = false;
@@ -87,6 +89,10 @@ export class PageEngine {
 
   // 视口懒翻译状态
   private pendingCount = 0;
+  /** 在途翻译组数：translateUnits 进入请求阶段 +1，收尾（正常/异常）-1。
+   *  afterGroup 据此判断是否还有并发组未完成——并发组交错时先完成的组不能
+   *  按全局 stats 抢先推 done/partial 终态。restore/resetForNavigation 归零。 */
+  private activeGroups = 0;
   private lazyIO: IntersectionObserver | null = null;
   private lazyUnits = new Map<Element, TranslationUnit>();
   private scheduledContainers = new Set<HTMLElement>();
@@ -124,6 +130,7 @@ export class PageEngine {
     this.summaryMinChars = Math.max(0, settings.translate.summaryMinChars ?? 6000);
     this.attributesEnabled = settings.translate.translateAttributes ?? true;
     this.forceSourceLang = settings.translate.forceSourceLang ?? "";
+    this.autoDetectSource = settings.translate.autoDetectSource ?? true;
     this.pageContext = undefined;
 
     // 失败重试：占位里的“重试”按钮
@@ -213,11 +220,15 @@ export class PageEngine {
         ? getPageContext(this.contextMaxChars, this.summaryEnabled ? this.summaryMinChars : 0)
         : undefined;
       this.pageContext = collected?.context;
-      // 源语言检测（html lang / 启发式 / 用户强制）：随上下文带给 background（提示词 + 免费通道参数）
+      // 源语言检测（html lang / 启发式 / 用户强制）：随上下文带给 background（提示词 + 免费通道参数）。
+      // autoDetectSource=false 时跳过检测（源语言置空 → LLM 无源语言注入、免费通道不带 sl/from，
+      // 与检测不出结果的行为一致）；默认 true，行为不变。
       if (this.pageContext) {
         this.pageContext = {
           ...this.pageContext,
-          sourceLang: detectPageSourceLang(this.forceSourceLang, collected?.context.content ?? ""),
+          sourceLang: this.autoDetectSource
+            ? detectPageSourceLang(this.forceSourceLang, collected?.context.content ?? "")
+            : "",
         };
       }
       // LLM 页面摘要（未来方向 P2）：长文页异步补一条文章摘要进上下文。
@@ -263,7 +274,6 @@ export class PageEngine {
       if (this.translateAllQueued) {
         const replayByUser = this.translateAllQueuedByUser;
         this.translateAllQueued = false;
-        this.translateAllQueuedByUser = false;
         this.translateAllQueuedByUser = false;
         // 在途期间用户还原（userRestored）且排队不含显式用户意图 → 放弃重放：
         // 否则「还原」刚点完，旧任务一收尾整页又被译回，还把 userRestored 清零（P0-2）
@@ -450,6 +460,7 @@ export class PageEngine {
     this.unitsByText.clear();
     this.stats = { done: 0, error: 0, total: 0 };
     this.pendingCount = 0;
+    this.activeGroups = 0; // 在途组随代次作废一并清零，防止计数泄漏卡死 afterGroup
     this.translateAllQueued = false;
     this.translateAllQueuedByUser = false;
     this.lazyIO?.disconnect();
@@ -487,6 +498,7 @@ export class PageEngine {
     this.unitsByText.clear();
     this.stats = { done: 0, error: 0, total: 0 };
     this.pendingCount = 0;
+    this.activeGroups = 0; // 在途组随代次作废一并清零，防止计数泄漏卡死 afterGroup
     this.translateAllQueued = false;
     this.translateAllQueuedByUser = false;
     this.lazyIO?.disconnect();
@@ -746,34 +758,51 @@ export class PageEngine {
       );
     };
 
-    for (let i = 0; i < FETCH_WINDOW && pending.length > 0; i++) startNext();
-    while (inFlight.size > 0) {
-      const { id, batch, chunks } = await Promise.race(inFlight.values());
-      inFlight.delete(id);
-      if (gen !== this.generationValue) return; // 期间被还原，丢弃后续结果
-      if (chunks) {
-        await this.renderBatch(batch, chunks, gen, pacer);
-      } else {
-        for (const u of batch.flatMap(([, us]) => us)) {
-          // 撤销守卫与成功路径（renderBatch）同口径：已被还原的段落不显示失败占位、
-          // 不计入失败数——否则「翻译失败 + 点过还原」会把错误条塞回用户刚还原的原文处
-          if (u.container.getAttribute("data-it-processing") !== u.batchToken) continue;
-          this.stats.error++;
-          this.renderer.fail(u);
-          u.container.removeAttribute("data-it-processing");
+    this.activeGroups++; // 本组进入请求阶段：afterGroup 据此识别「仍有并发组在途」
+    try {
+      for (let i = 0; i < FETCH_WINDOW && pending.length > 0; i++) startNext();
+      while (inFlight.size > 0) {
+        const { id, batch, chunks } = await Promise.race(inFlight.values());
+        inFlight.delete(id);
+        if (gen !== this.generationValue) return; // 期间被还原，丢弃后续结果
+        if (chunks) {
+          await this.renderBatch(batch, chunks, gen, pacer);
+        } else {
+          for (const u of batch.flatMap(([, us]) => us)) {
+            // 撤销守卫与成功路径（renderBatch）同口径：已被还原的段落不显示失败占位、
+            // 不计入失败数——否则「翻译失败 + 点过还原」会把错误条塞回用户刚还原的原文处
+            if (u.container.getAttribute("data-it-processing") !== u.batchToken) continue;
+            this.stats.error++;
+            this.renderer.fail(u);
+            u.container.removeAttribute("data-it-processing");
+          }
         }
+        if (gen !== this.generationValue) return;
+        startNext();
       }
-      if (gen !== this.generationValue) return;
-      startNext();
+    } catch (err) {
+      // 渲染/DOM 异常兜底：本函数的所有调用点都是 void fire-and-forget，rejection
+      // 无人接 → pendingCount 不冲减、afterGroup 不执行，state 会永久卡在 translating
+      // （工具条按钮禁用且无恢复路径）。吞掉异常走 finally 收尾，状态机照常收敛。
+      console.error("[auto-translate] translateUnits 异常中断", err);
+    } finally {
+      // 代次已变（restore/resetForNavigation 已把计数清零并接管状态机）：不再收尾，
+      // 否则会把还原后的页面又推回 done/partial。代次未变：按正常路径同一口径冲减。
+      if (gen === this.generationValue) {
+        this.activeGroups = Math.max(0, this.activeGroups - 1);
+        this.pendingCount = Math.max(0, this.pendingCount - units.length);
+        this.afterGroup();
+      }
     }
-
-    this.pendingCount = Math.max(0, this.pendingCount - units.length);
-    this.afterGroup();
   }
 
   /** 完成一组后的状态推进：按结果标记完成/部分失败
-   * （不再因视口外懒翻译未译而卡在 translating，否则工具条“还原”按钮会被永久禁用） */
+   * （不再因视口外懒翻译未译而卡在 translating，否则工具条“还原”按钮会被永久禁用）。
+   *  并发组交错防失真：仍有其他在途组时跳过终态推送——否则先完成的组按全局 stats
+   *  抢先推 done/partial，且全局 error 累计会让早期组的 1 个失败在此后每次都把
+   *  状态钉死为 partial。最后一组完成时才按汇总结果推终态。 */
   private afterGroup(): void {
+    if (this.activeGroups > 0) return; // 仍有在途组：保持 translating，等最后一组收尾
     this.setState(this.stats.error > 0 ? "partial" : "done");
   }
 

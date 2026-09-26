@@ -6,7 +6,8 @@
  * - 跳过我们的 UI、aria-hidden、translate=no、目标语言文本；
  * - 开关关闭时不翻译。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import type { Settings } from "../src/shared/types";
@@ -53,10 +54,7 @@ function mockChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 function makeEngine(settings?: Settings): PageEngine {
@@ -67,6 +65,8 @@ beforeEach(() => {
   mockChrome();
   document.body.innerHTML = "";
 });
+
+afterEach(() => uninstallChromeMock());
 
 describe("HTML 属性翻译", () => {
   it("placeholder / title / alt / aria-label 批量翻译并保存原文", async () => {

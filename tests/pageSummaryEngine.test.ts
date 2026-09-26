@@ -6,6 +6,7 @@
  * - 摘要请求携带截断正文与会话 id（还原/换页可中止）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import { DEFAULT_SETTINGS } from "../src/shared/storage";
@@ -72,10 +73,7 @@ function mockContentChrome(batchGate: Promise<void>, summaryGate: Promise<void>)
     }
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
   return { translateCalls, pageSummaryCalls };
 }
 
@@ -90,6 +88,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallChromeMock();
   vi.unstubAllGlobals();
 });
 

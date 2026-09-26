@@ -9,6 +9,7 @@
  *      见 placement.ts）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import { Toolbar } from "../src/content/toolbar";
@@ -78,6 +79,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallChromeMock();
   vi.restoreAllMocks();
 });
 

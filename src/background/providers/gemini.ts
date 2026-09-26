@@ -1,8 +1,10 @@
-import { ApiError, buildApiUrl, postJson, postSSE, withStreamFallback } from "./http";
+import { ApiError, buildApiUrl, makeDiagnostic, postJson, postSSE, redactSecrets, withStreamFallback } from "./http";
 import type { ChatMessage, ChatOptions, ChatResult, Provider } from "./types";
 
 interface GeminiGenerateContentResponse {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  /** alt=sse 流中途失败时可能以 {"error":{...}} 帧结束流（HTTP 状态仍是 200） */
+  error?: { message?: string };
 }
 
 /** 构造请求体公共部分（system 抽到 system_instruction，其余按 role 映射为 contents） */
@@ -74,8 +76,9 @@ async function chatStream(
   onDelta: (delta: string) => void
 ): Promise<ChatResult> {
   let text = "";
+  const url = buildUrl(options, true);
   const diagnostic = await postSSE(
-    buildUrl(options, true),
+    url,
     authHeaders(options),
     buildBody(messages, options.temperature),
     options.timeoutMs,
@@ -87,6 +90,16 @@ async function chatStream(
         evt = JSON.parse(payload) as GeminiGenerateContentResponse;
       } catch {
         return; // 心跳/注释等非 JSON 负载：跳过
+      }
+      // 200 流内的 error 帧：不检查会在 !Array.isArray(parts) 处被无声吞掉，
+      // 流结束后只报笼统的「流式响应未返回任何文本」；message 可能回显 key，先脱敏
+      if (evt.error?.message) {
+        const headers = authHeaders(options);
+        throw new ApiError(
+          "server",
+          `流式响应返回错误：${redactSecrets(evt.error.message, url, headers)}`,
+          makeDiagnostic("gemini", url, { code: "server" })
+        );
       }
       const parts = evt.candidates?.[0]?.content?.parts;
       if (!Array.isArray(parts)) return;

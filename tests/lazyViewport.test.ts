@@ -5,6 +5,7 @@
  * 否则屏幕外几百个单元会被一次性全量翻译 → 大页面卡死（本 bug 的真实来源）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import type { Settings } from "../src/shared/types";
@@ -41,6 +42,8 @@ function makeSettings(): Settings {
 }
 
 let sendMessage: ReturnType<typeof vi.fn>;
+/** check-cache 的回包 cachedCount（默认 0 = 无缓存 → 懒观察路径）；缓存高命中用例改写它 */
+let cachedCountReply = 0;
 let ioCallback: ((entries: Partial<IntersectionObserverEntry>[], observer: unknown) => void) | null;
 let observedElements: Set<Element>;
 const OriginalIO = globalThis.IntersectionObserver;
@@ -69,17 +72,15 @@ function mockChrome(): void {
     if (msg?.type === "translate") {
       return { id: msg.id, ok: true, results: (msg.texts ?? []).map((t) => `【译】${t}`) };
     }
-    if (msg?.type === "check-cache") return { cachedCount: 0 };
+    if (msg?.type === "check-cache") return { cachedCount: cachedCountReply };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 beforeEach(() => {
   ioCallback = null;
+  cachedCountReply = 0;
   observedElements = new Set();
   (globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
     MockIntersectionObserver;
@@ -93,6 +94,7 @@ beforeEach(() => {
 
 afterEach(() => {
   (globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = OriginalIO;
+  uninstallChromeMock();
   vi.restoreAllMocks();
 });
 
@@ -164,5 +166,46 @@ describe("视口懒翻译 isIntersecting 门控", () => {
     ioCallback!([{ target: paragraphs[1], isIntersecting: true }], {});
     await waitLazyFlush();
     expect(translatedTexts()).toContain("Second paragraph text here.");
+  });
+});
+
+/** 等条件成立（translateAll 对调度链不 await，固定一轮 flush 在高负载下会提前返回） */
+async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+describe("缓存高命中 → 整页直译（跳过懒观察）", () => {
+  it("check-cache 全命中时整页直译：不经 IntersectionObserver 即全部出译文", async () => {
+    // 页面 3 个段落文本互不相同，去重后 sample.length = 3；
+    // cachedCount = 3 → 命中率 1.0 ≥ 0.6（engine.ts 的 scheduleUnits 阈值）→ forceFull
+    cachedCountReply = 3;
+    const engine = new PageEngine(new Renderer("bilingual"), makeSettings());
+    await engine.translateAll();
+    // 等三个段落全部渲染出译文块
+    await waitFor(() => document.querySelectorAll(".it-translated.it-done").length >= 3);
+    await flush();
+
+    // 分支前提：确实抽样询问过缓存命中率
+    expect(sendMessage.mock.calls.some((c) => c[0]?.type === "check-cache")).toBe(true);
+
+    // 整页直译：三条文本一次性全部发出翻译请求（不等进视口）
+    const texts = translatedTexts();
+    expect(texts).toEqual(
+      expect.arrayContaining([
+        "First paragraph text here.",
+        "Second paragraph text here.",
+        "Third paragraph text here.",
+      ])
+    );
+
+    // 与上方懒观察用例对照：cachedCount = 0 时屏外单元只进 observer、不发请求；
+    // 全命中时全程未创建/未注册任何 IntersectionObserver（未走懒观察路径）
+    expect(observedElements.size).toBe(0);
+    expect(ioCallback).toBeNull();
+    expect(engine.state).toBe("done");
   });
 });

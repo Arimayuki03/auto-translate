@@ -2,13 +2,13 @@
 
 # AI 沉浸式网页翻译
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/Arimayuki03/auto-translate/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue)](https://github.com/Arimayuki03/auto-translate/releases)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-4285F4?logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/concepts/mv3-overview)
 [![Chrome](https://img.shields.io/badge/Chrome-109%2B-green?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Edge](https://img.shields.io/badge/Edge-109%2B-green?logo=microsoftedge&logoColor=white)](https://www.microsoft.com/edge)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-516%20passed-brightgreen)](.github/workflows/build.yml)
+[![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Tests](https://img.shields.io/badge/tests-580%20passed-brightgreen)](.github/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-MIT-yellow)](#许可)
 
 **仿沉浸式翻译（Immersive Translate）的浏览器扩展，使用自建 AI API 实现网页双语对照翻译。**
@@ -34,18 +34,19 @@
 
 ### API 与工程化
 
-- **多格式 AI API**：OpenAI 兼容 / Claude / Gemini / Ollama 原生协议，自定义 BaseURL / Key / 模型
+- **多格式 AI API**：OpenAI 兼容 / Claude / Gemini / Ollama 原生协议，自定义 BaseURL / Key / 模型，流内错误自动脱敏
 - **免费通道**：Google / Microsoft 免费翻译通道无需 Key，可作主力或互为备份自动切换
 - **备用 API**：主 API 失败自动切换备用配置，免费通道也可作兜底
 - **译文缓存**：跨会话复用（FNV-1a 校验防碰撞错译），并发限流、失败重试、请求去重
-- **站点黑白名单**：内置排除区 + 用户自定义规则，只翻译想翻译的站点
+- **站点黑白名单**：内置排除区 + 用户自定义规则，支持中文 IDN 域名（如 `豆瓣.com`），只翻译想翻译的站点
 - **SPA 支持**：监听 History API，单页应用路由切换后自动重译
+- **安全存储**：API Key 加密落盘可开关，多面板并发写入互斥队列防丢更新
 
 ## 📦 安装
 
 ### 方式一：下载 Release（推荐普通用户）
 
-1. 从 [Releases](https://github.com/Arimayuki03/auto-translate/releases/latest) 下载最新的 `auto-translate-v1.0.0.zip`
+1. 从 [Releases](https://github.com/Arimayuki03/auto-translate/releases/latest) 下载最新的 `auto-translate-v1.1.0.zip`
 2. 解压到任意目录
 3. 按 [方式二](#方式二手动加载开发者模式) 的步骤加载解压后的目录
 
@@ -118,7 +119,7 @@ npm test           # Vitest 单元测试 + Playwright e2e 冒烟
 │   ├── options/           # 设置页
 │   ├── popup/             # 弹窗（总开关 / 快捷入口）
 │   └── shared/            # 公共类型与工具
-├── tests/                 # Vitest 单测 + Playwright e2e（49 文件 516 用例）
+├── tests/                 # Vitest 单测 + Playwright e2e（55 文件 580 用例）
 ├── scripts/               # 打包脚本
 └── docs/                  # 项目文档
 ```
@@ -142,6 +143,7 @@ npm test           # Vitest 单元测试 + Playwright e2e 冒烟
 - [x] 多格式 AI API（OpenAI 兼容 / Claude / Gemini / Ollama）+ 备用 API
 - [x] 免费 Google / Microsoft 翻译通道
 - [x] 站点黑白名单与 SPA 路由支持
+- [x] 强制源语言开关（关闭后跳过页级语言检测）与 API Key 明文存储开关
 - [ ] Firefox 上架与跨浏览器适配
 - [ ] 译文缓存导出 / 导入
 - [ ] 自定义 prompt 模板（部分已支持，待开放 UI）

@@ -228,11 +228,41 @@ export function normalizeUrlPattern(raw: string): string | null {
     rest = rest.slice(schemeMatch[0].length);
   }
   const slash = rest.indexOf("/");
-  const host = slash === -1 ? rest : rest.slice(0, slash);
+  let host = slash === -1 ? rest : rest.slice(0, slash);
   let path = slash === -1 ? "" : rest.slice(slash);
-  if (!host || host.includes(":") || !/^[a-z0-9.*-]+$/.test(host)) return null;
+  if (!host || host.includes(":")) return null; // 端口与空 host 不支持（有意设计）
+  // IDN 域名（如"豆瓣.com"）：浏览器对页面 URL 的 hostname 自动转 punycode
+  //（xn--klyv21c.com），规则也须同口径归一，否则含非 ASCII 的模式会被字符白名单
+  // 拒绝、规则永不命中且无告警。转换失败（非法 IDN）视为无效模式返回 null。
+  if (/[^\x20-\x7e]/.test(host)) {
+    const ascii = toAsciiHost(host);
+    if (ascii === null) return null; // 非法 IDN：视为无效模式
+    host = ascii;
+  }
+  if (!/^[a-z0-9.*-]+$/.test(host)) return null;
   if (path === "/") path = ""; // host 级模式，任意路径
   return `${host}${path}`;
+}
+
+/**
+ * IDN host 转 punycode：借用 URL 解析器（与浏览器对页面 hostname 的归一口径一致，
+ * `豆瓣.com` → `xn--klyv21c.com`）。host 通配符（*）是本模块的模式语法而非合法域名，
+ * 按 * 拆段逐个转换（`.豆瓣.com` 这类带前导/尾随点的段 URL 可解析且保留点号），再拼回。
+ * 非法 IDN / 转换失败返回 null，调用方按无效模式处理。
+ */
+function toAsciiHost(host: string): string | null {
+  if (!host.includes("*")) return toAsciiLabel(host);
+  const parts = host.split("*").map((seg) => (seg ? toAsciiLabel(seg) : ""));
+  if (parts.some((p) => p === null)) return null;
+  return parts.join("*");
+}
+
+function toAsciiLabel(hostPart: string): string | null {
+  try {
+    return new URL(`http://${hostPart}`).hostname;
+  } catch {
+    return null;
+  }
 }
 
 /** 通配符个数上限：超出视为可疑规则，一律不命中 */

@@ -52,6 +52,7 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 const KEY_SALT = "at-v1:";
+
 /** v2：载荷先按 UTF-8 编码再做字节级 XOR，因此对任意 Unicode Key 都能编码。
  *  v1 是「UTF-16 码元 XOR 后 btoa」，含非 Latin-1 字符时 btoa 抛错 → catch 返回
  *  明文原文，等于把用户的 Key 直接写盘。读取路径仍兼容 v1，下次保存自动升级为 v2。 */
@@ -159,11 +160,49 @@ export async function getSettings(): Promise<Settings> {
 
 export async function saveSettings(settings: Settings): Promise<void> {
   const toStore: Settings = structuredClone(settings);
-  toStore.api.apiKey = encryptApiKey(toStore.api.apiKey);
-  if (toStore.backupApi) {
-    toStore.backupApi.apiKey = encryptApiKey(toStore.backupApi.apiKey);
+  // encryptApiKey=false 时跳过混淆、明文落盘（调试/用户偏好；设置页未暴露，导入可设）。
+  // 读取路径 decryptApiKey 对明文幂等：非 Base64 原样返回；即使恰为合法 Base64 字符集，
+  // 解码结果不匹配 v1/v2 前缀也原样返回——明文读回恒不变。
+  if (toStore.security?.encryptApiKey !== false) {
+    toStore.api.apiKey = encryptApiKey(toStore.api.apiKey);
+    if (toStore.backupApi) {
+      toStore.backupApi.apiKey = encryptApiKey(toStore.backupApi.apiKey);
+    }
   }
   await chrome.storage.local.set({ settings: toStore });
+}
+
+// ===== settings 键的读-改-写互斥队列 =====
+// popup / options / content 各自「getSettings → 就地修改 → saveSettings」之间存在
+// 两个 await 的竞态窗口（如设置页陈旧表单整体落盘回滚 popup 刚加的白名单）。
+// 所有局部修改一律走 updateSettings：写操作链到队尾严格串行，后写者基于先写者落盘后的
+// 最新值再改，先写者的修改不再被覆盖。saveSettings/getSettings 保持导出不变——
+// options 全表单保存语义仍是「表单即真相」，继续直写。
+let settingsQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * settings 键唯一的「读-改-写」入口：把 mutator 串行化到 per-key 队列上执行。
+ * - 执行时读取存储里的**最新**设置（含迁移/解密）作为底座；
+ * - mutator 收到深拷贝（structuredClone），就地修改不会污染队列中后续操作的输入，
+ *   也允许 mutator 内部再 await（期间同 key 的其他写操作只会排队，不会交错读旧值）；
+ * - mutator 抛错时该次修改不落盘、队列继续运转（后续调用不受影响），异常原样抛给调用方；
+ * - resolve 值为最终落盘的 Settings（明文 Key 形态），便于调用方拿最新状态更新 UI。
+ */
+export function updateSettings(mutator: (s: Settings) => void | Promise<void>): Promise<Settings> {
+  const run = async (): Promise<Settings> => {
+    const current = await getSettings();
+    const draft = structuredClone(current);
+    await mutator(draft);
+    await saveSettings(draft);
+    return draft;
+  };
+  const queued = settingsQueue.then(run, run);
+  // 队尾必须永远接一个不 reject 的 promise：某次 mutator 失败不能让后续排队操作饿死
+  settingsQueue = queued.then(
+    () => undefined,
+    () => undefined
+  );
+  return queued;
 }
 
 /** 导出磁盘中的原始设置（API Key 保持加密态，避免导出时泄露明文） */

@@ -337,6 +337,25 @@ function isExcluded(
     chain.push(el);
     el = el.parentElement;
   }
+  // 爬到 body 停止：body / html 自身的 translate="no" / aria-hidden / hidden 也参与判定
+  //（按 Google 翻译约定 <body translate="no"> 整页不翻译）。只查这三项，不复用
+  // isSelfExcluded——那会跑 usesIconFont(body)，body 字体串意外命中图标字体正则
+  // 会把全页误排除。结果缓存到 excludedCache（key = body，每次提取新建缓存，
+  // 同一次提取内所有文本节点只判定一次）。
+  const bodyExcluded = excludedCache.get(document.body);
+  if (bodyExcluded === undefined) {
+    const html = document.documentElement;
+    const topLevelExcluded =
+      document.body.getAttribute("translate") === "no" ||
+      document.body.getAttribute("aria-hidden") === "true" ||
+      document.body.hidden ||
+      (html &&
+        (html.getAttribute("translate") === "no" ||
+          html.getAttribute("aria-hidden") === "true" ||
+          html.hidden));
+    excludedCache.set(document.body, topLevelExcluded === true);
+  }
+  if (excludedCache.get(document.body)) return true;
   // 自最浅祖先向 node 方向逐层累计并写缓存：cum = 自身被排除 || 更上层已被排除
   let cum = ancestorExcluded;
   for (let i = chain.length - 1; i >= 0; i--) {

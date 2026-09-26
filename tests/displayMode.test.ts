@@ -8,6 +8,7 @@
  * 4. 翻译失败的占位块在仅译文模式必须隐藏（不能被 .it-wrap 显示规则顶出来）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { Renderer } from "../src/content/renderer";
 import type { Settings } from "../src/shared/types";
@@ -55,13 +56,13 @@ beforeEach(() => {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
   const start = Date.now();

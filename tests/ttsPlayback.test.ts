@@ -6,7 +6,9 @@
  * - 播放报错时抛出（含 error 字段文案）；
  * - offscreen 被浏览器回收（Receiving end does not exist）→ 重建后重试一次；
  * - 两次都失败则上抛；finally 中 endKeepAlive 保底执行；
- * - ttsStop 转发停止消息，接收端不存在时静默 no-op。
+ * - ttsStop 转发停止消息，接收端不存在时静默 no-op；
+ * - 停止代际：ensureOffscreenDocument 窗口内的 ttsStop 使 ttsPlay 放弃发送（防孤儿播放）；
+ * - 存活信号 Port 断开（handleTtsLivenessDisconnect）：在途播放被停、旧 Port 不误杀新播放。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TtsPlayMessage } from "../src/shared/messages";
@@ -308,5 +310,100 @@ describe("ttsStop", () => {
     const { ttsStop } = await loadModule();
 
     await expect(ttsStop()).rejects.toThrow(/boom/);
+  });
+});
+
+describe("停止代际（stopSeq）：ensureOffscreenDocument 窗口内的停止不再发 it-tts-play", () => {
+  it("ensure 窗口内发生 ttsStop：ttsPlay 直接返回 { finished: false }，不发播放消息", async () => {
+    // createDocument 故意挂起：让 ttsPlay 停在 await ensureOffscreenDocument() 的时序洞里
+    let resolveCreate: () => void = () => undefined;
+    const createDocument = vi.fn(
+      () => new Promise<void>((resolve) => (resolveCreate = resolve))
+    );
+    const sendMessage = vi.fn(async (_msg: unknown) => ({ ok: true, finished: true }));
+    installChrome({ sendMessage, createDocument });
+    const { ttsPlay, ttsStop } = await loadModule();
+
+    const playPromise = ttsPlay(makePlayReq());
+    await vi.waitFor(() => expect(createDocument).toHaveBeenCalled());
+    await ttsStop(); // 窗口内停止：stopSeq 递增
+    resolveCreate();
+    await expect(playPromise).resolves.toEqual({ finished: false });
+    // 全程未发 it-tts-play（孤儿播放被拦截），只发过 it-tts-stop
+    const types = sendMessage.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(types).toEqual(["it-tts-stop"]);
+  });
+
+  it("无停止时行为不变：正常发送并返回 finished", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: true, finished: true }));
+    installChrome({ sendMessage, contexts: [makeContext()] });
+    const { ttsPlay } = await loadModule();
+
+    await expect(ttsPlay(makePlayReq())).resolves.toEqual({ finished: true });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("ensure 窗口内被停止的提前返回：begin/end 仍严格配对，计数不泄漏", async () => {
+    let resolveCreate: () => void = () => undefined;
+    const createDocument = vi.fn(
+      () => new Promise<void>((resolve) => (resolveCreate = resolve))
+    );
+    const sendMessage = vi.fn(async (_msg: unknown) => ({ ok: true, finished: true }));
+    installChrome({ sendMessage, createDocument });
+    beginKeepAliveSpy.mockClear();
+    endKeepAliveSpy.mockClear();
+    const { ttsPlay, ttsStop } = await loadModule();
+
+    const playPromise = ttsPlay(makePlayReq());
+    await vi.waitFor(() => expect(createDocument).toHaveBeenCalled());
+    await ttsStop();
+    resolveCreate();
+    await playPromise;
+    expect(beginKeepAliveSpy).toHaveBeenCalledTimes(1);
+    expect(endKeepAliveSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("存活信号 Port 断开（handleTtsLivenessDisconnect）", () => {
+  it("在途播放的 Port 断开 → 触发 it-tts-stop", async () => {
+    // 播放挂起不回包，模拟播放进行中
+    let resolvePlay: (v: unknown) => void = () => undefined;
+    const sendMessage = vi.fn(async (msg: { type: string }) => {
+      if (msg.type === "it-tts-play") {
+        return new Promise((resolve) => (resolvePlay = resolve));
+      }
+      return { ok: true };
+    });
+    installChrome({ sendMessage, contexts: [makeContext()] });
+    const { ttsPlay, handleTtsLivenessDisconnect } = await loadModule();
+
+    const playPromise = ttsPlay(makePlayReq());
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    handleTtsLivenessDisconnect("req-1");
+    await vi.waitFor(() =>
+      expect(sendMessage).toHaveBeenCalledWith({ type: "it-tts-stop" })
+    );
+    resolvePlay({ ok: true, finished: false });
+    await playPromise;
+  });
+
+  it("未知 requestId（旧播放已被新播放顶替）断开 → 不发 it-tts-stop，不误杀新播放", async () => {
+    const sendMessage = vi.fn(async () => new Promise(() => undefined)); // 永不回包
+    installChrome({ sendMessage, contexts: [makeContext()] });
+    const { ttsPlay, handleTtsLivenessDisconnect } = await loadModule();
+
+    void ttsPlay(makePlayReq()); // 占住在途登记：requestId = req-1
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    handleTtsLivenessDisconnect("req-stale"); // 旧播放的 Port 迟到断开
+    expect(sendMessage).toHaveBeenCalledTimes(1); // 未发 it-tts-stop
+  });
+
+  it("无在途播放时断开 → 静默 no-op，不抛错", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: true }));
+    installChrome({ sendMessage });
+    const { handleTtsLivenessDisconnect } = await loadModule();
+
+    expect(() => handleTtsLivenessDisconnect("req-none")).not.toThrow();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });

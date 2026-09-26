@@ -5,6 +5,7 @@
  * 请求不应携带旧上下文（下次 translateAll 会按新页重新计算）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installChromeMock, uninstallChromeMock } from "./helpers/chromeMock";
 import { PageEngine } from "../src/content/engine";
 import { PageObserver } from "../src/content/observer";
 import { Renderer } from "../src/content/renderer";
@@ -57,10 +58,7 @@ function mockChrome(): void {
     if (msg?.type === "check-cache") return { cachedCount: 0 };
     return undefined;
   });
-  (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { sendMessage },
-    storage: { local: { get: vi.fn(async () => ({})), set: vi.fn(async () => undefined) } },
-  } as unknown as typeof chrome;
+  installChromeMock({ extra: { runtime: { sendMessage } } });
 }
 
 /** 收集所有 translate 请求携带的 context */
@@ -75,7 +73,10 @@ beforeEach(() => {
   mockChrome();
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  uninstallChromeMock();
+  vi.restoreAllMocks();
+});
 
 /** 轮询等待条件成立：提取/调度是多层异步链（chunked 提取按时间片让出），
  *  固定轮数的 flush 在系统高负载下会提前返回，造成偶发失败 */
